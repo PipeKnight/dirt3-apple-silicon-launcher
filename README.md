@@ -4,9 +4,10 @@ Compatibility experiments for the original Feral Mac release. The test input is 
 local installation of the game. This repository contains the probe, source
 patches for the compatibility runtime, and reproducible findings.
 
-**Status** — the patched mac32 completes the game's static initializers and
-reaches `NSApplicationMain` on Apple Silicon with macOS 15.7.7. Playability
-still requires an in-game menu and an offline race.
+**Status** — on Apple Silicon with macOS 15.7.7, the patched game reaches
+AppKit, creates a shared OpenGL/OpenCL context and an OpenCL command queue,
+and proceeds through XML initialization to Apple Event registration. The
+in-game menu and an offline race remain unverified.
 
 ## Inspect the installed copy
 

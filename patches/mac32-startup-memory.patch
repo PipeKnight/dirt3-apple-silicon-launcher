@@ -1,25 +1,109 @@
 diff --git a/Makefile b/Makefile
-index 4c16e9d..415e674 100644
+index 4c16e9d..b6b24c1 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -2,10 +2,10 @@
+@@ -2,11 +2,11 @@
  CC = clang
  CFLAGS = -arch x86_64 -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations \
           -DGL_SILENCE_DEPRECATION -Wno-missing-field-initializers
 -LDFLAGS = -arch x86_64 -liconv -lz -framework Foundation -framework AppKit -framework Carbon \
+-          -framework IOKit -framework OpenGL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
 +LDFLAGS = -arch x86_64 -lffi -lcurl -liconv -lz -framework Foundation -framework AppKit -framework Carbon \
-           -framework IOKit -framework OpenGL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
++          -framework IOKit -framework OpenGL -framework OpenCL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
            -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
 -SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/format.c \
+-      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/cg_thunks.c src/cf_thunks.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
 +SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c \
-       src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/cg_thunks.c src/cf_thunks.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
++      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
  OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
  
+ all: mac32 guest app
 diff --git a/src/apple.m b/src/apple.m
-index 47c00de..2930b28 100644
+index 47c00de..c118227 100644
 --- a/src/apple.m
 +++ b/src/apple.m
-@@ -239,6 +239,32 @@ static void t_CFStringFind(uint32_t *args, struct hres *r)
+@@ -9,7 +9,9 @@
+ #import <ImageIO/ImageIO.h>
+ #import <CFNetwork/CFNetwork.h>
+ #import <SystemConfiguration/SystemConfiguration.h>
++#include <Security/SecRandom.h>
+ #include "thunks.h"
++#include <pthread.h>
+ 
+ // Boolean / OSErr results: the host leaves junk above the low byte/half
+ static int w_CFBooleanGetValue(CFBooleanRef b) { return CFBooleanGetValue(b) ? 1 : 0; }
+@@ -114,6 +116,62 @@ static void t_CFUserNotificationDisplayAlert(uint32_t *args, struct hres *r)
+ 	RET(0);
+ }
+ 
++struct display_callback {
++	g32 function, context;
++	struct display_callback *next;
++};
++static pthread_mutex_t display_callbacks_lock = PTHREAD_MUTEX_INITIALIZER;
++static struct display_callback *display_callbacks;
++
++static void display_changed(CGDirectDisplayID display, CGDisplayChangeSummaryFlags flags, void *context)
++{
++	const struct display_callback *callback = context;
++	gcall(callback->function, 3, display, flags, callback->context);
++}
++
++static CGError w_CGDisplayRegisterReconfigurationCallback(g32 function, g32 context)
++{
++	if (!function) return kCGErrorIllegalArgument;
++	pthread_mutex_lock(&display_callbacks_lock);
++	for (struct display_callback *it = display_callbacks; it; it = it->next) {
++		if (it->function == function && it->context == context) {
++			pthread_mutex_unlock(&display_callbacks_lock);
++			return kCGErrorSuccess;
++		}
++	}
++	struct display_callback *callback = malloc(sizeof *callback);
++	if (!callback) {
++		pthread_mutex_unlock(&display_callbacks_lock);
++		return kCGErrorFailure;
++	}
++	*callback = (struct display_callback){ function, context, display_callbacks };
++	CGError status = CGDisplayRegisterReconfigurationCallback(display_changed, callback);
++	if (!status) display_callbacks = callback;
++	else free(callback);
++	pthread_mutex_unlock(&display_callbacks_lock);
++	return status;
++}
++
++static CGError w_CGDisplayRemoveReconfigurationCallback(g32 function, g32 context)
++{
++	pthread_mutex_lock(&display_callbacks_lock);
++	struct display_callback **slot = &display_callbacks;
++	for (; *slot; slot = &(*slot)->next) {
++		struct display_callback *callback = *slot;
++		if (callback->function == function && callback->context == context) {
++			CGError status = CGDisplayRemoveReconfigurationCallback(display_changed, callback);
++			if (!status) {
++				*slot = callback->next;
++				free(callback);
++			}
++			pthread_mutex_unlock(&display_callbacks_lock);
++			return status;
++		}
++	}
++	pthread_mutex_unlock(&display_callbacks_lock);
++	return kCGErrorIllegalArgument;
++}
++
+ // CGL: object out-parameters become handles
+ static void t_CGLChoosePixelFormat(uint32_t *args, struct hres *r)
+ {
+@@ -181,6 +239,7 @@ static void t_CGDisplayCurrentMode(uint32_t *args, struct hres *r)
+ 	RET(hobj_wrap((void *)d));
+ }
+ 
++static void init_sec_random_default(g32 a) { *(g32 *)G2H(a) = hobj_wrap((void *)kSecRandomDefault); }
+ static void init_zero(g32 a) { *(uint32_t *)G2H(a) = 0; }
+ 
+ // ---- more CoreFoundation ----------------------------------------------------------
+@@ -239,6 +298,32 @@ static void t_CFStringFind(uint32_t *args, struct hres *r)
  	CFRange rg = CFStringFind(hobj_unwrap(A(0)), hobj_unwrap(A(1)), A(2));
  	r->rax = (uint32_t)rg.location | (uint64_t)(uint32_t)rg.length << 32;
  }
@@ -52,7 +136,104 @@ index 47c00de..2930b28 100644
  static void t_CFStringGetBytes(uint32_t *args, struct hres *r)
  {
  	// str, CFRange (2 words), enc, lossByte, isExternal, buf, maxLen, *usedLen
-@@ -319,6 +345,21 @@ static void t_ff_none(uint32_t *args, struct hres *r) { (void)args; RET(0x800400
+@@ -277,6 +362,96 @@ static void t_CFArrayApplyFunction(uint32_t *args, struct hres *r)
+ 	for (uint32_t i = A(1); i < A(1) + A(2); i++)
+ 		gcall(A(3), 2, hobj_wrap((void *)CFArrayGetValueAtIndex(a, i)), A(4));
+ }
++struct dict_applier { g32 function, context; };
++
++static void call_cf_dictionary_applier(const void *key, const void *value, void *opaque)
++{
++	const struct dict_applier *applier = opaque;
++	gcall(applier->function, 3, hobj_wrap((void *)key), hobj_wrap((void *)value), applier->context);
++}
++
++static void t_CFDictionaryApplyFunction(uint32_t *args, struct hres *r)
++{
++	struct dict_applier applier = { A(1), A(2) };
++	CFDictionaryApplyFunction(hobj_unwrap(A(0)), call_cf_dictionary_applier, &applier);
++}
++struct tree_applier { g32 function, context; };
++static void call_cf_tree_applier(const void *child, void *opaque)
++{
++	const struct tree_applier *applier = opaque;
++	gcall(applier->function, 2, hobj_wrap((void *)child), applier->context);
++}
++
++static void t_CFTreeApplyFunctionToChildren(uint32_t *args, struct hres *r)
++{
++	struct tree_applier applier = { A(1), A(2) };
++	CFTreeApplyFunctionToChildren(hobj_unwrap(A(0)), call_cf_tree_applier, &applier);
++}
++
++struct xml_element32 { g32 attributes, order; uint8_t empty, padding[3]; };
++
++static void t_CFXMLNodeGetInfoPtr(uint32_t *args, struct hres *r)
++{
++	CFXMLNodeRef node = hobj_unwrap(A(0));
++	const void *info = CFXMLNodeGetInfoPtr(node);
++	g32 result = 0;
++	if (info) switch (CFXMLNodeGetTypeCode(node)) {
++	case kCFXMLNodeTypeElement: {
++		const CFXMLElementInfo *host = info;
++		g32 attributes = hobj_wrap((void *)host->attributes);
++		result = hobj_wrap_block((void *)info, sizeof(struct xml_element32), attributes);
++		*(struct xml_element32 *)G2H(result) = (struct xml_element32){
++			attributes, hobj_wrap((void *)host->attributeOrder), host->isEmpty, {0}
++		};
++		break;
++	}
++	case kCFXMLNodeTypeDocument: {
++		const CFXMLDocumentInfo *host = info;
++		result = hobj_wrap_block((void *)info, sizeof(struct xml_element32), hobj_wrap((void *)host->sourceURL));
++		((uint32_t *)G2H(result))[1] = host->encoding;
++		break;
++	}
++	case kCFXMLNodeTypeProcessingInstruction: {
++		const CFXMLProcessingInstructionInfo *host = info;
++		result = hobj_wrap_block((void *)info, sizeof(struct xml_element32), hobj_wrap((void *)host->dataString));
++		break;
++	}
++	default:
++		break;
++	}
++	RET(result);
++}
++
++static void t_CFXMLNodeCreate(uint32_t *args, struct hres *r)
++{
++	const uint32_t *guest = G2H(A(3));
++	CFXMLElementInfo element;
++	CFXMLDocumentInfo document;
++	CFXMLProcessingInstructionInfo instruction;
++	const void *info = NULL;
++	if (guest) switch (A(1)) {
++	case kCFXMLNodeTypeElement: {
++		const struct xml_element32 *fields = (const void *)guest;
++		element = (CFXMLElementInfo){ hobj_unwrap(fields->attributes), hobj_unwrap(fields->order), fields->empty, {0} };
++		info = &element;
++		break;
++	}
++	case kCFXMLNodeTypeDocument:
++		document = (CFXMLDocumentInfo){ hobj_unwrap(guest[0]), guest[1] };
++		info = &document;
++		break;
++	case kCFXMLNodeTypeProcessingInstruction:
++		instruction = (CFXMLProcessingInstructionInfo){ hobj_unwrap(guest[0]) };
++		info = &instruction;
++		break;
++	default:
++		RET(0);
++		return;
++	}
++	RET(hobj_wrap((void *)CFXMLNodeCreate(hobj_unwrap(A(0)), A(1),
++		hobj_unwrap(A(2)), info, (int32_t)A(4))));
++}
++
+ // CFUUIDBytes is 16 bytes: passed by value (4 words), returned through a hidden pointer
+ static void t_CFUUIDGetConstantUUIDWithBytes(uint32_t *args, struct hres *r)
+ {
+@@ -319,6 +494,21 @@ static void t_ff_none(uint32_t *args, struct hres *r) { (void)args; RET(0x800400
  static int w_CFEqual(CFTypeRef a, CFTypeRef b) { return CFEqual(a, b) ? 1 : 0; }
  static CFURLRef w_CFURLCreateWithBytes(CFAllocatorRef a, const UInt8 *b, int32_t n, uint32_t enc, CFURLRef base)
  { return CFURLCreateWithBytes(a, b, n, enc, base); }
@@ -74,7 +255,27 @@ index 47c00de..2930b28 100644
  static void t_CFStringCreateWithFormat(uint32_t *args, struct hres *r)
  {
  	// alloc, formatOptions, format, ...: %@ handled by our formatter
-@@ -383,6 +424,8 @@ static struct hfn apple[] = {
+@@ -352,6 +542,9 @@ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
+ static int w_CGLSetCurrentContext(CGLContextObj c) { if (c) gl_last_context = c; return CGLSetCurrentContext(c); }
+ 
+ static struct hfn apple[] = {
++	G("_SecRandomCopyBytes", SecRandomCopyBytes, "i:oup"),
++	D("_kSecRandomDefault", 4, init_sec_random_default),
++
+ 	// CoreFoundation
+ 	G("_CFArrayGetCount", w_CFArrayGetCount, "i:o"),
+ 	G("_CFArrayGetValueAtIndex", w_CFArrayGetValueAtIndex, "o:oi"),
+@@ -376,6 +569,9 @@ static struct hfn apple[] = {
+ 	G("_CFDictionarySetValue", CFDictionarySetValue, "v:ooo"), G("_CFDictionaryAddValue", CFDictionaryAddValue, "v:ooo"),
+ 	G("_CFDictionaryRemoveValue", CFDictionaryRemoveValue, "v:oo"),
+ 	G("_CFDictionaryGetCount", w_CFDictionaryGetCount, "i:o"),
++	R("_CFDictionaryApplyFunction", t_CFDictionaryApplyFunction),
++	R("_CFTreeApplyFunctionToChildren", t_CFTreeApplyFunctionToChildren),
++	R("_CFXMLNodeGetInfoPtr", t_CFXMLNodeGetInfoPtr), R("_CFXMLNodeCreate", t_CFXMLNodeCreate),
+ 	G("_CFDictionaryContainsKey", w_CFDictionaryContainsKey, "i:oo"),
+ 	G("_CFArrayAppendValue", CFArrayAppendValue, "v:oo"),
+ 	G("_CFStringCompare", w_CFStringCompare, "i:oou"),
+@@ -383,6 +579,8 @@ static struct hfn apple[] = {
  	G("_CFCharacterSetIsCharacterMember", w_CFCharacterSetIsCharacterMember, "i:ou"),
  	G("_CFCharacterSetIsLongCharacterMember", w_CFCharacterSetIsLongCharacterMember, "i:ou"),
  	G("_CFDataCreate", w_CFDataCreate, "o:opi"),
@@ -83,7 +284,7 @@ index 47c00de..2930b28 100644
  	R("_CFStringFind", t_CFStringFind), R("_CFStringGetBytes", t_CFStringGetBytes),
  	G("_CFStringCreateWithBytes", w_CFStringCreateWithBytes, "o:opiuu"),
  	G("_CFStringCreateWithCharacters", w_CFStringCreateWithCharacters, "o:opi"),
-@@ -416,6 +459,7 @@ static struct hfn apple[] = {
+@@ -416,6 +614,7 @@ static struct hfn apple[] = {
  	G("_CFUUIDCreate", CFUUIDCreate, "o:o"), G("_CFUUIDCreateString", CFUUIDCreateString, "o:oo"),
  	G("_CFEqual", w_CFEqual, "i:oo"),
  	R("_CFStringCreateWithFormat", t_CFStringCreateWithFormat),
@@ -91,8 +292,26 @@ index 47c00de..2930b28 100644
  	G("_CFURLCreateWithBytes", w_CFURLCreateWithBytes, "o:opiuo"),
  	R("_CGDisplayBounds", t_CGDisplayBounds),
  	R("_CFArrayApplyFunction", t_CFArrayApplyFunction),
+@@ -461,6 +660,8 @@ static struct hfn apple[] = {
+ 	G("_CGDisplayPixelsHigh", w_CGDisplayPixelsHigh, "u:u"),
+ 	G("_CGDisplayPixelsWide", w_CGDisplayPixelsWide, "u:u"),
+ 	G("_CGMainDisplayID", CGMainDisplayID, "u:"),
++	G("_CGDisplayRegisterReconfigurationCallback", w_CGDisplayRegisterReconfigurationCallback, "i:uu"),
++	G("_CGDisplayRemoveReconfigurationCallback", w_CGDisplayRemoveReconfigurationCallback, "i:uu"),
+ 	G("_CGDisplayIOServicePort", CGDisplayIOServicePort, "u:u"),
+ 	G("_CGSetDisplayTransferByTable", CGSetDisplayTransferByTable, "i:uuppp"),
+ 	G("_CGImageSourceCreateWithURL", CGImageSourceCreateWithURL, "o:oo"),
+@@ -488,6 +689,8 @@ static struct hfn apple[] = {
+ 	R("_CGLCreateContext", t_CGLCreateContext),
+ 	R("_CGLQueryRendererInfo", t_CGLQueryRendererInfo),
+ 	G("_CGLDestroyContext", CGLDestroyContext, "i:o"),
++	G("_CGLClearDrawable", CGLClearDrawable, "i:o"),
++	G("_CGLGetShareGroup", CGLGetShareGroup, "o:o"),
+ 	G("_CGLDestroyPixelFormat", CGLDestroyPixelFormat, "i:o"),
+ 	G("_CGLDestroyRendererInfo", CGLDestroyRendererInfo, "i:o"),
+ 	G("_CGLSetCurrentContext", w_CGLSetCurrentContext, "i:o"),
 diff --git a/src/apple2.m b/src/apple2.m
-index acdd903..9328663 100644
+index acdd903..53fa4c8 100644
 --- a/src/apple2.m
 +++ b/src/apple2.m
 @@ -10,12 +10,121 @@
@@ -217,7 +436,23 @@ index acdd903..9328663 100644
  static void t_CFDictionaryGetValueIfPresent(uint32_t *args, struct hres *r)
  {
  	const void *v = NULL;
-@@ -296,7 +405,9 @@ static struct hfn apple2_fns[] = {
+@@ -215,6 +324,15 @@ static uint32_t w_KBGetLayoutType(int t) { return KBGetLayoutType((SInt16)t); }
+ static uint32_t w_LMGetKbdType(void) { return LMGetKbdType(); }
+ 
+ // ---- AppKit and Launch Services ---------------------------------------------------------
++static void t_LSCopyDisplayNameForURL(uint32_t *args, struct hres *r)
++{
++	if (!A(1)) { RET(paramErr); return; }
++	CFStringRef name = NULL;
++	OSStatus status = LSCopyDisplayNameForURL(hobj_unwrap(A(0)), &name);
++	if (!status) U32(A(1)) = hobj_wrap((void *)name);
++	RET(status);
++}
++
+ static void t_LSOpenCFURLRef(uint32_t *args, struct hres *r)
+ {
+ 	if (A(1)) U32(A(1)) = 0;
+@@ -296,7 +414,9 @@ static struct hfn apple2_fns[] = {
  	G("_CFRunLoopStop", CFRunLoopStop, "v:o"), G("_CFRunLoopWakeUp", CFRunLoopWakeUp, "v:o"),
  	D("_kCFRunLoopDefaultMode", 4, init_rlmode), D("_kCFRunLoopCommonModes", 4, init_rlcommon),
  	G("_CFRunLoopRemoveSource", CFRunLoopRemoveSource, "v:ooo"),
@@ -227,19 +462,425 @@ index acdd903..9328663 100644
  	// a real event tap needs the Accessibility permission, which mac32 does not
  	// have: return no tap, as macOS does (SDL copes; VLC 1.1's media keys assert).
  	// MAC32_FAKE_EVENT_TAP=1 hands out a port that never fires instead.
+@@ -374,7 +494,7 @@ static struct hfn apple2_fns[] = {
+ 	R("_UCKeyTranslate", t_UCKeyTranslate),
+ 	G("_KBGetLayoutType", w_KBGetLayoutType, "u:i"), G("_LMGetKbdType", w_LMGetKbdType, "u:"),
+ 
+-	D("_kUTTypeFileURL", 4, init_utfileurl), R("_LSOpenCFURLRef", t_LSOpenCFURLRef), R("_NSMouseInRect", t_NSMouseInRect), R("_NSRectFill", t_NSRectFill),
++	D("_kUTTypeFileURL", 4, init_utfileurl), R("_LSOpenCFURLRef", t_LSOpenCFURLRef), R("_LSCopyDisplayNameForURL", t_LSCopyDisplayNameForURL), R("_NSMouseInRect", t_NSMouseInRect), R("_NSRectFill", t_NSRectFill),
+ 	G("_NSSearchPathForDirectoriesInDomains", w_NSSearchPathForDirectoriesInDomains, "o:uui"),
+ 
+ 	R("_Microseconds", t_Microseconds), R("_NSUnLinkModule", t_one), R("_WaitNextEvent", t_zero),
+diff --git a/src/audio.c b/src/audio.c
+index 9dad843..0d59d21 100644
+--- a/src/audio.c
++++ b/src/audio.c
+@@ -14,6 +14,7 @@
+ #include <string.h>
+ #include <pthread.h>
+ #include <stdlib.h>
++#include <stdbool.h>
+ 
+ enum { B_CAP = 0, B_DATA = 4, B_SIZE = 8, B_USER = 12, B_DCAP = 16, B_DESCS = 20, B_DCOUNT = 24, B_HOST = 28 };
+ #define W(g, off) (*(uint32_t *)G2H((g) + (off)))
+@@ -485,7 +486,146 @@ static OSStatus w_MusicDeviceMIDIEvent(AudioUnit u, uint32_t st, uint32_t d1, ui
+ static OSStatus w_MusicDeviceSysEx(AudioUnit u, const UInt8 *p, uint32_t n) { return MusicDeviceSysEx(u, p, n); }
+ #pragma clang diagnostic pop
+ 
++struct guest_audio_file {
++	AudioFileID file;
++	g32 context, read, write, get_size, set_size;
++};
++
++static OSStatus audio_file_transfer(struct guest_audio_file *file, g32 callback, SInt64 position,
++	UInt32 count, void *buffer, UInt32 *actual, bool write)
++{
++	if (!count) {
++		*actual = 0;
++		return noErr;
++	}
++	if (count > UINT32_MAX - 16) return kAudioFileUnspecifiedError;
++	g32 scratch = gmalloc(count + 4);
++	if (!scratch) return kAudioFileUnspecifiedError;
++	g32 data = scratch + 4;
++	W(scratch, 0) = 0;
++	if (write) memcpy(G2H(data), buffer, count);
++	uint64_t offset = (uint64_t)position;
++	OSStatus status = (OSStatus)gcall(callback, 6, file->context, (uint32_t)offset,
++		(uint32_t)(offset >> 32), count, data, scratch);
++	UInt32 transferred = W(scratch, 0);
++	if (transferred <= count) {
++		*actual = transferred;
++		if (!write) memcpy(buffer, G2H(data), transferred);
++	} else {
++		*actual = 0;
++		status = kAudioFileUnspecifiedError;
++	}
++	gfree(scratch);
++	return status;
++}
++
++static OSStatus audio_file_read(void *context, SInt64 position, UInt32 count, void *buffer, UInt32 *actual)
++{
++	struct guest_audio_file *file = context;
++	return audio_file_transfer(file, file->read, position, count, buffer, actual, false);
++}
++
++static OSStatus audio_file_write(void *context, SInt64 position, UInt32 count, const void *buffer, UInt32 *actual)
++{
++	struct guest_audio_file *file = context;
++	return audio_file_transfer(file, file->write, position, count, (void *)buffer, actual, true);
++}
++
++static SInt64 audio_file_get_size(void *context)
++{
++	struct guest_audio_file *file = context;
++	return (SInt64)gcall(file->get_size, 1, file->context);
++}
++
++static OSStatus audio_file_set_size(void *context, SInt64 size)
++{
++	struct guest_audio_file *file = context;
++	return (OSStatus)gcall(file->set_size, 3, file->context, (uint32_t)size, (uint32_t)((uint64_t)size >> 32));
++}
++
++static void t_AudioFileOpenWithCallbacks(uint32_t *args, struct hres *r)
++{
++	if (!A(1) || !A(3) || !A(6)) { RET(kAudioFileUnspecifiedError); return; }
++	struct guest_audio_file *file = calloc(1, sizeof *file);
++	if (!file) { RET(kAudioFileUnspecifiedError); return; }
++	file->context = A(0);
++	file->read = A(1);
++	file->write = A(2);
++	file->get_size = A(3);
++	file->set_size = A(4);
++	OSStatus status = AudioFileOpenWithCallbacks(file, audio_file_read,
++		file->write ? audio_file_write : NULL, audio_file_get_size,
++		file->set_size ? audio_file_set_size : NULL, A(5), &file->file);
++	if (status) free(file);
++	else W(A(6), 0) = hobj_wrap(file);
++	RET(status);
++}
++
++static OSStatus w_AudioFileClose(struct guest_audio_file *file)
++{
++	if (!file) return kAudioFileNotOpenError;
++	OSStatus status = AudioFileClose(file->file);
++	free(file);
++	return status;
++}
++
++static void t_ExtAudioFileWrapAudioFileID(uint32_t *args, struct hres *r)
++{
++	struct guest_audio_file *file = hobj_unwrap(A(0));
++	if (!file || !A(2)) { RET(kAudioFileNotOpenError); return; }
++	ExtAudioFileRef ext = NULL;
++	OSStatus status = ExtAudioFileWrapAudioFileID(file->file, A(1) != 0, &ext);
++	if (!status) W(A(2), 0) = hobj_wrap(ext);
++	RET(status);
++}
++
++static OSStatus w_ExtAudioFileGetProperty(ExtAudioFileRef ext, uint32_t property, UInt32 *size, void *out)
++{
++	switch (property) {
++	case kExtAudioFileProperty_FileDataFormat:
++	case kExtAudioFileProperty_ClientDataFormat:
++	case kExtAudioFileProperty_FileLengthFrames:
++		return ExtAudioFileGetProperty(ext, property, size, out);
++	default:
++		return kExtAudioFileError_InvalidProperty;
++	}
++}
++
++static OSStatus w_ExtAudioFileSetProperty(ExtAudioFileRef ext, uint32_t property, uint32_t size, const void *value)
++{
++	if (property != kExtAudioFileProperty_ClientDataFormat) return kExtAudioFileError_InvalidProperty;
++	return ExtAudioFileSetProperty(ext, property, size, value);
++}
++
++static void t_ExtAudioFileRead(uint32_t *args, struct hres *r)
++{
++	if (!A(1) || !A(2)) { RET(kExtAudioFileError_InvalidOperationOrder); return; }
++	g32 buffers = A(2);
++	UInt32 count = W(buffers, 0);
++	AudioBufferList *list = calloc(1, offsetof(AudioBufferList, mBuffers) + count * sizeof(AudioBuffer));
++	if (!list) { RET(kAudioFileUnspecifiedError); return; }
++	list->mNumberBuffers = count;
++	for (UInt32 i = 0; i < count; i++) {
++		g32 entry = buffers + 4 + i * 12;
++		list->mBuffers[i] = (AudioBuffer){ W(entry, 0), W(entry, 4), G2H(W(entry, 8)) };
++	}
++	OSStatus status = ExtAudioFileRead(hobj_unwrap(A(0)), G2H(A(1)), list);
++	if (!status) {
++		for (UInt32 i = 0; i < count; i++)
++			W(buffers + 4 + i * 12, 4) = list->mBuffers[i].mDataByteSize;
++	}
++	free(list);
++	RET(status);
++}
++
+ static struct hfn au[] = {
++	R("_AudioFileOpenWithCallbacks", t_AudioFileOpenWithCallbacks),
++	G("_AudioFileClose", w_AudioFileClose, "i:o"),
++	R("_ExtAudioFileWrapAudioFileID", t_ExtAudioFileWrapAudioFileID),
++	G("_ExtAudioFileDispose", ExtAudioFileDispose, "i:o"),
++	G("_ExtAudioFileGetProperty", w_ExtAudioFileGetProperty, "i:oupp"),
++	G("_ExtAudioFileSetProperty", w_ExtAudioFileSetProperty, "i:ouup"),
++	R("_ExtAudioFileRead", t_ExtAudioFileRead),
+ 	R("_AudioQueueNewOutput", t_AudioQueueNewOutput),
+ 	R("_AudioConverterNew", t_AudioConverterNew), G("_AudioConverterDispose", w_AudioConverterDispose, "i:o"),
+ 	G("_AudioConverterReset", w_AudioConverterReset, "i:o"),
+diff --git a/src/cf_streams.c b/src/cf_streams.c
+new file mode 100644
+index 0000000..e724caa
+--- /dev/null
++++ b/src/cf_streams.c
+@@ -0,0 +1,198 @@
++// CoreFoundation streams and CFNetwork HTTP messages. Stream contexts
++// contain i386 callbacks and are owned for as long as CF keeps the client.
++#include "thunks.h"
++#include <CFNetwork/CFNetwork.h>
++#include <stdatomic.h>
++#include <string.h>
++
++struct stream_client32 { uint32_t version; g32 info, retain, release, description; };
++struct stream_client {
++	struct stream_client32 guest;
++	g32 callback;
++	atomic_uint references;
++};
++
++static void *retain_client(void *context)
++{
++	struct stream_client *client = (void *)context;
++	if (client->guest.retain)
++		client->guest.info = (g32)gcall(client->guest.retain, 1, client->guest.info);
++	atomic_fetch_add_explicit(&client->references, 1, memory_order_relaxed);
++	return client;
++}
++
++static void drop_client(struct stream_client *client)
++{
++	if (atomic_fetch_sub_explicit(&client->references, 1, memory_order_acq_rel) == 1)
++		free(client);
++}
++
++static void release_client(void *context)
++{
++	struct stream_client *client = (void *)context;
++	if (client->guest.release) gcall(client->guest.release, 1, client->guest.info);
++	drop_client(client);
++}
++
++static CFStringRef describe_client(void *context)
++{
++	const struct stream_client *client = context;
++	return hobj_unwrap((g32)gcall(client->guest.description, 1, client->guest.info));
++}
++
++static void notify(void *stream, CFStreamEventType type, const struct stream_client *client)
++{
++	gcall(client->callback, 3, hobj_wrap(stream), (uint32_t)type, client->guest.info);
++}
++
++static void notify_reader(CFReadStreamRef stream, CFStreamEventType type, void *context)
++{
++	notify(stream, type, context);
++}
++
++static void notify_writer(CFWriteStreamRef stream, CFStreamEventType type, void *context)
++{
++	notify(stream, type, context);
++}
++
++static struct stream_client *make_client(g32 callback, const struct stream_client32 *guest)
++{
++	if (guest && guest->version != 0) return NULL;
++	struct stream_client *client = calloc(1, sizeof *client);
++	if (!client) return NULL;
++	if (guest) client->guest = *guest;
++	client->callback = callback;
++	atomic_init(&client->references, 1);
++	return client;
++}
++
++static Boolean set_client(g32 stream, uint32_t flags, g32 callback, const struct stream_client32 *guest, int write)
++{
++	void *native = hobj_unwrap(stream);
++	if (!callback || !flags)
++		return write ? CFWriteStreamSetClient(native, flags, NULL, NULL)
++			: CFReadStreamSetClient(native, flags, NULL, NULL);
++	struct stream_client *client = make_client(callback, guest);
++	if (!client) return false;
++	CFStreamClientContext ctx = {
++		.version = 0, .info = client, .retain = retain_client, .release = release_client,
++		.copyDescription = client->guest.description ? describe_client : NULL,
++	};
++	Boolean ok = write ? CFWriteStreamSetClient(native, flags, notify_writer, &ctx)
++		: CFReadStreamSetClient(native, flags, notify_reader, &ctx);
++	drop_client(client);
++	return ok;
++}
++
++static void t_CFReadStreamSetClient(uint32_t *args, struct hres *r)
++{
++	RET(set_client(A(0), A(1), A(2), G2H(A(3)), 0));
++}
++
++static void t_CFWriteStreamSetClient(uint32_t *args, struct hres *r)
++{
++	RET(set_client(A(0), A(1), A(2), G2H(A(3)), 1));
++}
++
++static void t_CFStreamCreatePairWithSocketToHost(uint32_t *args, struct hres *r)
++{
++	CFReadStreamRef read = NULL;
++	CFWriteStreamRef write = NULL;
++	CFStreamCreatePairWithSocketToHost(hobj_unwrap(A(0)), hobj_unwrap(A(1)), A(2),
++		A(3) ? &read : NULL, A(4) ? &write : NULL);
++	if (A(3)) *(g32 *)G2H(A(3)) = hobj_wrap(read);
++	if (A(4)) *(g32 *)G2H(A(4)) = hobj_wrap(write);
++}
++
++static void t_CFStreamCreatePairWithSocketToNetService(uint32_t *args, struct hres *r)
++{
++	CFReadStreamRef read = NULL;
++	CFWriteStreamRef write = NULL;
++	CFStreamCreatePairWithSocketToNetService(hobj_unwrap(A(0)), hobj_unwrap(A(1)),
++		A(2) ? &read : NULL, A(3) ? &write : NULL);
++	if (A(2)) *(g32 *)G2H(A(2)) = hobj_wrap(read);
++	if (A(3)) *(g32 *)G2H(A(3)) = hobj_wrap(write);
++}
++
++static const void *retain_timer(const void *info) { return retain_client((void *)info); }
++static void release_timer(const void *info) { release_client((void *)info); }
++static CFStringRef describe_timer(const void *info) { return describe_client((void *)info); }
++
++static void notify_timer(CFRunLoopTimerRef timer, void *context)
++{
++	const struct stream_client *client = context;
++	gcall(client->callback, 2, hobj_wrap(timer), client->guest.info);
++}
++
++static void t_CFRunLoopTimerCreate(uint32_t *args, struct hres *r)
++{
++	struct stream_client *client = A(7) ? make_client(A(7), G2H(A(8))) : NULL;
++	if (!client) { RET(0); return; }
++	CFAbsoluteTime fire_date;
++	CFTimeInterval interval;
++	memcpy(&fire_date, args + 1, sizeof fire_date);
++	memcpy(&interval, args + 3, sizeof interval);
++	CFRunLoopTimerContext context = {
++		.version = 0, .info = client, .retain = retain_timer, .release = release_timer,
++		.copyDescription = client->guest.description ? describe_timer : NULL,
++	};
++	CFRunLoopTimerRef timer = CFRunLoopTimerCreate(hobj_unwrap(A(0)), fire_date, interval,
++		A(5), (int32_t)A(6), notify_timer, &context);
++	drop_client(client);
++	RET(hobj_wrap(timer));
++}
++
++static void t_CFRunLoopTimerGetContext(uint32_t *args, struct hres *r)
++{
++	struct stream_client32 *out = G2H(A(1));
++	if (!out || out->version) return;
++	CFRunLoopTimerContext context = { .version = 0 };
++	CFRunLoopTimerGetContext(hobj_unwrap(A(0)), &context);
++	if (context.retain == retain_timer && context.info) {
++		struct stream_client *client = context.info;
++		*out = client->guest;
++	} else {
++		*out = (struct stream_client32){0};
++	}
++}
++
++static struct hfn stream_entries[] = {
++	R("_CFRunLoopTimerCreate", t_CFRunLoopTimerCreate),
++	R("_CFRunLoopTimerGetContext", t_CFRunLoopTimerGetContext),
++	G("_CFRunLoopAddTimer", CFRunLoopAddTimer, "v:ooo"),
++	G("_CFRunLoopRemoveTimer", CFRunLoopRemoveTimer, "v:ooo"),
++	G("_CFRunLoopGetNextTimerFireDate", CFRunLoopGetNextTimerFireDate, "d:oo"),
++	G("_CFHTTPMessageCreateRequest", CFHTTPMessageCreateRequest, "o:oooo"),
++	G("_CFHTTPMessageAppendBytes", CFHTTPMessageAppendBytes, "b:opi"),
++	G("_CFHTTPMessageCopyAllHeaderFields", CFHTTPMessageCopyAllHeaderFields, "o:o"),
++	G("_CFHTTPMessageCopyBody", CFHTTPMessageCopyBody, "o:o"),
++	G("_CFHTTPMessageGetResponseStatusCode", CFHTTPMessageGetResponseStatusCode, "i:o"),
++	G("_CFHTTPMessageSetBody", CFHTTPMessageSetBody, "v:oo"),
++	G("_CFHTTPMessageSetHeaderFieldValue", CFHTTPMessageSetHeaderFieldValue, "v:ooo"),
++	G("_CFReadStreamCreateForHTTPRequest", CFReadStreamCreateForHTTPRequest, "o:oo"),
++	G("_CFReadStreamCreateWithFile", CFReadStreamCreateWithFile, "o:oo"),
++	G("_CFReadStreamOpen", CFReadStreamOpen, "b:o"),
++	G("_CFReadStreamRead", CFReadStreamRead, "i:opi"),
++	G("_CFReadStreamClose", CFReadStreamClose, "v:o"),
++	G("_CFReadStreamCopyProperty", CFReadStreamCopyProperty, "o:oo"),
++	G("_CFReadStreamHasBytesAvailable", CFReadStreamHasBytesAvailable, "b:o"),
++	G("_CFReadStreamScheduleWithRunLoop", CFReadStreamScheduleWithRunLoop, "v:ooo"),
++	G("_CFReadStreamUnscheduleFromRunLoop", CFReadStreamUnscheduleFromRunLoop, "v:ooo"),
++	G("_CFReadStreamSetProperty", CFReadStreamSetProperty, "b:ooo"),
++	R("_CFReadStreamSetClient", t_CFReadStreamSetClient),
++	G("_CFWriteStreamCanAcceptBytes", CFWriteStreamCanAcceptBytes, "b:o"),
++	G("_CFWriteStreamClose", CFWriteStreamClose, "v:o"),
++	G("_CFWriteStreamCopyError", CFWriteStreamCopyError, "o:o"),
++	G("_CFWriteStreamCreateWithFile", CFWriteStreamCreateWithFile, "o:oo"),
++	G("_CFWriteStreamGetStatus", CFWriteStreamGetStatus, "i:o"),
++	G("_CFWriteStreamOpen", CFWriteStreamOpen, "b:o"),
++	G("_CFWriteStreamScheduleWithRunLoop", CFWriteStreamScheduleWithRunLoop, "v:ooo"),
++	G("_CFWriteStreamUnscheduleFromRunLoop", CFWriteStreamUnscheduleFromRunLoop, "v:ooo"),
++	G("_CFWriteStreamSetProperty", CFWriteStreamSetProperty, "b:ooo"),
++	G("_CFWriteStreamWrite", CFWriteStreamWrite, "i:opi"),
++	R("_CFWriteStreamSetClient", t_CFWriteStreamSetClient),
++	R("_CFStreamCreatePairWithSocketToHost", t_CFStreamCreatePairWithSocketToHost),
++	R("_CFStreamCreatePairWithSocketToNetService", t_CFStreamCreatePairWithSocketToNetService),
++};
++
++void thunks_cf_streams_init(void) { REGISTER(stream_entries); }
+diff --git a/src/cpu.c b/src/cpu.c
+index c608c55..cfe5950 100644
+--- a/src/cpu.c
++++ b/src/cpu.c
+@@ -60,6 +60,15 @@ static void crash(int sig, siginfo_t *si, void *ucv)
+ 		fprintf(stderr, "  stack pointer: ");
+ 		low_describe((g32)uc->uc_mcontext->__ss.__rsp);
+ 	}
++	if (ip < LOW_END) {
++		g32 sp = (g32)uc->uc_mcontext->__ss.__rsp;
++		for (unsigned i = 0; i < 8 && sp > LOW_START && sp < LOW_END; i++, sp += 4) {
++			g32 word, offset;
++			if (!safe_read32(sp, &word)) break;
++			const char *name = macho_addr_name(word, &offset);
++			if (name) fprintf(stderr, "  stack[%u] %08x %s+%#x\n", i, word, name, offset);
++		}
++	}
+ 	fprintf(stderr, "  eax %08llx ebx %08llx ecx %08llx edx %08llx\n",
+ 		uc->uc_mcontext->__ss.__rax & 0xffffffff, uc->uc_mcontext->__ss.__rbx & 0xffffffff,
+ 		uc->uc_mcontext->__ss.__rcx & 0xffffffff, uc->uc_mcontext->__ss.__rdx & 0xffffffff);
 diff --git a/src/legacy.m b/src/legacy.m
-index 484efa9..15ec7be 100644
+index 484efa9..909a94a 100644
 --- a/src/legacy.m
 +++ b/src/legacy.m
-@@ -7,6 +7,7 @@
+@@ -6,7 +6,9 @@
+ #import <QuartzCore/QuartzCore.h>
  #import <objc/runtime.h>
  #include <zlib.h>
++#include <dlfcn.h>
  #include <pthread.h>
 +#include <ffi/ffi.h>
  #include <langinfo.h>
  #include <mach-o/arch.h>
  #include <xlocale.h>
-@@ -614,6 +615,18 @@ static void t_dyld_get_image_name(uint32_t *args, struct hres *r)
+@@ -186,6 +188,11 @@ static CFURLRef w_CFURLCreateFromFileSystemRepresentation(void *a, const uint8_t
+ 	(void)a;
+ 	return CFURLCreateFromFileSystemRepresentation(NULL, p, n, (dir & 0xff) != 0);
+ }
++static int w_FindFolder(int32_t volume, uint32_t folder, uint32_t create, int16_t *out_volume, int32_t *out_directory)
++{
++	return FindFolder((FSVolumeRefNum)volume, folder, create != 0, out_volume, out_directory);
++}
++
+ static int w_CFURLGetFSRef(CFURLRef u, FSRef *ref) { return CFURLGetFSRef(u, ref); }
+ static int w_FSRefMakePath(const FSRef *ref, uint8_t *p, uint32_t max) { return FSRefMakePath(ref, p, max); }
+ static int w_FSCompareFSRefs(const FSRef *a, const FSRef *b) { return FSCompareFSRefs(a, b); }
+@@ -614,6 +621,18 @@ static void t_dyld_get_image_name(uint32_t *args, struct hres *r)
  	RET(names[A(0)]);
  }
  static uint32_t w_dyld_get_image_header(uint32_t i) { return macho_image_header(i); }
@@ -258,7 +899,7 @@ index 484efa9..15ec7be 100644
  static int32_t w_dyld_get_image_vmaddr_slide(uint32_t i) { return macho_image_slide(i); }
  static int w_shm_open(const char *n, int fl, int mode) { return shm_open(n, fl, mode); }
  static int w_shm_unlink(const char *n) { return shm_unlink(n); }
-@@ -682,6 +695,80 @@ static void t_InstallEventHandler(uint32_t *args, struct hres *r)
+@@ -682,6 +701,86 @@ static void t_InstallEventHandler(uint32_t *args, struct hres *r)
  	if (A(5)) U32(A(5)) = hobj_wrap(ref);
  	RET(rc);
  }
@@ -336,10 +977,16 @@ index 484efa9..15ec7be 100644
 +	RET(status);
 +}
 +
++static OSStatus w_InstallStandardEventHandler(EventTargetRef target)
++{
++	OSStatus (*install)(EventTargetRef) = dlsym(RTLD_DEFAULT, "InstallStandardEventHandler");
++	return install ? install(target) : eventNotHandledErr;
++}
++
  static EventTargetRef w_GetApplicationEventTarget(void) { return GetApplicationEventTarget(); }
  static EventQueueRef w_GetMainEventQueue(void) { return GetMainEventQueue(); }
  static uint32_t w_GetEventClass(EventRef e) { return GetEventClass(e); }
-@@ -693,16 +780,158 @@ static void t_GetEventParameter(uint32_t *args, struct hres *r)
+@@ -693,25 +792,177 @@ static void t_GetEventParameter(uint32_t *args, struct hres *r)
  {
  	ByteCount n = 0;
  	EventParamType t = 0;
@@ -501,9 +1148,12 @@ index 484efa9..15ec7be 100644
  
  static struct hfn legacy_fns[] = {
  	R("_tcgetattr", t_tcgetattr), R("_tcsetattr", t_tcsetattr),
-@@ -710,8 +939,15 @@ static struct hfn legacy_fns[] = {
+ 	R("_fstatvfs", t_fstatvfs), R("_statvfs", t_statvfs),
  	R("_NewEventHandlerUPP", t_upp_identity), R("_DisposeEventHandlerUPP", t_nothing),
  	R("_InstallEventHandler", t_InstallEventHandler),
++	G("_InstallStandardEventHandler", w_InstallStandardEventHandler, "i:o"),
++	G("_GetEventDispatcherTarget", GetEventDispatcherTarget, "o:"),
++	G("_SendEventToEventTarget", SendEventToEventTarget, "i:oo"),
  	G("_GetApplicationEventTarget", w_GetApplicationEventTarget, "o:"), G("_GetMainEventQueue", w_GetMainEventQueue, "o:"),
 +	R("_HIObjectCreate", t_HIObjectCreate), R("_HIObjectRegisterSubclass", t_HIObjectRegisterSubclass),
 +	G("_HIObjectCopyClassID", HIObjectCopyClassID, "o:o"),
@@ -517,7 +1167,7 @@ index 484efa9..15ec7be 100644
  	G("_GetFrontProcess", w_GetFrontProcess, "i:p"), G("_SameProcess", w_SameProcess, "i:ppp"),
  	G("_ProcessInformationCopyDictionary", w_ProcessInformationCopyDictionary, "o:pu"),
  	R("_GetEventParameter", t_GetEventParameter), G("_SetEventParameter", w_SetEventParameter, "i:ouuup"),
-@@ -755,6 +991,9 @@ static struct hfn legacy_fns[] = {
+@@ -755,6 +1006,9 @@ static struct hfn legacy_fns[] = {
  	G("__dyld_image_count", w_dyld_image_count, "u:"), R("__dyld_get_image_name", t_dyld_get_image_name),
  	G("__dyld_get_image_header", w_dyld_get_image_header, "u:u"),
  	G("__dyld_get_image_vmaddr_slide", w_dyld_get_image_vmaddr_slide, "i:u"),
@@ -527,6 +1177,214 @@ index 484efa9..15ec7be 100644
  	R("_libiconv_set_relocation_prefix", t_libiconv_set_relocation_prefix),
  	G("_shm_open", w_shm_open, "i:pii"), G("_shm_unlink", w_shm_unlink, "i:p"),
  	G("_sigwait", w_sigwait, "i:pp"), G("_sigwait$UNIX2003", w_sigwait, "i:pp"),
+@@ -777,6 +1031,7 @@ static struct hfn legacy_fns[] = {
+ 	G("_CFURLCreateFromFileSystemRepresentation", w_CFURLCreateFromFileSystemRepresentation, "o:ppii"),
+ 	G("_CFURLGetFSRef", w_CFURLGetFSRef, "b:op"), G("_FSRefMakePath", w_FSRefMakePath, "i:ppu"),
+ 	G("_FSCompareFSRefs", w_FSCompareFSRefs, "i:pp"),
++	G("_FindFolder", w_FindFolder, "i:iuupp"),
+ 	G("_CGBitmapContextCreateImage", w_CGBitmapContextCreateImage, "o:o"), G("_CGImageRelease", w_CGImageRelease, "v:o"),
+ 	G("_CGContextSetInterpolationQuality", w_CGContextSetInterpolationQuality, "v:oi"),
+ 	R("_CGDataProviderCreateWithData", t_CGDataProviderCreateWithData),
+diff --git a/src/legacy_crypto.c b/src/legacy_crypto.c
+new file mode 100644
+index 0000000..82445a9
+--- /dev/null
++++ b/src/legacy_crypto.c
+@@ -0,0 +1,194 @@
++// OpenSSL 0.9.8 guest objects, backed by the system libcrypto. The guest
++// can write the public modulus and exponent into its old RSA structure.
++#include "thunks.h"
++#include <dlfcn.h>
++#include <pthread.h>
++#include <stdbool.h>
++#include <string.h>
++#include <os/lock.h>
++
++struct bignum;
++struct rsa;
++struct rsa32 {
++	uint32_t prefix[4];
++	g32 modulus, exponent;
++};
++_Static_assert(offsetof(struct rsa32, modulus) == 16, "i386 OpenSSL 0.9.8 RSA modulus offset");
++
++static struct {
++	void *library;
++	struct bignum *(*bn_from_bytes)(const void *, int, struct bignum *);
++	struct bignum *(*bn_dup)(const struct bignum *);
++	void (*bn_free)(struct bignum *);
++	struct rsa *(*rsa_new)(void);
++	void (*rsa_free)(struct rsa *);
++	int (*rsa_set_key)(struct rsa *, struct bignum *, struct bignum *, struct bignum *);
++	int (*rsa_verify)(int, const void *, unsigned, const void *, unsigned, struct rsa *);
++	unsigned char *(*digest)(const void *, size_t, unsigned char *);
++	int (*digest_init)(void *);
++	int (*digest_update)(void *, const void *, size_t);
++	int (*digest_final)(unsigned char *, void *);
++	int ready;
++} crypto;
++
++static pthread_once_t load_once = PTHREAD_ONCE_INIT;
++static os_unfair_lock allocator_lock = OS_UNFAIR_LOCK_INIT;
++static g32 alloc_callback, free_callback;
++static bool allocation_started;
++
++static void load_crypto(void)
++{
++	crypto.library = dlopen("/usr/lib/libcrypto.46.dylib", RTLD_LAZY | RTLD_LOCAL | RTLD_FIRST);
++	if (!crypto.library)
++		crypto.library = dlopen("/usr/lib/libcrypto.44.dylib", RTLD_LAZY | RTLD_LOCAL | RTLD_FIRST);
++	if (!crypto.library) return;
++#define LOAD(member, symbol) do { \
++	crypto.member = dlsym(crypto.library, symbol); \
++	if (!crypto.member) return; \
++} while (0)
++	LOAD(bn_from_bytes, "BN_bin2bn");
++	LOAD(bn_dup, "BN_dup");
++	LOAD(bn_free, "BN_free");
++	LOAD(rsa_new, "RSA_new");
++	LOAD(rsa_free, "RSA_free");
++	LOAD(rsa_set_key, "RSA_set0_key");
++	LOAD(rsa_verify, "RSA_verify");
++	LOAD(digest, "RIPEMD160");
++	LOAD(digest_init, "RIPEMD160_Init");
++	LOAD(digest_update, "RIPEMD160_Update");
++	LOAD(digest_final, "RIPEMD160_Final");
++#undef LOAD
++	crypto.ready = 1;
++}
++
++static bool available(void)
++{
++	pthread_once(&load_once, load_crypto);
++	return crypto.ready;
++}
++
++static int set_guest_memory_functions(g32 allocate, g32 reallocate, g32 release)
++{
++	if (!allocate || !reallocate || !release || !available()) return 0;
++	os_unfair_lock_lock(&allocator_lock);
++	bool changed = !allocation_started;
++	if (changed) {
++		alloc_callback = allocate;
++		free_callback = release;
++	}
++	os_unfair_lock_unlock(&allocator_lock);
++	return changed;
++}
++
++static g32 crypto_alloc(uint32_t n)
++{
++	os_unfair_lock_lock(&allocator_lock);
++	allocation_started = true;
++	g32 function = alloc_callback;
++	os_unfair_lock_unlock(&allocator_lock);
++	g32 address = function ? (g32)gcall(function, 1, n) : gmalloc(n);
++	if (address) memset(G2H(address), 0, n);
++	return address;
++}
++
++static void crypto_free(g32 address)
++{
++	if (!address) return;
++	if (free_callback) gcall(free_callback, 1, address);
++	else gfree(address);
++}
++
++static struct bignum *native_bn(g32 guest)
++{
++	struct bignum *number = NULL;
++	if (guest) memcpy(&number, G2H(guest), sizeof number);
++	return number;
++}
++
++static g32 w_BN_bin2bn(const void *bytes, int32_t count, g32 existing)
++{
++	if (count < 0 || !available()) return 0;
++	g32 guest = existing ? existing : crypto_alloc(sizeof(struct bignum *));
++	if (!guest) return 0;
++	struct bignum *number = crypto.bn_from_bytes(bytes, count, native_bn(guest));
++	if (!number) {
++		if (!existing) crypto_free(guest);
++		return 0;
++	}
++	memcpy(G2H(guest), &number, sizeof number);
++	return guest;
++}
++
++static g32 w_RSA_new(void)
++{
++	return available() ? crypto_alloc(sizeof(struct rsa32)) : 0;
++}
++
++static void free_bn(g32 guest)
++{
++	if (!guest) return;
++	crypto.bn_free(native_bn(guest));
++	crypto_free(guest);
++}
++
++static void w_RSA_free(g32 address)
++{
++	if (!address) return;
++	const struct rsa32 *guest = G2H(address);
++	free_bn(guest->modulus);
++	if (guest->exponent != guest->modulus) free_bn(guest->exponent);
++	crypto_free(address);
++}
++
++static int w_RSA_verify(int32_t type, const void *digest, uint32_t digest_length,
++	const void *signature, uint32_t signature_length, const struct rsa32 *guest)
++{
++	if (!available() || !guest || !guest->modulus || !guest->exponent) return 0;
++	struct bignum *n = crypto.bn_dup(native_bn(guest->modulus));
++	struct bignum *e = crypto.bn_dup(native_bn(guest->exponent));
++	struct rsa *key = crypto.rsa_new();
++	int valid = 0;
++	if (key && n && e && crypto.rsa_set_key(key, n, e, NULL))
++		valid = crypto.rsa_verify(type, digest, digest_length, signature, signature_length, key);
++	else {
++		crypto.bn_free(n);
++		crypto.bn_free(e);
++	}
++	crypto.rsa_free(key);
++	return valid;
++}
++
++// RIPEMD160_CTX uses 24 uint32_t fields in both libcrypto versions.
++static g32 w_RIPEMD160(const void *data, uint32_t size, unsigned char *output)
++{
++	if (!available()) return 0;
++	static __thread g32 scratch;
++	if (!output) {
++		if (!scratch) scratch = gmalloc(20);
++		output = G2H(scratch);
++	}
++	return H2G(crypto.digest(data, size, output));
++}
++
++static int w_RIPEMD160_Init(void *ctx) { return available() && crypto.digest_init(ctx); }
++static int w_RIPEMD160_Update(void *ctx, const void *data, uint32_t size)
++{
++	return available() && crypto.digest_update(ctx, data, size);
++}
++static int w_RIPEMD160_Final(unsigned char *digest, void *ctx)
++{
++	return available() && crypto.digest_final(digest, ctx);
++}
++
++static struct hfn crypto_entries[] = {
++	G("_CRYPTO_set_mem_functions", set_guest_memory_functions, "i:uuu"),
++	G("_BN_bin2bn", w_BN_bin2bn, "u:piu"),
++	G("_RSA_new", w_RSA_new, "u:"), G("_RSA_free", w_RSA_free, "v:u"),
++	G("_RSA_verify", w_RSA_verify, "i:ipupup"),
++	G("_RIPEMD160", w_RIPEMD160, "u:pup"),
++	G("_RIPEMD160_Init", w_RIPEMD160_Init, "i:p"),
++	G("_RIPEMD160_Update", w_RIPEMD160_Update, "i:ppu"),
++	G("_RIPEMD160_Final", w_RIPEMD160_Final, "i:pp"),
++};
++
++void thunks_legacy_crypto_init(void) { REGISTER(crypto_entries); }
 diff --git a/src/libc.c b/src/libc.c
 index 8f40938..4c329a9 100644
 --- a/src/libc.c
@@ -565,7 +1423,7 @@ index 8f40938..4c329a9 100644
  	G("_memcpy", memcpy, "p:ppu"),
  	G("_memmove", memmove, "p:ppu"),
 diff --git a/src/libc3.c b/src/libc3.c
-index 7437c1d..dbc8170 100644
+index 7437c1d..4b807f5 100644
 --- a/src/libc3.c
 +++ b/src/libc3.c
 @@ -12,6 +12,7 @@
@@ -651,7 +1509,7 @@ index 7437c1d..dbc8170 100644
  	G("_socket", socket, "i:iii"), G("_bind", bind, "i:ipu"), G("_connect", connect, "i:ipu"),
  	G("_listen", listen, "i:ii"), G("_accept", accept, "i:ipp"),
  	G("_send", w_send, "i:ipui"), G("_recv", w_recv, "i:ipui"),
-@@ -704,12 +750,20 @@ static struct hfn libc3[] = {
+@@ -704,12 +750,19 @@ static struct hfn libc3[] = {
  	G("_strcoll", strcoll, "i:pp"), R("_localeconv", t_localeconv),
  	// audio units: src/audio.c; pulling samples out of a unit is not bridged
  	R("_AudioUnitRender", t_audio_err),
@@ -669,9 +1527,9 @@ index 7437c1d..dbc8170 100644
 +	R("_curl_easy_init", t_noop0), R("_curl_easy_cleanup", t_noop0), R("_curl_easy_reset", t_noop0),
  	R("_curl_easy_setopt", t_curl_fail), R("_curl_easy_perform", t_curl_fail), R("_curl_easy_getinfo", t_curl_fail),
  	// Carbon event/window calls: the Cocoa launcher drives events, so report "no events"
- 	R("_ReceiveNextEvent", t_event_timeout), R("_GetEventDispatcherTarget", t_noop0),
+-	R("_ReceiveNextEvent", t_event_timeout), R("_GetEventDispatcherTarget", t_noop0),
 -	R("_SendEventToEventTarget", t_noop0), R("_ReleaseEvent", t_noop0),
-+	R("_SendEventToEventTarget", t_noop0),
++	R("_ReceiveNextEvent", t_event_timeout),
  	R("_ConvertEventRefToEventRecord", t_noop0), R("_AEProcessAppleEvent", t_noop0),
  	R("_ShowWindow", t_noop0), R("_CollapseWindow", t_noop0), R("_SetUserFocusWindow", t_noop0),
  	R("_InvalWindowRect", t_noop0),
@@ -759,7 +1617,7 @@ index f643f3f..4a9ae57 100644
  	gfree(p);
  	return q;
 diff --git a/src/mac32.h b/src/mac32.h
-index cd3d5fb..8d8275e 100644
+index cd3d5fb..d9ffacd 100644
 --- a/src/mac32.h
 +++ b/src/mac32.h
 @@ -22,6 +22,7 @@ void low_commit(g32 addr, uint32_t len, int prot);	// map fixed, zeroed
@@ -778,7 +1636,15 @@ index cd3d5fb..8d8275e 100644
  g32 gstrdup(const char *s);
  
  // cpu.c: mode switching and host calls.
-@@ -78,6 +80,8 @@ const uint8_t *macho_file_bytes(struct image *img, size_t *n);	// its i386 slice
+@@ -62,6 +64,7 @@ const char *hostcall_name(uint32_t idx);
+ // Each host object gets one small guest block; the same object always maps
+ // to the same block. Guest-class instances keep their 32-bit ivars there.
+ g32 hobj_wrap(void *h);
++g32 hobj_wrap_block(void *h, uint32_t size, g32 first_word);
+ void *hobj_unwrap(g32 g);
+ g32 guest_cstr(const char *s);	// copy into a recycled guest buffer
+ 
+@@ -78,6 +81,8 @@ const uint8_t *macho_file_bytes(struct image *img, size_t *n);	// its i386 slice
  uint32_t macho_image_count(void);			// dyld's image list, main program first
  const char *macho_image_name(uint32_t i);
  g32 macho_image_header(uint32_t i);
@@ -1112,6 +1978,401 @@ index 0000000..4129d89
 +	register_zone(builtin);
 +	REGISTER(entries);
 +}
+diff --git a/src/objc.m b/src/objc.m
+index f53ca50..d14916d 100644
+--- a/src/objc.m
++++ b/src/objc.m
+@@ -1647,6 +1647,14 @@ static void t_dispatch_sync(uint32_t *args, struct hres *r)
+ 	g32 b = A(1);
+ 	dispatch_sync(host_queue(A(0)), ^{ gcall(U32(b + 12), 1, b); });
+ }
++static void t_CFRunLoopPerformBlock(uint32_t *args, struct hres *r)
++{
++	g32 b = block_copy(A(2));
++	CFRunLoopPerformBlock(hobj_unwrap(A(0)), hobj_unwrap(A(1)), ^{
++		gcall(U32(b + 12), 1, b);
++		block_release(b);
++	});
++}
+ static void t_dispatch_get_main_queue(uint32_t *args, struct hres *r) { (void)args; RET(main_q); }
+ 
+ // ---- AppKit / Foundation constants ------------------------------------------------
+@@ -1671,6 +1679,7 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
+ 
+ static struct hfn objc_fns[] = {
+ 	R("_NSApplicationMain", t_NSApplicationMain),
++	G("_NSApplicationLoad", NSApplicationLoad, "b:"),
+ 	R("_objc_msgSend", t_msgSend), R("_objc_msgSend_stret", t_msgSend_stret),
+ 	R("_objc_msgSend_fpret", t_msgSend_fpret), R("_objc_msgSendSuper", t_msgSendSuper),
+ 	R("_objc_msgSendSuper_stret", t_msgSendSuper_stret),
+@@ -1694,6 +1703,7 @@ static struct hfn objc_fns[] = {
+ 	R("__Block_copy", t_Block_copy), R("__Block_release", t_Block_release),
+ 	D("__dispatch_main_q", 128, init_main_q), R("_dispatch_get_main_queue", t_dispatch_get_main_queue),
+ 	R("_dispatch_async", t_dispatch_async), R("_dispatch_sync", t_dispatch_sync),
++	R("_CFRunLoopPerformBlock", t_CFRunLoopPerformBlock),
+ 	NSC(NSApplicationDidBecomeActiveNotification), NSC(NSApplicationDidHideNotification),
+ 	NSC(NSApplicationDidUnhideNotification), NSC(NSApplicationWillUnhideNotification), NSC(NSBackingPropertyOldScaleFactorKey),
+ 	NSC(NSCurrentLocaleDidChangeNotification), NSC(NSDeviceRGBColorSpace),
+diff --git a/src/opencl_bridge.c b/src/opencl_bridge.c
+new file mode 100644
+index 0000000..bcbede9
+--- /dev/null
++++ b/src/opencl_bridge.c
+@@ -0,0 +1,354 @@
++// OpenCL 1.x uses pointer-sized properties and opaque device and context
++// handles. Translate those at the i386 boundary.
++#include "thunks.h"
++#include <OpenCL/opencl.h>
++#include <OpenCL/cl_gl_ext.h>
++#include <os/lock.h>
++#include <string.h>
++
++static void w_cl_log(const char *error, const void *private_info, uint32_t size, void *context)
++{
++	clLogMessagesToStdoutAPPLE(error, private_info, size, context);
++}
++
++static void t_clCreateContextFromType(uint32_t *args, struct hres *r)
++{
++	const g32 *guest = G2H(A(0));
++	cl_context_properties options[9] = {0};
++	cl_int error = CL_SUCCESS;
++	if (guest) {
++		size_t i = 0;
++		for (; guest[0] && i < 8; guest += 2, i += 2) {
++			options[i] = guest[0];
++			switch (guest[0]) {
++			case CL_CONTEXT_PROPERTY_USE_CGL_SHAREGROUP_APPLE:
++			case CL_CONTEXT_PLATFORM:
++				options[i + 1] = (cl_context_properties)hobj_unwrap(guest[1]);
++				break;
++			case CL_CONTEXT_INTEROP_USER_SYNC:
++				options[i + 1] = guest[1];
++				break;
++			default:
++				error = CL_INVALID_PROPERTY;
++			}
++		}
++		if (i == 8 && guest[0]) error = CL_INVALID_PROPERTY;
++	}
++	void (*notify)(const char *, const void *, size_t, void *) = NULL;
++	if (A(3)) {
++		if (A(3) == host_lookup("_clLogMessagesToStdoutAPPLE"))
++			notify = clLogMessagesToStdoutAPPLE;
++		else
++			error = CL_INVALID_VALUE;
++	}
++	cl_context context = NULL;
++	if (!error)
++		context = clCreateContextFromType(A(0) ? options : NULL,
++			A(1) | (uint64_t)A(2) << 32, notify, G2H(A(4)), &error);
++	if (A(5)) *(cl_int *)G2H(A(5)) = error;
++	LOG("OpenCL: clCreateContextFromType status %d\n", error);
++	RET(hobj_wrap(context));
++}
++
++static void t_clGetContextInfo(uint32_t *args, struct hres *r)
++{
++	cl_context context = hobj_unwrap(A(0));
++	size_t size = 0;
++	cl_int error;
++	switch (A(1)) {
++	case CL_CONTEXT_DEVICES: {
++		error = clGetContextInfo(context, A(1), 0, NULL, &size);
++		if (error) { RET(error); return; }
++		size_t count = size / sizeof(cl_device_id);
++		if (A(3)) {
++			if (A(2) < count * sizeof(g32)) { RET(CL_INVALID_VALUE); return; }
++			cl_device_id *devices = malloc(size);
++			if (!devices) { RET(CL_OUT_OF_HOST_MEMORY); return; }
++			error = clGetContextInfo(context, A(1), size, devices, NULL);
++			if (!error) {
++				g32 *out = G2H(A(3));
++				for (size_t i = 0; i < count; i++) out[i] = hobj_wrap(devices[i]);
++			}
++			free(devices);
++		}
++		size = count * sizeof(g32);
++		break;
++	}
++	case CL_CONTEXT_REFERENCE_COUNT:
++	case CL_CONTEXT_NUM_DEVICES:
++		error = clGetContextInfo(context, A(1), A(2), G2H(A(3)), &size);
++		break;
++	default:
++		RET(CL_INVALID_VALUE);
++		return;
++	}
++	if (!error && A(4)) *(uint32_t *)G2H(A(4)) = (uint32_t)size;
++	RET(error);
++}
++
++struct kernel_handle { g32 guest; void *native; struct kernel_handle *next; };
++static struct kernel_handle *kernel_handles;
++static os_unfair_lock handles_lock = OS_UNFAIR_LOCK_INIT;
++
++static g32 remember_kernel_handle(void *native)
++{
++	if (!native) return 0;
++	g32 guest = hobj_wrap(native);
++	struct kernel_handle *entry = malloc(sizeof *entry);
++	if (!entry) die("OpenCL: cannot record a kernel argument handle");
++	os_unfair_lock_lock(&handles_lock);
++	*entry = (struct kernel_handle){ guest, native, kernel_handles };
++	kernel_handles = entry;
++	os_unfair_lock_unlock(&handles_lock);
++	return guest;
++}
++
++static void forget_kernel_handle(g32 guest)
++{
++	os_unfair_lock_lock(&handles_lock);
++	for (struct kernel_handle **slot = &kernel_handles; *slot; slot = &(*slot)->next) {
++		struct kernel_handle *entry = *slot;
++		if (entry->guest == guest) {
++			*slot = entry->next;
++			free(entry);
++			break;
++		}
++	}
++	os_unfair_lock_unlock(&handles_lock);
++}
++
++static void t_clCreateFromGLBuffer(uint32_t *args, struct hres *r)
++{
++	cl_mem mem = clCreateFromGLBuffer(hobj_unwrap(A(0)), A(1) | (uint64_t)A(2) << 32,
++		A(3), G2H(A(4)));
++	RET(remember_kernel_handle(mem));
++}
++
++static void t_clCreateFromGLTexture(uint32_t *args, struct hres *r)
++{
++	cl_mem mem = clCreateFromGLTexture(hobj_unwrap(A(0)), A(1) | (uint64_t)A(2) << 32,
++		A(3), (int32_t)A(4), A(5), G2H(A(6)));
++	RET(remember_kernel_handle(mem));
++}
++
++static void t_clCreateSampler(uint32_t *args, struct hres *r)
++{
++	cl_sampler sampler = clCreateSampler(hobj_unwrap(A(0)), A(1), A(2), A(3), G2H(A(4)));
++	RET(remember_kernel_handle(sampler));
++}
++
++static void t_clReleaseMemObject(uint32_t *args, struct hres *r)
++{
++	cl_int status = clReleaseMemObject(hobj_unwrap(A(0)));
++	if (!status) forget_kernel_handle(A(0));
++	RET(status);
++}
++
++static void t_clReleaseSampler(uint32_t *args, struct hres *r)
++{
++	cl_int status = clReleaseSampler(hobj_unwrap(A(0)));
++	if (!status) forget_kernel_handle(A(0));
++	RET(status);
++}
++
++static void t_clSetKernelArg(uint32_t *args, struct hres *r)
++{
++	cl_kernel kernel = hobj_unwrap(A(0));
++	const void *value = G2H(A(3));
++	size_t size = A(2);
++	void *native = NULL;
++	if (value && size == sizeof(g32)) {
++		g32 guest;
++		memcpy(&guest, value, sizeof guest);
++		os_unfair_lock_lock(&handles_lock);
++		for (struct kernel_handle *it = kernel_handles; it; it = it->next) {
++			if (it->guest == guest) {
++				native = it->native;
++				break;
++			}
++		}
++		os_unfair_lock_unlock(&handles_lock);
++		if (native) {
++			value = &native;
++			size = sizeof native;
++		}
++	}
++	RET(clSetKernelArg(kernel, A(1), size, value));
++}
++
++static void t_clCreateProgramWithSource(uint32_t *args, struct hres *r)
++{
++	const g32 *sources32 = G2H(A(2));
++	const uint32_t *lengths32 = G2H(A(3));
++	cl_uint count = A(1);
++	if (!count || !sources32) { if (A(4)) *(cl_int *)G2H(A(4)) = CL_INVALID_VALUE; RET(0); return; }
++	const char **sources = calloc(count, sizeof *sources);
++	size_t *lengths = lengths32 ? calloc(count, sizeof *lengths) : NULL;
++	if (!sources || (lengths32 && !lengths)) {
++		free(lengths);
++		free(sources);
++		if (A(4)) *(cl_int *)G2H(A(4)) = CL_OUT_OF_HOST_MEMORY;
++		RET(0);
++		return;
++	}
++	for (cl_uint i = 0; i < count; i++) {
++		sources[i] = G2H(sources32[i]);
++		if (lengths) lengths[i] = lengths32[i];
++	}
++	cl_program result = clCreateProgramWithSource(hobj_unwrap(A(0)), count, sources, lengths, G2H(A(4)));
++	free(lengths);
++	free(sources);
++	RET(hobj_wrap(result));
++}
++
++static void **copy_handles(g32 list, uint32_t count)
++{
++	if (!count || !list) return NULL;
++	void **native = calloc(count, sizeof *native);
++	if (!native) return NULL;
++	const g32 *guest = G2H(list);
++	for (uint32_t i = 0; i < count; i++) native[i] = hobj_unwrap(guest[i]);
++	return native;
++}
++
++static void t_clBuildProgram(uint32_t *args, struct hres *r)
++{
++	if (A(4) || (A(1) && !A(2))) { RET(CL_INVALID_VALUE); return; }
++	void **devices = copy_handles(A(2), A(1));
++	if (A(1) && !devices) { RET(CL_OUT_OF_HOST_MEMORY); return; }
++	cl_int result = clBuildProgram(hobj_unwrap(A(0)), A(1), (const cl_device_id *)devices, G2H(A(3)), NULL, NULL);
++	free(devices);
++	LOG("OpenCL: clBuildProgram status %d\n", result);
++	RET(result);
++}
++
++static void t_clCreateKernelsInProgram(uint32_t *args, struct hres *r)
++{
++	cl_kernel *kernels = A(2) ? calloc(A(1), sizeof *kernels) : NULL;
++	if (A(2) && !kernels) { RET(CL_OUT_OF_HOST_MEMORY); return; }
++	cl_uint count = 0;
++	cl_int status = clCreateKernelsInProgram(hobj_unwrap(A(0)), A(1), kernels, &count);
++	if (!status && kernels) {
++		g32 *out = G2H(A(2));
++		for (cl_uint i = 0; i < count; i++) out[i] = hobj_wrap(kernels[i]);
++	}
++	if (!status && A(3)) *(cl_uint *)G2H(A(3)) = count;
++	free(kernels);
++	RET(status);
++}
++
++static void t_clGetKernelInfo(uint32_t *args, struct hres *r)
++{
++	size_t written = 0;
++	cl_int status = clGetKernelInfo(hobj_unwrap(A(0)), A(1), A(2), G2H(A(3)), &written);
++	if (!status && A(4)) *(uint32_t *)G2H(A(4)) = (uint32_t)written;
++	RET(status);
++}
++
++static void t_clGetKernelArgInfo(uint32_t *args, struct hres *r)
++{
++	size_t written = 0;
++	cl_int status = clGetKernelArgInfo(hobj_unwrap(A(0)), A(1), A(2), A(3), G2H(A(4)), &written);
++	if (!status && A(5)) *(uint32_t *)G2H(A(5)) = (uint32_t)written;
++	RET(status);
++}
++
++static void t_clGetKernelWorkGroupInfo(uint32_t *args, struct hres *r)
++{
++	cl_kernel kernel = hobj_unwrap(A(0));
++	cl_device_id device = hobj_unwrap(A(1));
++	cl_kernel_work_group_info property = A(2);
++	unsigned words = property == CL_KERNEL_COMPILE_WORK_GROUP_SIZE || property == CL_KERNEL_GLOBAL_WORK_SIZE ? 3
++		: property == CL_KERNEL_WORK_GROUP_SIZE || property == CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE ? 1 : 0;
++	size_t size = 0;
++	cl_int status;
++	if (words) {
++		if (A(4) && A(3) < words * sizeof(uint32_t)) { RET(CL_INVALID_VALUE); return; }
++		size_t value[3];
++		status = clGetKernelWorkGroupInfo(kernel, device, property, words * sizeof(size_t), value, NULL);
++		if (!status && A(4)) {
++			uint32_t *out = G2H(A(4));
++			for (unsigned i = 0; i < words; i++) out[i] = (uint32_t)value[i];
++		}
++		size = words * sizeof(uint32_t);
++	} else {
++		status = clGetKernelWorkGroupInfo(kernel, device, property, A(3), G2H(A(4)), &size);
++	}
++	if (!status && A(5)) *(uint32_t *)G2H(A(5)) = (uint32_t)size;
++	RET(status);
++}
++
++static void gl_objects(uint32_t *args, struct hres *r, int release)
++{
++	if ((A(1) && !A(2)) || (A(3) && !A(4))) { RET(CL_INVALID_VALUE); return; }
++	void **objects = copy_handles(A(2), A(1));
++	void **events = copy_handles(A(4), A(3));
++	if ((A(1) && !objects) || (A(3) && !events)) {
++		free(objects); free(events);
++		RET(CL_OUT_OF_HOST_MEMORY);
++		return;
++	}
++	cl_event event = NULL;
++	cl_int status;
++	if (release)
++		status = clEnqueueReleaseGLObjects(hobj_unwrap(A(0)), A(1), (const cl_mem *)objects,
++			A(3), (const cl_event *)events, A(5) ? &event : NULL);
++	else
++		status = clEnqueueAcquireGLObjects(hobj_unwrap(A(0)), A(1), (const cl_mem *)objects,
++			A(3), (const cl_event *)events, A(5) ? &event : NULL);
++	free(objects);
++	free(events);
++	if (!status && A(5)) *(g32 *)G2H(A(5)) = hobj_wrap(event);
++	RET(status);
++}
++
++static void t_clEnqueueAcquireGLObjects(uint32_t *args, struct hres *r) { gl_objects(args, r, 0); }
++static void t_clEnqueueReleaseGLObjects(uint32_t *args, struct hres *r) { gl_objects(args, r, 1); }
++
++static void t_clEnqueueNDRangeKernel(uint32_t *args, struct hres *r)
++{
++	cl_uint dimensions = A(2);
++	if (!dimensions || dimensions > 3 || !A(4)) { RET(CL_INVALID_WORK_DIMENSION); return; }
++	size_t work[3][3] = {{0}};
++	for (unsigned array = 0; array < 3; array++) {
++		const uint32_t *guest = G2H(A(array + 3));
++		if (guest) for (cl_uint i = 0; i < dimensions; i++) work[array][i] = guest[i];
++	}
++	if (A(6) && !A(7)) { RET(CL_INVALID_EVENT_WAIT_LIST); return; }
++	void **events = copy_handles(A(7), A(6));
++	if (A(6) && !events) { RET(CL_OUT_OF_HOST_MEMORY); return; }
++	cl_event event = NULL;
++	cl_int status = clEnqueueNDRangeKernel(hobj_unwrap(A(0)), hobj_unwrap(A(1)), dimensions,
++		A(3) ? work[0] : NULL, work[1], A(5) ? work[2] : NULL, A(6), (const cl_event *)events,
++		A(8) ? &event : NULL);
++	free(events);
++	if (!status && A(8)) *(g32 *)G2H(A(8)) = hobj_wrap(event);
++	RET(status);
++}
++
++static struct hfn opencl_entries[] = {
++	G("_clCreateCommandQueue", clCreateCommandQueue, "o:oolp"),
++	G("_clReleaseCommandQueue", clReleaseCommandQueue, "i:o"),
++	R("_clCreateFromGLBuffer", t_clCreateFromGLBuffer),
++	R("_clCreateFromGLTexture", t_clCreateFromGLTexture),
++	R("_clCreateSampler", t_clCreateSampler),
++	R("_clReleaseMemObject", t_clReleaseMemObject),
++	R("_clReleaseSampler", t_clReleaseSampler),
++	R("_clSetKernelArg", t_clSetKernelArg),
++	R("_clCreateProgramWithSource", t_clCreateProgramWithSource),
++	R("_clBuildProgram", t_clBuildProgram),
++	R("_clCreateKernelsInProgram", t_clCreateKernelsInProgram),
++	R("_clGetKernelInfo", t_clGetKernelInfo),
++	R("_clGetKernelArgInfo", t_clGetKernelArgInfo),
++	R("_clGetKernelWorkGroupInfo", t_clGetKernelWorkGroupInfo),
++	R("_clEnqueueAcquireGLObjects", t_clEnqueueAcquireGLObjects),
++	R("_clEnqueueReleaseGLObjects", t_clEnqueueReleaseGLObjects),
++	R("_clEnqueueNDRangeKernel", t_clEnqueueNDRangeKernel),
++	G("_clFinish", clFinish, "i:o"),
++	R("_clCreateContextFromType", t_clCreateContextFromType),
++	R("_clGetContextInfo", t_clGetContextInfo),
++	G("_clReleaseContext", clReleaseContext, "i:o"),
++	G("_clLogMessagesToStdoutAPPLE", w_cl_log, "v:ppup"),
++};
++
++void thunks_opencl_init(void) { REGISTER(opencl_entries); }
 diff --git a/src/pthread.c b/src/pthread.c
 index b9a8110..fabcbeb 100644
 --- a/src/pthread.c
@@ -1147,7 +2408,7 @@ index b9a8110..fabcbeb 100644
  	R("_pthread_mach_thread_np", t_mach_thread_np), R("_pthread_setname_np", t_setname_np),
  	R("_pthread_key_create", t_key_create), R("_pthread_key_delete", t_key_delete),
 diff --git a/src/thunks.c b/src/thunks.c
-index a5bde77..e6a8c08 100644
+index a5bde77..d5fd756 100644
 --- a/src/thunks.c
 +++ b/src/thunks.c
 @@ -319,6 +319,7 @@ void hostcall_dispatch(uint32_t idx, uint32_t *args, struct hres *r)
@@ -1158,8 +2419,24 @@ index a5bde77..e6a8c08 100644
  	thunks_pthread_init();
  	thunks_cxx_init();
  	thunks_libc2_init();
+@@ -330,12 +331,15 @@ void thunks_init(void)
+ 	thunks_steam_init();
+ 	thunks_zlib_init();
+ 	thunks_audio_init();
++	thunks_opencl_init();
+ 	thunks_sndmgr_init();
+ 	thunks_openal_init();
+ 	thunks_apple2_init();
+ 	thunks_legacy_init();
++	thunks_legacy_crypto_init();
+ 	thunks_cg_init();
+ 	thunks_cf_init();
++	thunks_cf_streams_init();
+ 	thunks_carbon_init();
+ 	thunks_qd_init();
+ }
 diff --git a/src/thunks.h b/src/thunks.h
-index ad15688..f26e3e9 100644
+index ad15688..0506e2f 100644
 --- a/src/thunks.h
 +++ b/src/thunks.h
 @@ -26,6 +26,8 @@ g32 hfn_stub(struct hfn *f);				// a stub for a dynamically made entry
@@ -1171,3 +2448,19 @@ index ad15688..f26e3e9 100644
  void thunks_pthread_init(void);
  void thunks_cxx_init(void);
  void thunks_libc2_init(void);
+@@ -37,12 +39,15 @@ void thunks_ats_init(void);
+ void thunks_steam_init(void);
+ void thunks_zlib_init(void);
+ void thunks_audio_init(void);
++void thunks_opencl_init(void);
+ void thunks_sndmgr_init(void);
+ void thunks_openal_init(void);
+ void thunks_apple2_init(void);
+ void thunks_legacy_init(void);
++void thunks_legacy_crypto_init(void);
+ void thunks_cg_init(void);
+ void thunks_cf_init(void);
++void thunks_cf_streams_init(void);
+ void thunks_carbon_init(void);
+ void thunks_qd_init(void);
+ 

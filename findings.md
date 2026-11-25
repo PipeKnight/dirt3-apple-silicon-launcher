@@ -67,6 +67,23 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   timed out with macOS service errors. A normal graphical session proceeded
   into the startup callbacks and reached `pthread_main_np`.
 
+## Framework initialization in a graphical session
+
+- AudioToolbox now calls the original guest file callbacks and converts the
+  guest audio buffer layout. The synthetic i386 WAV fixture verified that
+  four signed PCM samples returned from the native decoder match the input.
+- Legacy OpenSSL calls use the versioned macOS crypto library for RIPEMD-160
+  and RSA verification. A synthetic i386 smoke test accepted a genuine
+  signature and rejected a changed digest. The game advanced through this
+  initialization using its original calls and verification inputs.
+- The game created an OpenCL context backed by a CGL share group and then a
+  command queue. It reached the next initialization steps with the
+  CoreFoundation stream, timer, and XML bridges. Kernel execution, rendered
+  frames, and audio output from the game remain unverified.
+- The installed bundle has no `libsteam_api.dylib`. The game reported the
+  missing file, continued through Carbon event registration, and then stopped
+  at its first call to `AEInstallEventHandler` in this checkpoint.
+
 Playability requires loading and completing an offline race, verifying
 steering, audio, frame pacing and a save/reload cycle on the test Mac.
 
