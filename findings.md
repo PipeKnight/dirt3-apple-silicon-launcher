@@ -266,6 +266,37 @@ In a separate run directly from the mounted DMG, startup stalled in
 CoreFoundation bookmark creation. Testing the installed app uses the
 copy in a normal folder, as described in the installation instructions.
 
+### Frame pacing in the Aspen benchmark
+
+The built-in benchmark ran Aspen route 0 with eight cars on the M4 and
+macOS 15.7.7. Each run reported the same 640 × 480, Medium, 4× MSAA, VSync
+off settings. The runtimes logged the interval between buffer swaps to
+identify rendering gaps. The table uses the FPS values reported by the
+game at the end of each complete run.
+
+| Runtime | Average FPS | Minimum FPS reported by the game |
+| --- | ---: | ---: |
+| v0.1.1 baseline, with CPU sampling | 44.14 | 19.57 |
+| Native buffer map before metadata queries, run 1 | 46.62 | 35.37 |
+| Native buffer map before metadata queries, run 2 | 46.60 | 18.56 |
+| v0.1.1 baseline, without CPU sampling | 43.57 | 22.93 |
+
+In an eight-second sample from the baseline race, WinMain was waiting
+for the OpenGL worker queue inside `glGetBufferParameteriv` in 141 of
+its 1,491 recorded stacks. The runtime queried buffer size and the Apple
+unmap-flush setting before calling `glMapBuffer`. The change maps first
+and queries those values only after a successful map. This puts the
+mapping synchronization first and avoids metadata queries when mapping
+fails. Valid mappings still read back and upload through the guest
+shadow buffer.
+
+The new order improved average FPS by about 7% against the unsampled
+baseline on this setup. The minimum varied substantially between
+runs with the new order. The shipped benchmark notes that races
+with multiple cars vary. These runs establish a throughput improvement
+for the tested workload, with no consistent improvement in the slowest
+frames.
+
 ## Comparable projects
 
 | Route | Evidence and implications |
