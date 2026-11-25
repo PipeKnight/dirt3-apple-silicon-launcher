@@ -126,11 +126,17 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   user-agent name from the bundle and serves WebKit localization lookups
   from the game's original resource tables in the expected JSON format.
   Some text in the earlier native dialogs remains corrupted.
-- Instrumented runs received genuine JavaScript property requests from
-  the original launcher. With the resource lookups working, the game
-  still crashed inside `getValueOfProperty:withType:` when constructing
-  its reply for `LastUpdatedString`. The runtime does not substitute a
-  value for that property.
+- The Feral interface's original property parser dereferenced a null
+  array after receiving an empty string. For display text, string lists
+  and list selections the runtime presents an empty JSON array to the
+  original parser when the input is absent. This is the built-in interface's
+  missing-value convention. Other property types follow the original path.
+- The Feral launcher now renders the Info, Display, Extras, Support and
+  Advanced tabs and responds to its **Play** button. Some labels still
+  show placeholders or report malformed data. After Play, the game ran
+  through GCD setup and reached the IOKit inventory. A concurrent i386
+  fixture verified that the GCD once callback runs once and preserves the
+  four-byte predicate's neighboring data.
 
 Playability requires loading and completing an offline race, verifying
 steering, audio, frame pacing and a save/reload cycle on the test Mac.

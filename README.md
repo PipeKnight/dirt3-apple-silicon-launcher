@@ -4,11 +4,10 @@ Compatibility experiments for the original Feral Mac release. The test input is 
 local installation of the game. This repository contains the probe, source
 patches for the compatibility runtime, and reproducible findings.
 
-**Status** — on Apple Silicon with macOS 15.7.7, the game passes the
-launcher's macOS version check, initializes OpenGL 4.1 and OpenCL, and
-loads the original Feral launcher in WebKit. A crash while returning
-launcher properties to JavaScript still prevents the Play button from
-becoming usable. The in-game menu and an offline race remain unverified.
+**Status** — on Apple Silicon with macOS 15.7.7, the original Feral
+launcher renders its controls. Its **Play** button starts the game's
+initialization, which reaches OpenGL, OpenCL, Grand Central Dispatch
+and IOKit. The in-game menu and an offline race remain unverified.
 
 ## Inspect the installed copy
 
@@ -52,7 +51,7 @@ LLVM="$build_dir/llvm-project" make -C "$runtime" -j6 guest
   set -e
   for fixture in tests/*_i386.c; do
     executable="$build_dir/$(basename "$fixture" .c)"
-    /usr/bin/clang -target i386-apple-macos10.9 -fno-builtin -fno-stack-protector \
+    /usr/bin/clang -target i386-apple-macos10.9 -fblocks -fno-builtin -fno-stack-protector \
       -nostdlib -Wl,-undefined,dynamic_lookup "$fixture" "$runtime/guest/libSystem.tbd" -o "$executable"
     "$runtime/mac32" "$executable"
   done

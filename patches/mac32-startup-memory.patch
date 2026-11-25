@@ -20,15 +20,34 @@ index 4c16e9d..7b500e2 100644
  all: mac32 guest app
 diff --git a/patches/dirt3_2015_version.c b/patches/dirt3_2015_version.c
 new file mode 100644
-index 0000000..6d6e074
+index 0000000..83dcc88
 --- /dev/null
 +++ b/patches/dirt3_2015_version.c
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,80 @@
 +#include "../src/patches.h"
 +#include <CoreServices/CoreServices.h>
 +#include <string.h>
 +
 +static int version_patch_active;
++static _Thread_local int serializing_web_display;
++static g32 parse_json, empty_array;
++
++int dirt3_set_serializing_web_display(int active)
++{
++	int previous = serializing_web_display;
++	serializing_web_display = active;
++	return previous;
++}
++
++static void parse_launcher_json(uint32_t *args, struct hres *r)
++{
++	g32 input = A(0);
++	if (serializing_web_display && (!input || !*(const char *)G2H(input)))
++		input = empty_array;
++	RET(gcall(parse_json, 1, input));
++}
++
++static struct hfn parse_json_thunk = R("DiRT 3 launcher JSON", parse_launcher_json);
 +int dirt3_version_patch_active(void) { return version_patch_active; }
 +extern int macho_section(struct image *, const char *, const char *, g32 *, uint32_t *);
 +
@@ -46,20 +65,34 @@ index 0000000..6d6e074
 +		0xba, 0x00, 0x10, 0x00, 0x00, 0x83, 0xfb, 0x0a,
 +		0x0f, 0x45, 0xd1, 0x09, 0xd6, 0x09, 0xc6,
 +	};
-+	enum { packing_offset = 0x781938 - 0xb980 };
++	static const uint8_t parse_call[] = {0xe8, 0x0c, 0xe4, 0xfe, 0xff};
++	enum {
++		packing_offset = 0x781938 - 0xb980,
++		parse_call_offset = 0x8411cf - 0xb980,
++		parse_offset = 0x82f5e0 - 0xb980,
++	};
 +	g32 text;
 +	uint32_t text_size;
 +	if (!macho_section(image, "__TEXT", "__text", &text, &text_size) ||
-+		text_size < packing_offset + sizeof(packing))
++		text_size < parse_call_offset + sizeof(parse_call))
 +		return 0;
 +	uint8_t *code = G2H(text + packing_offset);
-+	if (memcmp(code, packing, sizeof(packing)))
++	uint8_t *call = G2H(text + parse_call_offset);
++	if (memcmp(code, packing, sizeof(packing)) || memcmp(call, parse_call, sizeof(parse_call)))
 +		return 0;
 +
 +	// Saturate the legacy result at 10.15.0 and jump to its original cache
 +	// store. Other version callers continue to see the real host version.
 +	static const uint8_t clamp[] = {0xbe, 0xf0, 0x10, 0x00, 0x00, 0xeb, sizeof(packing) - 7};
 +	memcpy(code, clamp, sizeof(clamp));
++
++	// Absent display text can reach the launcher's parser as an empty byte
++	// string. Represent missing text as an
++	// empty JSON array, the existing interface's missing-value convention.
++	parse_json = text + parse_offset;
++	empty_array = gstrdup("[]");
++	int32_t relative = (int32_t)(hfn_stub(&parse_json_thunk) - (text + parse_call_offset + sizeof(parse_call)));
++	memcpy(call + 1, &relative, sizeof(relative));
 +	version_patch_active = 1;
 +	return 1;
 +}
@@ -68,11 +101,11 @@ index 0000000..6d6e074
 +	.library = "DiRT 3 Complete Edition",
 +	.sha256 = "0415a9ecbaccdc25752a327c7b8a0dbd62435a308d0a95652d4a286e6a579014",
 +	.game = "DiRT 3 Complete Edition 1.0 (85186.17625.4091)",
-+	.what = "encode newer macOS releases in the launcher's legacy version format",
++	.what = "encode newer macOS releases and preserve missing launcher text",
 +	.apply = apply,
 +};
 diff --git a/src/apple.m b/src/apple.m
-index 47c00de..54a8947 100644
+index 47c00de..80e4106 100644
 --- a/src/apple.m
 +++ b/src/apple.m
 @@ -9,7 +9,9 @@
@@ -398,7 +431,20 @@ index 47c00de..54a8947 100644
  	G("_CGDisplayIOServicePort", CGDisplayIOServicePort, "u:u"),
  	G("_CGSetDisplayTransferByTable", CGSetDisplayTransferByTable, "i:uuppp"),
  	G("_CGImageSourceCreateWithURL", CGImageSourceCreateWithURL, "o:oo"),
-@@ -488,6 +728,8 @@ static struct hfn apple[] = {
+@@ -474,6 +714,12 @@ static struct hfn apple[] = {
+ 	G("_IORegistryEntryCreateCFProperty", IORegistryEntryCreateCFProperty, "o:uoou"),
+ 	G("_IORegistryEntrySearchCFProperty", IORegistryEntrySearchCFProperty, "o:upoou"),
+ 	G("_IORegistryEntryGetParentEntry", IORegistryEntryGetParentEntry, "i:upp"),
++	G("_IORegistryEntryGetName", IORegistryEntryGetName, "i:up"),
++	G("_IORegistryEntryFromPath", IORegistryEntryFromPath, "u:up"),
++	G("_IORegistryEntryCreateIterator", IORegistryEntryCreateIterator, "i:upup"),
++	G("_IOObjectConformsTo", IOObjectConformsTo, "i:up"),
++	G("_IOServiceNameMatching", IOServiceNameMatching, "o:p"),
++	G("_IOServiceGetMatchingService", IOServiceGetMatchingService, "u:uo"),
+ 	// Carbon
+ 	G("_Gestalt", w_Gestalt, "i:up"),
+ 	G("_GetCurrentEventButtonState", w_GetCurrentEventButtonState, "u:"),
+@@ -488,6 +734,8 @@ static struct hfn apple[] = {
  	R("_CGLCreateContext", t_CGLCreateContext),
  	R("_CGLQueryRendererInfo", t_CGLQueryRendererInfo),
  	G("_CGLDestroyContext", CGLDestroyContext, "i:o"),
@@ -2127,8 +2173,32 @@ index 8f40938..4c329a9 100644
  	// strings
  	G("_memcpy", memcpy, "p:ppu"),
  	G("_memmove", memmove, "p:ppu"),
+diff --git a/src/libc2.c b/src/libc2.c
+index 057bfcb..4dc071c 100644
+--- a/src/libc2.c
++++ b/src/libc2.c
+@@ -292,6 +292,10 @@ static int64_t w_wcstoll(const wchar_t *s, uint32_t endp, int base)
+ 	return v;
+ }
+ static int w_isnanf(float f) { return isnan(f); }
++static int w_isnand(double d) { return isnan(d); }
++static int w_isinfd(double d) { return isinf(d); }
++static int w_isinff(float f) { return isinf(f); }
++static int w_signbitf(float f) { return signbit(f); }
+ static int32_t w_wcstol(const wchar_t *s, uint32_t endp, int base)
+ {
+ 	wchar_t *e;
+@@ -453,6 +457,8 @@ static struct hfn libc2[] = {
+ 	G("_strdup", gstrdup, "p:p"),
+ 	G("_wcstol", w_wcstol, "i:ppi"), G("_wcstoll", w_wcstoll, "l:ppi"),
+ 	G("_fminf", fminf, "f:ff"), G("_fmaxf", fmaxf, "f:ff"), G("___isnanf", w_isnanf, "i:f"),
++	G("___isnand", w_isnand, "i:d"), G("___isinfd", w_isinfd, "i:d"),
++	G("___isinff", w_isinff, "i:f"), G("___signbitf", w_signbitf, "i:f"),
+ 	G("_getloadavg", getloadavg, "i:pi"), G("_wcscat", wcscat, "p:pp"), G("_wcsncmp", wcsncmp, "i:ppu"),
+ 	G("_wcschr", wcschr, "p:pi"), G("_wcsrchr", wcsrchr, "p:pi"), G("_wcsstr", wcsstr, "p:pp"),
+ 	G("_wcsncat", wcsncat, "p:ppu"), G("_wcscasecmp", wcscasecmp, "i:pp"), G("_wcsncasecmp", wcsncasecmp, "i:ppu"),
 diff --git a/src/libc3.c b/src/libc3.c
-index 7437c1d..4b807f5 100644
+index 7437c1d..da7a505 100644
 --- a/src/libc3.c
 +++ b/src/libc3.c
 @@ -12,6 +12,7 @@
@@ -2214,7 +2284,11 @@ index 7437c1d..4b807f5 100644
  	G("_socket", socket, "i:iii"), G("_bind", bind, "i:ipu"), G("_connect", connect, "i:ipu"),
  	G("_listen", listen, "i:ii"), G("_accept", accept, "i:ipp"),
  	G("_send", w_send, "i:ipui"), G("_recv", w_recv, "i:ipui"),
-@@ -704,12 +750,19 @@ static struct hfn libc3[] = {
+@@ -701,15 +747,23 @@ static struct hfn libc3[] = {
+ 	R("_LocalToGlobal", t_noop0), R("_GetDeviceList", t_noop0), R("_GetMainDevice", t_noop0), R("_GetNextDevice", t_noop0),
+ 	R("_clearerr", t_clearerr), R("_tmpfile", t_tmpfile), R("_tmpnam", t_tmpnam), R("_freopen", t_freopen),
+ 	G("_clock", w_clock, "u:"), G("_difftime", w_difftime, "d:ii"), G("_finite", w_finite, "i:d"),
++	G("___isfinited", w_finite, "i:d"),
  	G("_strcoll", strcoll, "i:pp"), R("_localeconv", t_localeconv),
  	// audio units: src/audio.c; pulling samples out of a unit is not bridged
  	R("_AudioUnitRender", t_audio_err),
@@ -2684,7 +2758,7 @@ index 0000000..4129d89
 +	REGISTER(entries);
 +}
 diff --git a/src/objc.m b/src/objc.m
-index f53ca50..a43ec77 100644
+index f53ca50..4a0ab36 100644
 --- a/src/objc.m
 +++ b/src/objc.m
 @@ -340,7 +340,11 @@ static void ret_h2g(const char *t, const void *v, struct hres *r, g32 sret)
@@ -2711,16 +2785,17 @@ index f53ca50..a43ec77 100644
  	if (!strcmp(selname, "makeCurrentContext") && [target isKindOfClass:[NSOpenGLContext class]]) {
  		[(NSOpenGLContext *)target makeCurrentContext];
  		gl_last_context = CGLGetCurrentContext();
-@@ -871,6 +879,8 @@ static int variadic_objects(id target, const char *sel, const uint32_t *ga, stru
+@@ -871,6 +879,9 @@ static int variadic_objects(id target, const char *sel, const uint32_t *ga, stru
  	return 1;
  }
  
 +extern int dirt3_version_patch_active(void);
++extern int dirt3_set_serializing_web_display(int active);
 +
  static void msgsend(uint32_t *a, struct hres *r, int kind)
  {
  	g32 sret = 0;
-@@ -957,6 +967,16 @@ static void msgsend(uint32_t *a, struct hres *r, int kind)
+@@ -957,6 +968,16 @@ static void msgsend(uint32_t *a, struct hres *r, int kind)
  	}
  	// no autorelease pool here: returned objects belong to the guest's own pools
  	call_host(target, super_cls, sel_registerName(sel), sel, ga, r, sret);
@@ -2737,7 +2812,7 @@ index f53ca50..a43ec77 100644
  }
  
  static void t_msgSend(uint32_t *a, struct hres *r) { msgsend(a, r, K_NORMAL); }
-@@ -1020,10 +1040,39 @@ static int arg_h2g(const char *t, NSInvocation *inv, NSUInteger i, uint32_t *g)
+@@ -1020,15 +1041,52 @@ static int arg_h2g(const char *t, NSInvocation *inv, NSUInteger i, uint32_t *g)
  	}
  }
  
@@ -2777,7 +2852,30 @@ index f53ca50..a43ec77 100644
  	int classmethod = object_isClass(self);
  	extern int trace_calls;
  	extern int trace_match(const char *);
-@@ -1408,6 +1457,20 @@ static void t_NSLog(uint32_t *args, struct hres *r)
+ 	if (trace_calls && trace_match(sel)) fprintf(stderr, "[objc<-host] %s %s\n", object_getClassName(self), sel);
+ 	struct gclass *gc = gclass_of_host(classmethod ? (Class)self : object_getClass(self));
++	BOOL serializes_web_display = NO;
++	if (dirt3_version_patch_active() && !strcmp(sel, "getValueOfProperty:withType:") &&
++	    !strcmp(object_getClassName(self), "WebkitJSInterface")) {
++		id type = nil;
++		[inv getArgument:&type atIndex:3];
++		serializes_web_display = [type isEqual:@"string"] || [type isEqual:@"array<string>"] ||
++			[type isEqual:@"int,string"];
++	}
+ 	g32 imp = gc ? find_imp(gc, sel, classmethod, NULL) : 0;
+ 	if (!imp) {
+ 		Class base = host_base(gc);
+@@ -1048,7 +1106,9 @@ static void forward_to_guest(id self, SEL _cmd, NSInvocation *inv)
+ 		k += arg_h2g([sig getArgumentTypeAtIndex:i], inv, i, &v[k]);
+ 	double st0 = 0;
+ 	int fp = *rt == 'f' || *rt == 'd';
++	int previous_format = dirt3_set_serializing_web_display(serializes_web_display);
+ 	uint64_t rax = gcallv(imp, k, v, fp ? &st0 : NULL);
++	dirt3_set_serializing_web_display(previous_format);
+ 	if (*rt == 'v') return;
+ 	uint8_t out[64] = {0};
+ 	switch (*rt) {
+@@ -1408,6 +1468,20 @@ static void t_NSLog(uint32_t *args, struct hres *r)
  		free(s);
  	}
  }
@@ -2798,7 +2896,76 @@ index f53ca50..a43ec77 100644
  // NSRunAlertPanel(title, msgFormat, default, alternate, other, ...): show it, and log it
  static void t_NSRunAlertPanel(uint32_t *args, struct hres *r)
  {
-@@ -1647,6 +1710,14 @@ static void t_dispatch_sync(uint32_t *args, struct hres *r)
+@@ -1641,12 +1715,83 @@ static void t_dispatch_async(uint32_t *args, struct hres *r)
+ 	g32 b = block_copy(A(1));
+ 	dispatch_async(host_queue(A(0)), ^{ gcall(U32(b + 12), 1, b); block_release(b); });
+ }
++static void t_dispatch_async_f(uint32_t *args, struct hres *r)
++{
++	g32 context = A(1), function = A(2);
++	dispatch_async(host_queue(A(0)), ^{ gcall(function, 1, context); });
++}
++
++static void t_dispatch_sync_f(uint32_t *args, struct hres *r)
++{
++	g32 context = A(1), function = A(2);
++	dispatch_sync(host_queue(A(0)), ^{ gcall(function, 1, context); });
++}
++
++static void t_dispatch_apply(uint32_t *args, struct hres *r)
++{
++	g32 block = A(2);
++	dispatch_apply(A(0), host_queue(A(1)), ^(size_t index) {
++		gcall(U32(block + 12), 2, block, (uint32_t)index);
++	});
++}
++
++struct once_token {
++	struct once_token *next;
++	g32 address;
++	dispatch_once_t native;
++};
++
++static void t_dispatch_once(uint32_t *args, struct hres *r)
++{
++	g32 address = A(0), block = A(1);
++	uint32_t *guest = G2H(address);
++	if (__atomic_load_n(guest, __ATOMIC_ACQUIRE) == UINT32_MAX) return;
++
++	// Dispatch owns an eight-byte predicate on the host. Keep it beside
++	// the four-byte i386 predicate and publish completion to the guest.
++	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++	static struct once_token *tokens;
++	pthread_mutex_lock(&lock);
++	struct once_token *token = tokens;
++	while (token && token->address != address) token = token->next;
++	if (!token) {
++		token = calloc(1, sizeof(*token));
++		if (!token) die("dispatch_once: cannot allocate predicate");
++		token->address = address;
++		token->next = tokens;
++		tokens = token;
++	}
++	pthread_mutex_unlock(&lock);
++
++	dispatch_once(&token->native, ^{ gcall(U32(block + 12), 1, block); });
++	__atomic_store_n(guest, UINT32_MAX, __ATOMIC_RELEASE);
++}
++
++static void t_dispatch_group_async(uint32_t *args, struct hres *r)
++{
++	dispatch_group_t group = hobj_unwrap(A(0));
++	dispatch_queue_t queue = host_queue(A(1));
++	g32 block = block_copy(A(2));
++	dispatch_group_async(group, queue, ^{
++		gcall(U32(block + 12), 1, block);
++		block_release(block);
++	});
++}
++
+ static void t_dispatch_sync(uint32_t *args, struct hres *r)
+ {
+ 	(void)r;
  	g32 b = A(1);
  	dispatch_sync(host_queue(A(0)), ^{ gcall(U32(b + 12), 1, b); });
  }
@@ -2813,7 +2980,7 @@ index f53ca50..a43ec77 100644
  static void t_dispatch_get_main_queue(uint32_t *args, struct hres *r) { (void)args; RET(main_q); }
  
  // ---- AppKit / Foundation constants ------------------------------------------------
-@@ -1671,12 +1742,14 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
+@@ -1671,12 +1816,14 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
  
  static struct hfn objc_fns[] = {
  	R("_NSApplicationMain", t_NSApplicationMain),
@@ -2828,10 +2995,17 @@ index f53ca50..a43ec77 100644
  	D("_NSApp", 4, init_nsapp), D("_NSDefaultRunLoopMode", 4, init_runloopmode),
  	D("___CFConstantStringClassReference", 32, init_cfconst),
  	R("_objc_retain", t_objc_retain), R("_objc_release", t_objc_release),
-@@ -1694,6 +1767,7 @@ static struct hfn objc_fns[] = {
+@@ -1694,6 +1841,14 @@ static struct hfn objc_fns[] = {
  	R("__Block_copy", t_Block_copy), R("__Block_release", t_Block_release),
  	D("__dispatch_main_q", 128, init_main_q), R("_dispatch_get_main_queue", t_dispatch_get_main_queue),
  	R("_dispatch_async", t_dispatch_async), R("_dispatch_sync", t_dispatch_sync),
++	R("_dispatch_async_f", t_dispatch_async_f), R("_dispatch_sync_f", t_dispatch_sync_f),
++	R("_dispatch_apply", t_dispatch_apply), R("_dispatch_once", t_dispatch_once),
++	G("_dispatch_get_global_queue", dispatch_get_global_queue, "o:iu"),
++	G("_dispatch_queue_create", dispatch_queue_create, "o:po"),
++	G("_dispatch_group_create", dispatch_group_create, "o:"),
++	R("_dispatch_group_async", t_dispatch_group_async),
++	G("_dispatch_group_wait", dispatch_group_wait, "i:ol"),
 +	R("_CFRunLoopPerformBlock", t_CFRunLoopPerformBlock),
  	NSC(NSApplicationDidBecomeActiveNotification), NSC(NSApplicationDidHideNotification),
  	NSC(NSApplicationDidUnhideNotification), NSC(NSApplicationWillUnhideNotification), NSC(NSBackingPropertyOldScaleFactorKey),
