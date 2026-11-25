@@ -177,6 +177,9 @@ private final class Launcher: NSObject, NSApplicationDelegate {
             let child = Process()
             child.executableURL = runtime
             child.arguments = ["-v", game.path]
+            var environment = ProcessInfo.processInfo.environment
+            environment["MAC32_DIRT3_DIRECT"] = "1"
+            child.environment = environment
             child.currentDirectoryURL = game.deletingLastPathComponent()
             child.standardOutput = output
             child.standardError = output

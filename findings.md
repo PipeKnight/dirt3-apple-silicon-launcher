@@ -230,6 +230,17 @@ original header and the game continues opening and checking its own files.
 The runtime also maps the game's `_Exit` call to immediate termination so
 normal shutdown can finish.
 
+### Direct launch
+
+The Feral options HTML ships with `Game Name v1.0` in its default
+version dropdown and references `GameIcon.icns`, which is present in the
+installed game. The legacy WebView displayed placeholders and a broken
+image during startup. The native app selects the game's existing
+direct-start path by overriding the Feral options preference predicate in
+memory for that session. The compatibility command still opens the
+original options window. The installed app and the setting in its
+preferences file are untouched by the override.
+
 ## Comparable projects
 
 | Route | Evidence and implications |

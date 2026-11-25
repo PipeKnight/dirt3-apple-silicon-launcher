@@ -20,13 +20,14 @@ index 4c16e9d..aeabf91 100644
  all: mac32 guest app
 diff --git a/patches/dirt3_2015_version.c b/patches/dirt3_2015_version.c
 new file mode 100644
-index 0000000..101eac2
+index 0000000..33ad943
 --- /dev/null
 +++ b/patches/dirt3_2015_version.c
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,126 @@
 +#include "../src/patches.h"
 +#include <CoreServices/CoreServices.h>
 +#include <mach-o/loader.h>
++#include <stdlib.h>
 +#include <string.h>
 +
 +static int version_patch_active;
@@ -61,6 +62,25 @@ index 0000000..101eac2
 +int dirt3_version_patch_active(void) { return version_patch_active; }
 +extern int macho_section(struct image *, const char *, const char *, g32 *, uint32_t *);
 +
++static int request_direct_launch(g32 text)
++{
++	const char *direct_launch = getenv("MAC32_DIRT3_DIRECT");
++	if (!direct_launch || strcmp(direct_launch, "1"))
++		return 1;
++
++	// The preferences predicate reports whether to omit the optional Feral
++	// options window. Select its direct-start result for this process.
++	enum { options_offset = 0x637b30 - 0xb980 };
++	static const uint8_t original[] = {0x55, 0x89, 0xe5, 0x53, 0x57, 0x56};
++	static const uint8_t direct[] = {0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3};
++	void *options = G2H(text + options_offset);
++	if (memcmp(options, original, sizeof original))
++		return 0;
++	memcpy(options, direct, sizeof direct);
++	fprintf(stderr, "[mac32] DiRT 3 direct launch requested\n");
++	return 1;
++}
++
 +// The game converts Gestalt's three components to the old 0x10xy format.
 +// Its calculation clears the major field for releases 11 through 15, so
 +// its launcher rejects a newer system as older than its 10.x minimum.
@@ -93,7 +113,8 @@ index 0000000..101eac2
 +	uint8_t *storage = G2H(text + storage_call_offset);
 +	g32 segment = macho_main_segment("__TEXT");
 +	if (!segment || memcmp(code, packing, sizeof(packing)) ||
-+		memcmp(call, parse_call, sizeof(parse_call)) || memcmp(storage, storage_call, sizeof(storage_call)))
++		memcmp(call, parse_call, sizeof(parse_call)) || memcmp(storage, storage_call, sizeof(storage_call)) ||
++		!request_direct_launch(text))
 +		return 0;
 +
 +	// Saturate the legacy result at 10.15.0 and jump to its original cache

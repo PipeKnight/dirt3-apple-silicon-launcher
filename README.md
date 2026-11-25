@@ -13,16 +13,23 @@ controllers and other macOS versions remain unverified.
 
 ## Open the launcher
 
+Download the DMG from [GitHub Releases](https://github.com/PipeKnight/dirt3-apple-silicon/releases).
 Mount the disk image and drag **DiRT 3 Launcher.app** into
 **Applications**. Open the launcher and click **Play**. It looks for your
 original Mac installation. Use **Choose Game…** to locate a copy in another
-folder. The original Feral options window opens before the game. **Show
-Logs** reveals the latest run log in Finder.
+folder. **Play** starts the game directly. **Show Logs** reveals the latest
+run log in Finder.
 
-The launcher requires an Apple silicon Mac, Rosetta, and the Feral Mac
-version 1.0, build 85186.17625.4091. The disk image contains the launcher
-and compatibility runtime. The game supplies its executable, libraries and
-data from your installed copy.
+The GitHub build has an ad-hoc signature and macOS may block it on first
+open. After trying to open it, look for **Open Anyway** under **System
+Settings → Privacy & Security** for this app. Some managed Macs may
+restrict that option. [Apple's instructions](https://support.apple.com/en-us/102445)
+
+The launcher requires an Apple silicon Mac, macOS 15 or later, Rosetta,
+and an installed copy of the original Feral Mac version 1.0, build
+85186.17625.4091. Testing was on macOS 15.7.7. The disk image contains
+the launcher and compatibility runtime. The game supplies its executable,
+libraries and data from your installed copy.
 
 ## Inspect the installed copy
 
@@ -34,7 +41,11 @@ python3 probe.py inspect
 
 Use `--app '/path/to/DiRT 3 Complete Edition.app'` for another install. The
 probe reads the bundle metadata and prints the executable's SHA-256, slice
-architectures and linked libraries.
+architectures and linked libraries. The launcher requires an exact match
+for the **executable** SHA-256 because its compatibility patches are tied
+to this build. A matching version label alone does not establish a match.
+For a different Mac binary, report the build number, architecture and
+SHA-256 when filing a compatibility issue.
 
 ## Build the experimental runtime
 
@@ -103,15 +114,10 @@ After the runtime build above, run `launcher/package.sh "$runtime"
 corresponding source archive and SHA-256 checksums under `local/`. macOS
 needs access to its Disk Images service when creating the image.
 
-By default this is a locally signed test build. To prepare a distribution
-build, set `DIRT3_SIGNING_IDENTITY` to a Developer ID Application identity
-from the signing keychain. Set `DIRT3_NOTARY_PROFILE` to the name of a
-stored `notarytool` profile to submit the image and staple the ticket
-before generating the checksums. The Intel helper uses the unsigned
+The script applies ad-hoc signatures. The Intel helper uses the unsigned
 executable memory entitlement to load the guest Mach-O and run its call
 thunks. The Apple silicon launcher is signed with Hardened Runtime.
 Distribute the image, source archive and checksums together.
-[Apple's distribution instructions](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution)
 
 The release source archive contains the patched `mac32` tree and the
 LLVM checkout paths used by its guest build. Extract it into a directory

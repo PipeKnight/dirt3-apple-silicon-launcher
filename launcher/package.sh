@@ -8,13 +8,7 @@ fi
 project="$(cd "$(dirname "$0")/.." && pwd -P)"
 runtime="$(cd "$1" && pwd -P)"
 llvm="$(cd "$2" && pwd -P)"
-identity="${DIRT3_SIGNING_IDENTITY:--}"
-notary_profile="${DIRT3_NOTARY_PROFILE:-}"
 revision=dcfed5b9ad1ca1356bddd39ac6a26e564d536c28
-if [[ -n "$notary_profile" && "$identity" == - ]]; then
-    printf 'Notarization requires DIRT3_SIGNING_IDENTITY with a Developer ID Application identity.\n' >&2
-    exit 2
-fi
 
 mkdir -p "$project/local"
 output="$(mktemp -d "$project/local/release.XXXXXX")"
@@ -65,28 +59,16 @@ xcrun swiftc -swift-version 6 -target arm64-apple-macos15.0 -O \
     -module-cache-path "$output/swift-cache" \
     -o "$app/Contents/MacOS/DiRT3Launcher" "$project/launcher/Launcher.swift"
 
-signing=(--force --sign "$identity")
-if [[ "$identity" != - ]]; then
-    signing+=(--timestamp)
-fi
 for library in "$helper/Contents/MacOS/guest/"*.dylib; do
-    codesign "${signing[@]}" "$library"
+    codesign --force --sign - "$library"
 done
-codesign "${signing[@]}" --options runtime --entitlements "$project/launcher/runtime.entitlements" "$helper"
-codesign "${signing[@]}" --options runtime "$app"
+codesign --force --sign - --options runtime --entitlements "$project/launcher/runtime.entitlements" "$helper"
+codesign --force --sign - --options runtime "$app"
 codesign --verify --deep --strict "$app"
 
 ln -s /Applications "$stage/Applications"
 image="$output/DiRT-3-Launcher-macOS-arm64.dmg"
 hdiutil create -srcfolder "$stage" -volname 'DiRT 3 Launcher' -format UDZO "$image"
-if [[ "$identity" != - ]]; then
-    codesign "${signing[@]}" "$image"
-fi
-if [[ -n "$notary_profile" ]]; then
-    xcrun notarytool submit "$image" --keychain-profile "$notary_profile" --wait
-    xcrun stapler staple "$image"
-    xcrun stapler validate "$image"
-fi
 hdiutil verify -quiet "$image"
 
 (
