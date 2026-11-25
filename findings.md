@@ -171,6 +171,18 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   `statfs` and started two output units through the bundled OpenAL library.
   The legacy disk query uses the i386 record and real volume sizes.
   [Darwin's legacy statfs conversion](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c#L13461-L13561)
+- With the audio graph running, the original game created Foundation
+  arrays through `arrayWithObjects:count:`. mac32 now translates the input
+  arrays of object handles, preserving the guest's source arrays. The i386
+  fixture exercises both array and dictionary construction.
+- The game displayed multiple frames of the original Codemasters and DiRT 3
+  startup videos. The runtime forwards CoreMedia times and time ranges and
+  exposes native decoded packed pixel buffers to the guest during the lock.
+  AudioQueue output callbacks executed during the video. Audible output
+  and mixer behavior still need verification.
+- The game reached its rendered **Press Start or Enter** title screen. An
+  Enter keypress advanced to the keyboard-layout query. mac32 now binds the
+  corresponding Carbon Text Input Source functions to the host layout.
 
 Playability requires loading and completing an offline race, verifying
 steering, audio, frame pacing and a save/reload cycle on the test Mac.

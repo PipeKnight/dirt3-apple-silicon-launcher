@@ -5,10 +5,10 @@ local installation of the game. This repository contains the probe, source
 patches for the compatibility runtime, and reproducible findings.
 
 **Status.** On an Apple M4 with macOS 15.7.7, **Play** in the original Feral
-launcher reaches the game's full-screen DiRT 3 logo. The engine creates
+launcher displays the DiRT 3 logo, plays the original startup videos, and
+reaches the title screen with **Press Start or Enter**. The engine creates
 OpenGL and OpenCL contexts and starts audio output units. Some launches
-still fail in the resource check. The in-game menu and first offline race
-remain unverified.
+still fail in the resource check. The first offline race remains unverified.
 
 ## Inspect the installed copy
 
