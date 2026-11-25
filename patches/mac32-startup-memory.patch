@@ -20,10 +20,10 @@ index 4c16e9d..aeabf91 100644
  all: mac32 guest app
 diff --git a/patches/dirt3_2015_version.c b/patches/dirt3_2015_version.c
 new file mode 100644
-index 0000000..33ad943
+index 0000000..6ab294a
 --- /dev/null
 +++ b/patches/dirt3_2015_version.c
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,145 @@
 +#include "../src/patches.h"
 +#include <CoreServices/CoreServices.h>
 +#include <mach-o/loader.h>
@@ -81,6 +81,25 @@ index 0000000..33ad943
 +	return 1;
 +}
 +
++// StateSkipVideosDecision normally returns the "false" boot flow edge.
++static int request_skip_startup_videos(g32 text)
++{
++	const char *skip_videos = getenv("MAC32_DIRT3_SKIP_STARTUP_VIDEOS");
++	if (!skip_videos || strcmp(skip_videos, "1"))
++		return 1;
++
++	enum { false_edge_offset = 0x2126f8 - 0xb980 };
++	static const uint8_t false_edge[] = {0x8d, 0x86, 0x18, 0x50, 0x41, 0x01};
++	uint8_t *select_edge = G2H(text + false_edge_offset);
++	if (memcmp(select_edge, false_edge, sizeof false_edge))
++		return 0;
++
++	// The alternate edge name ("true") is stored immediately before "false".
++	select_edge[2] -= sizeof("true");
++	fprintf(stderr, "[mac32] DiRT 3 startup video skip requested\n");
++	return 1;
++}
++
 +// The game converts Gestalt's three components to the old 0x10xy format.
 +// Its calculation clears the major field for releases 11 through 15, so
 +// its launcher rejects a newer system as older than its 10.x minimum.
@@ -114,7 +133,7 @@ index 0000000..33ad943
 +	g32 segment = macho_main_segment("__TEXT");
 +	if (!segment || memcmp(code, packing, sizeof(packing)) ||
 +		memcmp(call, parse_call, sizeof(parse_call)) || memcmp(storage, storage_call, sizeof(storage_call)) ||
-+		!request_direct_launch(text))
++		!request_direct_launch(text) || !request_skip_startup_videos(text))
 +		return 0;
 +
 +	// Saturate the legacy result at 10.15.0 and jump to its original cache

@@ -241,6 +241,31 @@ memory for that session. The compatibility command still opens the
 original options window. The installed app and the setting in its
 preferences file are untouched by the override.
 
+### Time to the title screen
+
+On the M4, earlier successful launches from the native app reached
+**Press Start or Enter** in about 51–57 seconds. In timed diagnostics,
+the first AVAsset or AudioQueue activity for the opening videos appeared
+roughly 24–35 seconds after starting the runtime. OpenCL initialization,
+file access, and audio setup are observable during that initial period.
+The video trace identified `Feral.mov` and `sting.mov`, whose source
+durations are about 3.8 and 5.0 seconds. The elapsed time between first
+movie activity and the title screen also includes game work.
+
+The launcher can select the existing `skip_videos_decision` boot-flow edge
+in memory. With that option enabled, no opening movies were requested in
+the diagnostic run, and the title was visible by 42.4 seconds. Player One
+loaded and displayed the existing autosave warning. The option defaults
+to on and can be turned off from the launcher. With the packaged app
+copied out of the DMG, the title was visible by 37.2 seconds after **Play**.
+
+Some profiled launches stalled before the opening movies. In one stalled
+run, WinMain and the force-feedback thread were waiting on the same
+Feral dispatch semaphore. Skipping videos does not address that wait.
+In a separate run directly from the mounted DMG, startup stalled in
+CoreFoundation bookmark creation. Testing the installed app uses the
+copy in a normal folder, as described in the installation instructions.
+
 ## Comparable projects
 
 | Route | Evidence and implications |

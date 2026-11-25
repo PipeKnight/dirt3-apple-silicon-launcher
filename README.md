@@ -17,8 +17,9 @@ Download the DMG from [GitHub Releases](https://github.com/PipeKnight/dirt3-appl
 Mount the disk image and drag **DiRT 3 Launcher.app** into
 **Applications**. Open the launcher and click **Play**. It looks for your
 original Mac installation. Use **Choose Game…** to locate a copy in another
-folder. **Play** starts the game directly. **Show Logs** reveals the latest
-run log in Finder.
+folder. **Play** starts the game directly. **Skip startup videos** is enabled
+by default. Clear the checkbox to play the original opening videos.
+**Show Logs** reveals the latest run log in Finder.
 
 The GitHub build has an ad-hoc signature and macOS may block it on first
 open. After trying to open it, look for **Open Anyway** under **System

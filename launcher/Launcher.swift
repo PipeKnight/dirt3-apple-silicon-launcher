@@ -49,6 +49,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
     private let play = NSButton(title: "Play", target: nil, action: nil)
     private let choose = NSButton(title: "Choose Game…", target: nil, action: nil)
     private let logs = NSButton(title: "Show Logs", target: nil, action: nil)
+    private let skipVideos = NSButton(checkboxWithTitle: "Skip startup videos", target: nil, action: nil)
     private var game: URL?
     private var process: Process?
     private var lastLog: URL?
@@ -68,12 +69,16 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         configure(play, #selector(startGame))
         configure(choose, #selector(chooseGame))
         configure(logs, #selector(showLogs))
+        skipVideos.target = self
+        skipVideos.action = #selector(saveStartupVideoPreference)
+        UserDefaults.standard.register(defaults: ["skipStartupVideos": true])
+        skipVideos.state = UserDefaults.standard.bool(forKey: "skipStartupVideos") ? .on : .off
         play.keyEquivalent = "\r"
         logs.isEnabled = false
         let actions = NSStackView(views: [logs, NSView(), choose, play])
         actions.orientation = .horizontal
         actions.spacing = 8
-        let fields = NSStackView(views: [title, subtitle, path, status, actions])
+        let fields = NSStackView(views: [title, subtitle, path, skipVideos, status, actions])
         fields.orientation = .vertical
         fields.alignment = .leading
         fields.spacing = 12
@@ -146,6 +151,10 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func saveStartupVideoPreference() {
+        UserDefaults.standard.set(skipVideos.state == .on, forKey: "skipStartupVideos")
+    }
+
     @objc private func showLogs() {
         if let lastLog { NSWorkspace.shared.activateFileViewerSelecting([lastLog]) }
     }
@@ -179,6 +188,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
             child.arguments = ["-v", game.path]
             var environment = ProcessInfo.processInfo.environment
             environment["MAC32_DIRT3_DIRECT"] = "1"
+            environment["MAC32_DIRT3_SKIP_STARTUP_VIDEOS"] = skipVideos.state == .on ? "1" : "0"
             child.environment = environment
             child.currentDirectoryURL = game.deletingLastPathComponent()
             child.standardOutput = output
@@ -192,6 +202,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
             process = child
             play.isEnabled = false
             choose.isEnabled = false
+            skipVideos.isEnabled = false
             status.stringValue = "DiRT 3 is running."
         } catch {
             let failure = error as NSError
@@ -208,6 +219,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         process = nil
         play.isEnabled = true
         choose.isEnabled = true
+        skipVideos.isEnabled = true
         if signaled {
             status.stringValue = "DiRT 3 stopped on signal \(code). See the session log."
         } else {
