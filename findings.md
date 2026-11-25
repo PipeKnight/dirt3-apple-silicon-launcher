@@ -187,6 +187,10 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   the locale code used by the game. The original **Checking Content**
   screen and next intro played, followed by the interactive **New Profile**
   wizard. Arrow keys and Enter worked in the profile screens.
+- Carbon’s active non-floating window query now uses the native AppKit key
+  and main windows. The game created a fresh local profile with autosaving
+  enabled and wrote the profile files. It opened the main menu and reached
+  the **Singleplayer → Single Race** configuration using the keyboard.
 
 Playability requires loading and completing an offline race, verifying
 steering, audio, frame pacing and a save/reload cycle on the test Mac.

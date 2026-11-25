@@ -1527,10 +1527,10 @@ index 9dad843..d4921a8 100644
  
 diff --git a/src/carbon_windows.m b/src/carbon_windows.m
 new file mode 100644
-index 0000000..1997423
+index 0000000..60ed016
 --- /dev/null
 +++ b/src/carbon_windows.m
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,238 @@
 +// Carbon window handles for Cocoa windows on hosts without WindowRef.
 +#import <AppKit/AppKit.h>
 +#import <Carbon/Carbon.h>
@@ -1541,6 +1541,22 @@ index 0000000..1997423
 +{
 +	id object = (id)handle;
 +	return [object isKindOfClass:[NSWindow class]] ? object : nil;
++}
++
++static NSWindow *active_nonfloating_window(void)
++{
++	NSWindow *key = NSApp.keyWindow;
++	if (key && !([key isKindOfClass:[NSPanel class]] && [(NSPanel *)key isFloatingPanel]))
++		return key;
++	return NSApp.mainWindow;
++}
++
++static NSWindow *w_ActiveNonFloatingWindow(void)
++{
++	if ([NSThread isMainThread]) return active_nonfloating_window();
++	__block NSWindow *window;
++	dispatch_sync(dispatch_get_main_queue(), ^{ window = active_nonfloating_window(); });
++	return window;
 +}
 +
 +static NSWindow *w_GetNextWindow(void *handle)
@@ -1732,6 +1748,7 @@ index 0000000..1997423
 +}
 +
 +static struct hfn carbon_windows_fns[] = {
++	G("_ActiveNonFloatingWindow", w_ActiveNonFloatingWindow, "o:"),
 +	G("_GetNextWindow", w_GetNextWindow, "o:o"),
 +	G("_ShowWindow", w_ShowWindow, "v:o"), G("_HideWindow", w_HideWindow, "v:o"),
 +	G("_GetWindowClass", w_GetWindowClass, "i:op"),
