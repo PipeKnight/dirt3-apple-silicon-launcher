@@ -1,0 +1,1173 @@
+diff --git a/Makefile b/Makefile
+index 4c16e9d..415e674 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,10 +2,10 @@
+ CC = clang
+ CFLAGS = -arch x86_64 -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations \
+          -DGL_SILENCE_DEPRECATION -Wno-missing-field-initializers
+-LDFLAGS = -arch x86_64 -liconv -lz -framework Foundation -framework AppKit -framework Carbon \
++LDFLAGS = -arch x86_64 -lffi -lcurl -liconv -lz -framework Foundation -framework AppKit -framework Carbon \
+           -framework IOKit -framework OpenGL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
+           -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
+-SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/format.c \
++SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c \
+       src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/cg_thunks.c src/cf_thunks.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
+ OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
+ 
+diff --git a/src/apple.m b/src/apple.m
+index 47c00de..2930b28 100644
+--- a/src/apple.m
++++ b/src/apple.m
+@@ -239,6 +239,32 @@ static void t_CFStringFind(uint32_t *args, struct hres *r)
+ 	CFRange rg = CFStringFind(hobj_unwrap(A(0)), hobj_unwrap(A(1)), A(2));
+ 	r->rax = (uint32_t)rg.location | (uint64_t)(uint32_t)rg.length << 32;
+ }
++static void t_CFStringFindWithOptions(uint32_t *args, struct hres *r)
++{
++	CFRange result;
++	Boolean found = CFStringFindWithOptions(hobj_unwrap(A(0)), hobj_unwrap(A(1)),
++		CFRangeMake((int32_t)A(2), (int32_t)A(3)), A(4), &result);
++	if (found && A(5)) {
++		int32_t *out = G2H(A(5));
++		out[0] = (int32_t)result.location;
++		out[1] = (int32_t)result.length;
++	}
++	RET(found);
++}
++
++static void t_CFStringTransform(uint32_t *args, struct hres *r)
++{
++	int32_t *inout = G2H(A(1));
++	CFRange range = inout ? CFRangeMake(inout[0], inout[1]) : CFRangeMake(0, 0);
++	Boolean ok = CFStringTransform(hobj_unwrap(A(0)), inout ? &range : NULL,
++		hobj_unwrap(A(2)), A(3) != 0);
++	if (inout && ok) {
++		inout[0] = (int32_t)range.location;
++		inout[1] = (int32_t)range.length;
++	}
++	RET(ok);
++}
++
+ static void t_CFStringGetBytes(uint32_t *args, struct hres *r)
+ {
+ 	// str, CFRange (2 words), enc, lossByte, isExternal, buf, maxLen, *usedLen
+@@ -319,6 +345,21 @@ static void t_ff_none(uint32_t *args, struct hres *r) { (void)args; RET(0x800400
+ static int w_CFEqual(CFTypeRef a, CFTypeRef b) { return CFEqual(a, b) ? 1 : 0; }
+ static CFURLRef w_CFURLCreateWithBytes(CFAllocatorRef a, const UInt8 *b, int32_t n, uint32_t enc, CFURLRef base)
+ { return CFURLCreateWithBytes(a, b, n, enc, base); }
++static void t_CFStringAppendFormat(uint32_t *args, struct hres *r)
++{
++	CFStringRef format = hobj_unwrap(A(2));
++	const char *text = [(__bridge NSString *)format UTF8String];
++	int length;
++	char *output = gvformat_objc(text, args + 3, &length, describe_obj);
++	CFStringRef append = CFStringCreateWithBytes(NULL, (const UInt8 *)output,
++		length, kCFStringEncodingUTF8, false);
++	free(output);
++	if (append) {
++		CFStringAppend(hobj_unwrap(A(0)), append);
++		CFRelease(append);
++	}
++}
++
+ static void t_CFStringCreateWithFormat(uint32_t *args, struct hres *r)
+ {
+ 	// alloc, formatOptions, format, ...: %@ handled by our formatter
+@@ -383,6 +424,8 @@ static struct hfn apple[] = {
+ 	G("_CFCharacterSetIsCharacterMember", w_CFCharacterSetIsCharacterMember, "i:ou"),
+ 	G("_CFCharacterSetIsLongCharacterMember", w_CFCharacterSetIsLongCharacterMember, "i:ou"),
+ 	G("_CFDataCreate", w_CFDataCreate, "o:opi"),
++	R("_CFStringFindWithOptions", t_CFStringFindWithOptions),
++	R("_CFStringTransform", t_CFStringTransform),
+ 	R("_CFStringFind", t_CFStringFind), R("_CFStringGetBytes", t_CFStringGetBytes),
+ 	G("_CFStringCreateWithBytes", w_CFStringCreateWithBytes, "o:opiuu"),
+ 	G("_CFStringCreateWithCharacters", w_CFStringCreateWithCharacters, "o:opi"),
+@@ -416,6 +459,7 @@ static struct hfn apple[] = {
+ 	G("_CFUUIDCreate", CFUUIDCreate, "o:o"), G("_CFUUIDCreateString", CFUUIDCreateString, "o:oo"),
+ 	G("_CFEqual", w_CFEqual, "i:oo"),
+ 	R("_CFStringCreateWithFormat", t_CFStringCreateWithFormat),
++	R("_CFStringAppendFormat", t_CFStringAppendFormat),
+ 	G("_CFURLCreateWithBytes", w_CFURLCreateWithBytes, "o:opiuo"),
+ 	R("_CGDisplayBounds", t_CGDisplayBounds),
+ 	R("_CFArrayApplyFunction", t_CFArrayApplyFunction),
+diff --git a/src/apple2.m b/src/apple2.m
+index acdd903..9328663 100644
+--- a/src/apple2.m
++++ b/src/apple2.m
+@@ -10,12 +10,121 @@
+ #import <AudioToolbox/AudioToolbox.h>
+ #import <CoreAudio/CoreAudio.h>
+ #include <mach/mach.h>
++#include <stdatomic.h>
+ #include "thunks.h"
+ 
+ #define U32(a) (*(uint32_t *)G2H(a))
+ static float F32(uint32_t w) { float f; memcpy(&f, &w, 4); return f; }
+ 
+ // ---- CoreFoundation -----------------------------------------------------------
++static g32 w_CFBundleGetFunctionPointerForName(CFBundleRef bundle, CFStringRef function)
++{
++	char symbol[512] = "_";
++	if (!bundle || !function || !CFStringGetCString(function, symbol + 1, sizeof symbol - 1, kCFStringEncodingUTF8))
++		return 0;
++
++	// A native framework address cannot be called by the i386 guest.
++	// Return a typed thunk only when the requested bundle exports it.
++	g32 thunk = host_lookup(symbol);
++	if (thunk && CFBundleGetFunctionPointerForName(bundle, function))
++		return thunk;
++	LOG("CFBundle: no guest-callable function %s\n", symbol + 1);
++	return 0;
++}
++
++struct allocator32 {
++	uint32_t version;
++	g32 info, retain, release, description, allocate, reallocate, deallocate, preferred;
++};
++
++struct allocator_bridge {
++	struct allocator32 guest;
++	atomic_uint references;
++};
++
++static const void *retain_allocator_info(const void *info)
++{
++	struct allocator_bridge *bridge = (void *)info;
++	if (bridge->guest.retain)
++		bridge->guest.info = (g32)gcall(bridge->guest.retain, 1, bridge->guest.info);
++	atomic_fetch_add_explicit(&bridge->references, 1, memory_order_relaxed);
++	return bridge;
++}
++
++static void drop_allocator_bridge(struct allocator_bridge *bridge)
++{
++	if (atomic_fetch_sub_explicit(&bridge->references, 1, memory_order_acq_rel) == 1)
++		free(bridge);
++}
++
++static void release_allocator_info(const void *info)
++{
++	struct allocator_bridge *bridge = (void *)info;
++	if (bridge->guest.release)
++		gcall(bridge->guest.release, 1, bridge->guest.info);
++	drop_allocator_bridge(bridge);
++}
++
++static CFStringRef describe_allocator_info(const void *info)
++{
++	const struct allocator_bridge *bridge = info;
++	return hobj_unwrap((g32)gcall(bridge->guest.description, 1, bridge->guest.info));
++}
++
++static void *allocate_with_guest(CFIndex size, CFOptionFlags hint, void *info)
++{
++	const struct allocator_bridge *bridge = info;
++	if (size < 0 || size > INT32_MAX) return NULL;
++	return G2H(gcall(bridge->guest.allocate, 3, (uint32_t)size, (uint32_t)hint, bridge->guest.info));
++}
++
++static void *reallocate_with_guest(void *ptr, CFIndex size, CFOptionFlags hint, void *info)
++{
++	const struct allocator_bridge *bridge = info;
++	if ((uintptr_t)ptr >= LOW_END || size < 0 || size > INT32_MAX) return NULL;
++	return G2H(gcall(bridge->guest.reallocate, 4, H2G(ptr), (uint32_t)size,
++		(uint32_t)hint, bridge->guest.info));
++}
++
++static void deallocate_with_guest(void *ptr, void *info)
++{
++	const struct allocator_bridge *bridge = info;
++	if ((uintptr_t)ptr >= LOW_END) die("CFAllocator: pointer outside guest address space");
++	gcall(bridge->guest.deallocate, 2, H2G(ptr), bridge->guest.info);
++}
++
++static CFIndex preferred_guest_size(CFIndex size, CFOptionFlags hint, void *info)
++{
++	const struct allocator_bridge *bridge = info;
++	if (size < 0 || size > INT32_MAX) return size;
++	return (int32_t)gcall(bridge->guest.preferred, 3, (uint32_t)size,
++		(uint32_t)hint, bridge->guest.info);
++}
++
++static void t_CFAllocatorCreate(uint32_t *args, struct hres *r)
++{
++	const struct allocator32 *guest = G2H(A(1));
++	if (!guest || guest->version != 0 || !guest->allocate) { RET(0); return; }
++	struct allocator_bridge *bridge = malloc(sizeof *bridge);
++	if (!bridge) { RET(0); return; }
++	bridge->guest = *guest;
++	atomic_init(&bridge->references, 1);
++	CFAllocatorContext host = {
++		.version = 0,
++		.info = bridge,
++		.retain = retain_allocator_info,
++		.release = release_allocator_info,
++		.copyDescription = guest->description ? describe_allocator_info : NULL,
++		.allocate = allocate_with_guest,
++		.reallocate = guest->reallocate ? reallocate_with_guest : NULL,
++		.deallocate = guest->deallocate ? deallocate_with_guest : NULL,
++		.preferredSize = guest->preferred ? preferred_guest_size : NULL,
++	};
++	CFAllocatorRef allocator = CFAllocatorCreate(hobj_unwrap(A(0)), &host);
++	drop_allocator_bridge(bridge);
++	RET(hobj_wrap((void *)allocator));
++}
++
+ static void t_CFDictionaryGetValueIfPresent(uint32_t *args, struct hres *r)
+ {
+ 	const void *v = NULL;
+@@ -296,7 +405,9 @@ static struct hfn apple2_fns[] = {
+ 	G("_CFRunLoopStop", CFRunLoopStop, "v:o"), G("_CFRunLoopWakeUp", CFRunLoopWakeUp, "v:o"),
+ 	D("_kCFRunLoopDefaultMode", 4, init_rlmode), D("_kCFRunLoopCommonModes", 4, init_rlcommon),
+ 	G("_CFRunLoopRemoveSource", CFRunLoopRemoveSource, "v:ooo"),
++	R("_CFAllocatorCreate", t_CFAllocatorCreate),
+ 	G("_CFBundleGetInfoDictionary", CFBundleGetInfoDictionary, "o:o"),
++	G("_CFBundleGetFunctionPointerForName", w_CFBundleGetFunctionPointerForName, "u:oo"),
+ 	// a real event tap needs the Accessibility permission, which mac32 does not
+ 	// have: return no tap, as macOS does (SDL copes; VLC 1.1's media keys assert).
+ 	// MAC32_FAKE_EVENT_TAP=1 hands out a port that never fires instead.
+diff --git a/src/legacy.m b/src/legacy.m
+index 484efa9..15ec7be 100644
+--- a/src/legacy.m
++++ b/src/legacy.m
+@@ -7,6 +7,7 @@
+ #import <objc/runtime.h>
+ #include <zlib.h>
+ #include <pthread.h>
++#include <ffi/ffi.h>
+ #include <langinfo.h>
+ #include <mach-o/arch.h>
+ #include <xlocale.h>
+@@ -614,6 +615,18 @@ static void t_dyld_get_image_name(uint32_t *args, struct hres *r)
+ 	RET(names[A(0)]);
+ }
+ static uint32_t w_dyld_get_image_header(uint32_t i) { return macho_image_header(i); }
++static g32 w_getsectdatafromheader(g32 header, const char *seg, const char *sect, uint32_t *size)
++{
++	if (header) return macho_get_section_data(header, seg, sect, size);
++	if (size) *size = 0;
++	return 0;
++}
++
++static g32 w_getsectdata(const char *seg, const char *sect, uint32_t *size)
++{
++	return macho_get_section_data(0, seg, sect, size);
++}
++
+ static int32_t w_dyld_get_image_vmaddr_slide(uint32_t i) { return macho_image_slide(i); }
+ static int w_shm_open(const char *n, int fl, int mode) { return shm_open(n, fl, mode); }
+ static int w_shm_unlink(const char *n) { return shm_unlink(n); }
+@@ -682,6 +695,80 @@ static void t_InstallEventHandler(uint32_t *args, struct hres *r)
+ 	if (A(5)) U32(A(5)) = hobj_wrap(ref);
+ 	RET(rc);
+ }
++static void t_CreateEvent(uint32_t *args, struct hres *r)
++{
++	if (!A(6)) { RET(paramErr); return; }
++	EventTime time;
++	memcpy(&time, args + 3, sizeof time);
++	EventRef event = NULL;
++	OSStatus status = CreateEvent(hobj_unwrap(A(0)), A(1), A(2), time, A(5), &event);
++	if (status == noErr) U32(A(6)) = hobj_wrap(event);
++	RET(status);
++}
++
++static void w_ReleaseEvent(EventRef event)
++{
++	if (event) ReleaseEvent(event);
++}
++
++static void t_HIObjectCreate(uint32_t *args, struct hres *r)
++{
++	if (!A(2)) { RET(paramErr); return; }
++	HIObjectRef object = NULL;
++	OSStatus status = HIObjectCreate(hobj_unwrap(A(0)), hobj_unwrap(A(1)), &object);
++	if (status == noErr) U32(A(2)) = hobj_wrap(object);
++	RET(status);
++}
++
++struct hi_constructor {
++	ffi_cif signature;
++	ffi_closure *closure;
++	g32 guest_handler;
++};
++
++static void call_hi_constructor(ffi_cif *signature, void *result, void **args, void *context)
++{
++	const struct hi_constructor *bridge = context;
++	EventHandlerCallRef call = *(EventHandlerCallRef *)args[0];
++	EventRef event = *(EventRef *)args[1];
++	uintptr_t data = (uintptr_t)*(void **)args[2];
++	if (data >= LOW_END) die("HIObject callback data outside guest address space");
++	*(ffi_sarg *)result = (OSStatus)gcall(bridge->guest_handler, 3,
++		hobj_wrap(call), hobj_wrap(event), (g32)data);
++}
++
++static void t_HIObjectRegisterSubclass(uint32_t *args, struct hres *r)
++{
++	static ffi_type *types[] = { &ffi_type_pointer, &ffi_type_pointer, &ffi_type_pointer };
++	struct hi_constructor *bridge = NULL;
++	void *entry = NULL;
++	if (A(3)) {
++		bridge = calloc(1, sizeof *bridge);
++		if (!bridge) { RET(memFullErr); return; }
++		bridge->guest_handler = A(3);
++		bridge->closure = ffi_closure_alloc(sizeof(ffi_closure), &entry);
++		if (!bridge->closure ||
++		    ffi_prep_cif(&bridge->signature, FFI_DEFAULT_ABI, 3, &ffi_type_sint32, types) != FFI_OK ||
++		    ffi_prep_closure_loc(bridge->closure, &bridge->signature, call_hi_constructor, bridge, entry) != FFI_OK) {
++			if (bridge->closure) ffi_closure_free(bridge->closure);
++			free(bridge);
++			RET(memFullErr);
++			return;
++		}
++	}
++	HIObjectClassRef class_ref = NULL;
++	OSStatus status = HIObjectRegisterSubclass(hobj_unwrap(A(0)), hobj_unwrap(A(1)),
++		A(2), (EventHandlerUPP)entry, A(4), G2H(A(5)), G2H(A(6)), &class_ref);
++	if (status == noErr) {
++		if (A(7)) U32(A(7)) = hobj_wrap(class_ref);
++		// Carbon stores the closure for the lifetime of the registered class.
++	} else if (bridge) {
++		ffi_closure_free(bridge->closure);
++		free(bridge);
++	}
++	RET(status);
++}
++
+ static EventTargetRef w_GetApplicationEventTarget(void) { return GetApplicationEventTarget(); }
+ static EventQueueRef w_GetMainEventQueue(void) { return GetMainEventQueue(); }
+ static uint32_t w_GetEventClass(EventRef e) { return GetEventClass(e); }
+@@ -693,16 +780,158 @@ static void t_GetEventParameter(uint32_t *args, struct hres *r)
+ {
+ 	ByteCount n = 0;
+ 	EventParamType t = 0;
+-	OSStatus rc = GetEventParameter(hobj_unwrap(A(0)), A(1), A(2), A(3) ? &t : NULL, A(4), A(5) ? &n : NULL,
+-					A(6) ? G2H(A(6)) : NULL);
++	EventRef event = hobj_unwrap(A(0));
++	EventParamType wanted = A(2);
++	if (wanted == typeWildCard &&
++	    GetEventParameter(event, A(1), wanted, &t, 0, NULL, NULL) == noErr)
++		wanted = t;
++	OSStatus rc;
++	if (wanted == typeHIObjectRef || wanted == typeVoidPtr) {
++		void *pointer = NULL;
++		if (A(6) && A(4) < sizeof(g32)) { RET(paramErr); return; }
++		rc = GetEventParameter(event, A(1), wanted, &t, sizeof pointer, &n, &pointer);
++		if (rc == noErr) {
++			if (wanted == typeVoidPtr && (uintptr_t)pointer >= LOW_END) { RET(paramErr); return; }
++			if (A(6)) U32(A(6)) = wanted == typeHIObjectRef ? hobj_wrap(pointer) : H2G(pointer);
++			n = sizeof(g32);
++		}
++	} else {
++		rc = GetEventParameter(event, A(1), A(2), A(3) ? &t : NULL, A(4), A(5) ? &n : NULL,
++			G2H(A(6)));
++	}
+ 	if (A(3)) U32(A(3)) = t;
+ 	if (A(5)) U32(A(5)) = (uint32_t)n;
+ 	RET(rc);
+ }
++struct process_info32 {
++	uint32_t length;
++	g32 name;
++	ProcessSerialNumber number;
++	uint32_t type, signature, mode;
++	g32 location;
++	uint32_t size, free_mem;
++	ProcessSerialNumber launcher;
++	uint32_t launch_date, active_time;
++	g32 app_spec;
++	uint32_t temp_mem, purgeable_temp_mem;
++};
++
++static OSErr encode_process_spec(const FSRef *ref, g32 out)
++{
++	FSCatalogInfo catalog = {0};
++	HFSUniStr255 name;
++	OSErr status = FSGetCatalogInfo(ref, kFSCatInfoVolume | kFSCatInfoParentDirID,
++		&catalog, &name, NULL, NULL);
++	if (status) return status;
++	CFStringRef string = CFStringCreateWithCharacters(NULL, name.unicode, name.length);
++	if (!string) return memFullErr;
++	unsigned char *spec = G2H(out);
++	Boolean ok = CFStringGetPascalString(string, spec + 6, 64, kCFStringEncodingMacRoman);
++	CFRelease(string);
++	if (!ok) return paramErr;
++	memcpy(spec, &catalog.volume, 2);
++	memcpy(spec + 2, &catalog.parentDirID, 4);
++	return noErr;
++}
++
++static void t_FSGetCatalogInfo(uint32_t *args, struct hres *r)
++{
++	FSCatalogInfo info = {0};
++	const FSRef *ref = G2H(A(0));
++	OSStatus status = FSGetCatalogInfo(ref, A(1), A(2) ? &info : NULL,
++		G2H(A(3)), NULL, G2H(A(5)));
++	if (status == noErr && A(4)) status = encode_process_spec(ref, A(4));
++	if (status == noErr && A(2)) {
++		// The packed i386 record has a 16-byte permission field, with
++		// a 32-bit FSFileSecurityRef in its last word.
++		unsigned char *out = G2H(A(2));
++		const size_t permissions = offsetof(FSCatalogInfo, permissions);
++		const size_t tail = offsetof(FSCatalogInfo, finderInfo);
++		g32 security = A(1) & kFSCatInfoFSFileSecurityRef ? hobj_wrap(info.permissions.fileSec) : 0;
++		memcpy(out, &info, permissions + 12);
++		memcpy(out + permissions + 12, &security, sizeof security);
++		memcpy(out + permissions + 16, (const unsigned char *)&info + tail, sizeof info - tail);
++	}
++	RET(status);
++}
++
++static void t_GetProcessInformation(uint32_t *args, struct hres *r)
++{
++	const ProcessSerialNumber *psn = G2H(A(0));
++	struct process_info32 *guest = G2H(A(1));
++	const uint32_t ordinary = offsetof(struct process_info32, temp_mem);
++	if (!psn || !guest || (guest->length != ordinary && guest->length != sizeof *guest)) {
++		RET(paramErr);
++		return;
++	}
++	Str31 name;
++	FSRef app;
++	ProcessInfoExtendedRec host = {
++		.processInfoLength = guest->length == ordinary ? sizeof(ProcessInfoRec) : sizeof host,
++		.processName = guest->name ? name : NULL,
++		.processAppRef = guest->app_spec ? &app : NULL,
++	};
++	OSErr status = GetProcessInformation(psn, (ProcessInfoRec *)&host);
++	if (status) { RET(status); return; }
++
++	extern void *guest_main_cfbundle(void);
++	Boolean self = psn->highLongOfPSN == 0 && psn->lowLongOfPSN == kCurrentProcess;
++	CFBundleRef bundle = self ? guest_main_cfbundle() : NULL;
++	if (bundle) {
++		CFBundleGetPackageInfo(bundle, &host.processType, &host.processSignature);
++		if (guest->name) {
++			const char *path = macho_image_name(0);
++			const char *leaf = path ? strrchr(path, '/') : NULL;
++			if (leaf) {
++				size_t length = strnlen(leaf + 1, sizeof name - 1);
++				name[0] = (unsigned char)length;
++				memcpy(name + 1, leaf + 1, length);
++			}
++		}
++		if (guest->app_spec) {
++			CFURLRef url = CFBundleCopyBundleURL(bundle);
++			if (url) {
++				CFURLGetFSRef(url, &app);
++				CFRelease(url);
++			}
++		}
++	}
++	if (guest->app_spec && (status = encode_process_spec(&app, guest->app_spec))) {
++		RET(status);
++		return;
++	}
++	if (guest->name) memcpy(G2H(guest->name), name, (size_t)name[0] + 1);
++	guest->number = host.processNumber;
++	guest->type = host.processType;
++	guest->signature = host.processSignature;
++	guest->mode = host.processMode;
++	guest->location = (uintptr_t)host.processLocation < LOW_END ? H2G(host.processLocation) : 0;
++	guest->size = host.processSize;
++	guest->free_mem = host.processFreeMem;
++	guest->launcher = host.processLauncher;
++	guest->launch_date = host.processLaunchDate;
++	guest->active_time = host.processActiveTime;
++	if (guest->length == sizeof *guest) {
++		guest->temp_mem = host.processTempMemTotal;
++		guest->purgeable_temp_mem = host.processPurgeableTempMemTotal;
++	}
++	RET(noErr);
++}
++
+ static int w_GetFrontProcess(ProcessSerialNumber *p) { return GetFrontProcess(p); }
+ static int w_SameProcess(const ProcessSerialNumber *a, const ProcessSerialNumber *b, Boolean *res) { return SameProcess(a, b, res); }
+ static CFDictionaryRef w_ProcessInformationCopyDictionary(const ProcessSerialNumber *p, uint32_t m) { return ProcessInformationCopyDictionary(p, m); }
+-static int w_SetEventParameter(EventRef e, uint32_t name, uint32_t type, uint32_t size, const void *data) { return SetEventParameter(e, name, type, size, data); }
++static int w_SetEventParameter(EventRef e, uint32_t name, uint32_t type, uint32_t size, const void *data)
++{
++	if (type == typeHIObjectRef || type == typeVoidPtr) {
++		if (size != sizeof(g32) || !data) return paramErr;
++		g32 address;
++		memcpy(&address, data, sizeof address);
++		void *pointer = type == typeHIObjectRef ? hobj_unwrap(address) : G2H(address);
++		return SetEventParameter(e, name, type, sizeof pointer, &pointer);
++	}
++	return SetEventParameter(e, name, type, size, data);
++}
+ 
+ static struct hfn legacy_fns[] = {
+ 	R("_tcgetattr", t_tcgetattr), R("_tcsetattr", t_tcsetattr),
+@@ -710,8 +939,15 @@ static struct hfn legacy_fns[] = {
+ 	R("_NewEventHandlerUPP", t_upp_identity), R("_DisposeEventHandlerUPP", t_nothing),
+ 	R("_InstallEventHandler", t_InstallEventHandler),
+ 	G("_GetApplicationEventTarget", w_GetApplicationEventTarget, "o:"), G("_GetMainEventQueue", w_GetMainEventQueue, "o:"),
++	R("_HIObjectCreate", t_HIObjectCreate), R("_HIObjectRegisterSubclass", t_HIObjectRegisterSubclass),
++	G("_HIObjectCopyClassID", HIObjectCopyClassID, "o:o"),
++	G("_HIObjectGetEventTarget", HIObjectGetEventTarget, "o:o"),
++	R("_CreateEvent", t_CreateEvent), G("_RetainEvent", RetainEvent, "o:o"),
++	G("_ReleaseEvent", w_ReleaseEvent, "v:o"), G("_GetEventTime", GetEventTime, "d:o"),
+ 	G("_GetEventClass", w_GetEventClass, "u:o"), G("_GetEventKind", w_GetEventKind, "u:o"),
+ 	G("_RemoveEventHandler", w_RemoveEventHandler, "i:o"), G("_CallNextEventHandler", w_CallNextEventHandler, "i:oo"),
++	R("_FSGetCatalogInfo", t_FSGetCatalogInfo),
++	R("_GetProcessInformation", t_GetProcessInformation),
+ 	G("_GetFrontProcess", w_GetFrontProcess, "i:p"), G("_SameProcess", w_SameProcess, "i:ppp"),
+ 	G("_ProcessInformationCopyDictionary", w_ProcessInformationCopyDictionary, "o:pu"),
+ 	R("_GetEventParameter", t_GetEventParameter), G("_SetEventParameter", w_SetEventParameter, "i:ouuup"),
+@@ -755,6 +991,9 @@ static struct hfn legacy_fns[] = {
+ 	G("__dyld_image_count", w_dyld_image_count, "u:"), R("__dyld_get_image_name", t_dyld_get_image_name),
+ 	G("__dyld_get_image_header", w_dyld_get_image_header, "u:u"),
+ 	G("__dyld_get_image_vmaddr_slide", w_dyld_get_image_vmaddr_slide, "i:u"),
++	G("_getsectdatafromheader", w_getsectdatafromheader, "u:uppp"),
++	G("_getsectdata", w_getsectdata, "u:ppp"),
++	G("_getsegbyname", macho_main_segment, "u:p"),
+ 	R("_libiconv_set_relocation_prefix", t_libiconv_set_relocation_prefix),
+ 	G("_shm_open", w_shm_open, "i:pii"), G("_shm_unlink", w_shm_unlink, "i:p"),
+ 	G("_sigwait", w_sigwait, "i:pp"), G("_sigwait$UNIX2003", w_sigwait, "i:pp"),
+diff --git a/src/libc.c b/src/libc.c
+index 8f40938..4c329a9 100644
+--- a/src/libc.c
++++ b/src/libc.c
+@@ -461,7 +461,6 @@ static double floatundidf(uint64_t v) { return (double)v; }
+ static float floatdisf(int64_t v) { return (float)v; }
+ 
+ // small wrappers whose host type is wider than the guest's
+-static uint32_t w_malloc_size(uint32_t p) { return gmalloc_size(p); }
+ static int w_tolower(int c) { return tolower(c); }
+ static int w_toupper(int c) { return toupper(c); }
+ static int w_rand(void) { return rand(); }
+@@ -552,9 +551,6 @@ static void t_bsearch(uint32_t *args, struct hres *r)
+ 	RET(0);
+ }
+ 
+-// valloc is page-aligned by definition (GLib's slice allocator checks)
+-static g32 w_valloc(uint32_t n) { return gmemalign(4096, n); }
+-static g32 w_memalign(uint32_t a, uint32_t n) { return gmemalign(a, n); }
+ 
+ // the old dyld image API: NSAddImage is dlopen; NSLookupSymbolInImage takes
+ // the C name (with its underscore) and returns the address as the "symbol"
+@@ -576,13 +572,7 @@ static void t_NSIsSymbolNameDefinedInImage(uint32_t *args, struct hres *r)
+ }
+ 
+ static struct hfn libc[] = {
+-	// memory
+-	G("_malloc", gmalloc, "p:u"),
+-	G("_calloc", gcalloc, "p:uu"),
+-	G("_realloc", grealloc, "p:pu"),
+-	G("_free", gfree, "v:p"),
+-	G("_malloc_size", w_malloc_size, "u:p"),
+-	G("_valloc", w_valloc, "p:u"), G("_memalign", w_memalign, "p:uu"),
++	G("_sbrk", guest_sbrk, "u:i"),
+ 	// strings
+ 	G("_memcpy", memcpy, "p:ppu"),
+ 	G("_memmove", memmove, "p:ppu"),
+diff --git a/src/libc3.c b/src/libc3.c
+index 7437c1d..dbc8170 100644
+--- a/src/libc3.c
++++ b/src/libc3.c
+@@ -12,6 +12,7 @@
+ #include <netdb.h>
+ #include <errno.h>
+ #include <copyfile.h>
++#include <curl/curl.h>
+ #include <uuid/uuid.h>
+ #include <malloc/malloc.h>
+ #include <arpa/inet.h>
+@@ -573,15 +574,27 @@ static void t_dyld_find_unwind_sections(uint32_t *args, struct hres *r) { RET(ma
+ static void t_dladdr(uint32_t *args, struct hres *r) { RET(macho_dladdr(A(0), A(1))); }
+ static void t_posix_memalign(uint32_t *args, struct hres *r)
+ {
+-	g32 p = gmemalign(A(1), A(2));
+-	*(g32 *)G2H(A(0)) = p;
+-	RET(p ? 0 : 12);	// ENOMEM
++	uint32_t align = A(1);
++	if (align < sizeof(g32) || (align & (align - 1))) { RET(EINVAL); return; }
++	g32 p = guest_memalign(align, A(2));
++	if (p) *(g32 *)G2H(A(0)) = p;
++	RET(p ? 0 : ENOMEM);
+ }
+ // __cxa_demangle: not provided; status -2 makes callers print the mangled name
+ static void t_cxa_demangle(uint32_t *args, struct hres *r) { if (A(3)) *(int32_t *)G2H(A(3)) = -2; RET(0); }
+ 
+ // ---- Multiprocessing Services semaphores --------------------------------------------
+ #include <dispatch/dispatch.h>
++static dispatch_semaphore_t w_dispatch_semaphore_create(int32_t value)
++{
++	return dispatch_semaphore_create(value);
++}
++
++static void w_dispatch_release(dispatch_object_t object)
++{
++	dispatch_release(object);
++}
++
+ static void t_MPCreateSemaphore(uint32_t *args, struct hres *r)
+ {
+ 	dispatch_semaphore_t s = dispatch_semaphore_create((long)A(1));
+@@ -622,10 +635,43 @@ static void audio_off(void)
+ }
+ static void t_audio_err(uint32_t *args, struct hres *r) { (void)args; audio_off(); RET(0x77686174); }	// 'what'
+ static void t_noop0(uint32_t *args, struct hres *r) { (void)args; RET(0); }
++static CURLcode w_curl_global_init(int32_t flags)
++{
++	return curl_global_init(flags);
++}
++
++static void t_curl_multi_timeout(uint32_t *args, struct hres *r)
++{
++	long timeout = -1;
++	CURLMcode status = curl_multi_timeout(hobj_unwrap(A(0)), A(1) ? &timeout : NULL);
++	if (status == CURLM_OK && A(1))
++		*(int32_t *)G2H(A(1)) = timeout > INT32_MAX ? INT32_MAX : (int32_t)timeout;
++	RET(status);
++}
++
++static void t_curl_multi_info_read(uint32_t *args, struct hres *r)
++{
++	CURLMsg *message = curl_multi_info_read(hobj_unwrap(A(0)), G2H(A(1)));
++	if (!message) { RET(0); return; }
++	static __thread g32 result;
++	if (!result) result = gmalloc(3 * sizeof(uint32_t));
++	uint32_t *out = G2H(result);
++	out[0] = message->msg;
++	out[1] = hobj_wrap(message->easy_handle);
++	out[2] = message->msg == CURLMSG_DONE ? (uint32_t)message->data.result : 0;
++	RET(result);
++}
++
+ static void t_curl_fail(uint32_t *args, struct hres *r) { (void)args; RET(2); }	// CURLE_FAILED_INIT
+ static void t_event_timeout(uint32_t *args, struct hres *r) { (void)args; RET(-9875); }	// eventLoopTimedOutErr
+ 
+ static struct hfn libc3[] = {
++	G("_dispatch_semaphore_create", w_dispatch_semaphore_create, "o:i"),
++	G("_dispatch_semaphore_wait", dispatch_semaphore_wait, "i:ol"),
++	G("_dispatch_semaphore_signal", dispatch_semaphore_signal, "i:o"),
++	G("_dispatch_release", w_dispatch_release, "v:o"),
++	G("_dispatch_time", dispatch_time, "l:ll"),
++
+ 	G("_socket", socket, "i:iii"), G("_bind", bind, "i:ipu"), G("_connect", connect, "i:ipu"),
+ 	G("_listen", listen, "i:ii"), G("_accept", accept, "i:ipp"),
+ 	G("_send", w_send, "i:ipui"), G("_recv", w_recv, "i:ipui"),
+@@ -704,12 +750,20 @@ static struct hfn libc3[] = {
+ 	G("_strcoll", strcoll, "i:pp"), R("_localeconv", t_localeconv),
+ 	// audio units: src/audio.c; pulling samples out of a unit is not bridged
+ 	R("_AudioUnitRender", t_audio_err),
+-	// curl (server browser / news): not available yet
+-	R("_curl_global_init", t_noop0), R("_curl_easy_init", t_noop0), R("_curl_easy_cleanup", t_noop0),
++	// The multi handle can service an empty queue. Easy requests still
++	// use the upstream offline behavior until guest callbacks are bridged.
++	G("_curl_global_init", w_curl_global_init, "i:i"), G("_curl_global_cleanup", curl_global_cleanup, "v:"),
++	G("_curl_multi_init", curl_multi_init, "o:"), G("_curl_multi_cleanup", curl_multi_cleanup, "i:o"),
++	G("_curl_multi_add_handle", curl_multi_add_handle, "i:oo"),
++	G("_curl_multi_remove_handle", curl_multi_remove_handle, "i:oo"),
++	G("_curl_multi_perform", curl_multi_perform, "i:op"),
++	G("_curl_multi_fdset", curl_multi_fdset, "i:opppp"),
++	R("_curl_multi_timeout", t_curl_multi_timeout), R("_curl_multi_info_read", t_curl_multi_info_read),
++	R("_curl_easy_init", t_noop0), R("_curl_easy_cleanup", t_noop0), R("_curl_easy_reset", t_noop0),
+ 	R("_curl_easy_setopt", t_curl_fail), R("_curl_easy_perform", t_curl_fail), R("_curl_easy_getinfo", t_curl_fail),
+ 	// Carbon event/window calls: the Cocoa launcher drives events, so report "no events"
+ 	R("_ReceiveNextEvent", t_event_timeout), R("_GetEventDispatcherTarget", t_noop0),
+-	R("_SendEventToEventTarget", t_noop0), R("_ReleaseEvent", t_noop0),
++	R("_SendEventToEventTarget", t_noop0),
+ 	R("_ConvertEventRefToEventRecord", t_noop0), R("_AEProcessAppleEvent", t_noop0),
+ 	R("_ShowWindow", t_noop0), R("_CollapseWindow", t_noop0), R("_SetUserFocusWindow", t_noop0),
+ 	R("_InvalWindowRect", t_noop0),
+diff --git a/src/lowmem.c b/src/lowmem.c
+index f643f3f..4a9ae57 100644
+--- a/src/lowmem.c
++++ b/src/lowmem.c
+@@ -3,6 +3,7 @@
+ // and malloc blocks from it.
+ #include "mac32.h"
+ #include <sys/mman.h>
++#include <errno.h>
+ #include <string.h>
+ #include <os/lock.h>
+ #include <pthread.h>
+@@ -242,6 +243,36 @@ uint32_t low_block_len(g32 a)
+ 	return len;
+ }
+ 
++// A dedicated sparse arena implements the guest process break. Keep it
++// separate from mac32's heap and commit pages only as the break grows.
++g32 guest_sbrk(int32_t delta)
++{
++	const uint32_t capacity = 64u * 1024 * 1024;
++	static os_unfair_lock break_lock = OS_UNFAIR_LOCK_INIT;
++	static g32 base;
++	static uint32_t used;
++
++	os_unfair_lock_lock(&break_lock);
++	int64_t next = (int64_t)used + delta;
++	if (next < 0 || next > capacity) {
++		os_unfair_lock_unlock(&break_lock);
++		errno = ENOMEM;
++		return UINT32_MAX;
++	}
++	if (!base) base = low_pages(capacity, PROT_NONE);
++	uint32_t old_pages = (used + 0xfffu) & ~0xfffu;
++	uint32_t next_pages = ((uint32_t)next + 0xfffu) & ~0xfffu;
++	if (next_pages > old_pages)
++		low_commit(base + old_pages, next_pages - old_pages, PROT_READ | PROT_WRITE);
++	else if (next_pages < old_pages)
++		low_commit(base + next_pages, old_pages - next_pages, PROT_NONE);
++
++	g32 old_break = base + used;
++	used = (uint32_t)next;
++	os_unfair_lock_unlock(&break_lock);
++	return old_break;
++}
++
+ // Guest heap. Size classes of 16 bytes up to 2 KB come from 64 KB slabs,
+ // classes a quarter power of two apart up to 32 KB from 512 KB slabs;
+ // anything bigger gets its own pages. Each block has a 16-byte header so the
+@@ -362,12 +393,24 @@ uint32_t gmalloc_size(g32 p)
+ 	return h->magic == MAGIC ? h->size : 0;
+ }
+ 
++// malloc_size may be asked about an arbitrary address in the guest.
++uint32_t gmalloc_query_size(g32 p)
++{
++	if (p < LOW_START + sizeof(struct hdr) || p >= LOW_END || p % 16) return 0;
++	struct hdr header;
++	mach_vm_size_t copied = 0;
++	kern_return_t status = mach_vm_read_overwrite(mach_task_self(), p - sizeof header,
++		sizeof header, (mach_vm_address_t)&header, &copied);
++	return status == KERN_SUCCESS && copied == sizeof header && header.magic == MAGIC
++		? header.size : 0;
++}
++
+ g32 gcalloc(uint32_t n, uint32_t sz)
+ {
+ 	uint64_t t = (uint64_t)n * sz;
+ 	if (t > 0xffffffffu) return 0;
+ 	g32 p = gmalloc((uint32_t)t);
+-	memset(G2H(p), 0, t);
++	if (p) memset(G2H(p), 0, t);
+ 	return p;
+ }
+ 
+@@ -377,6 +420,7 @@ g32 grealloc(g32 p, uint32_t n)
+ 	uint32_t old = gmalloc_size(p);
+ 	if (n <= old) return p;
+ 	g32 q = gmalloc(n);
++	if (!q) return 0;
+ 	memcpy(G2H(q), G2H(p), old);
+ 	gfree(p);
+ 	return q;
+diff --git a/src/mac32.h b/src/mac32.h
+index cd3d5fb..8d8275e 100644
+--- a/src/mac32.h
++++ b/src/mac32.h
+@@ -22,6 +22,7 @@ void low_commit(g32 addr, uint32_t len, int prot);	// map fixed, zeroed
+ g32 low_pages(uint32_t len, int prot);			// page-aligned block
+ int low_free(g32 a);
+ void low_exe_placed(g32 hi);
++g32 guest_sbrk(int32_t delta);
+ void low_describe(g32 a);				// crash reports: what is at a				// main program mapped; free the space below EXE_ZONE					// give a low_pages block back
+ uint32_t low_block_len(g32 a);				// its length, 0 if a is not one
+ g32 gmalloc(uint32_t n);
+@@ -30,6 +31,7 @@ g32 grealloc(g32 p, uint32_t n);
+ g32 gmemalign(uint32_t align, uint32_t n);
+ void gfree(g32 p);
+ uint32_t gmalloc_size(g32 p);
++uint32_t gmalloc_query_size(g32 p);
+ g32 gstrdup(const char *s);
+ 
+ // cpu.c: mode switching and host calls.
+@@ -78,6 +80,8 @@ const uint8_t *macho_file_bytes(struct image *img, size_t *n);	// its i386 slice
+ uint32_t macho_image_count(void);			// dyld's image list, main program first
+ const char *macho_image_name(uint32_t i);
+ g32 macho_image_header(uint32_t i);
++g32 macho_main_segment(const char *name);
++g32 macho_get_section_data(g32 header, const char *seg, const char *sect, uint32_t *size);
+ int32_t macho_image_slide(uint32_t i);			// search every loaded image
+ g32 macho_entry(struct image *img);
+ g32 macho_main(struct image *img);
+diff --git a/src/macho.c b/src/macho.c
+index 29859a8..bdbe8eb 100644
+--- a/src/macho.c
++++ b/src/macho.c
+@@ -728,14 +728,15 @@ static struct image *image_at_index(uint32_t i)
+ }
+ uint32_t macho_image_count(void) { uint32_t n = 0; for (struct image *m = images; m; m = m->next) n++; return n; }
+ const char *macho_image_name(uint32_t i) { struct image *m = image_at_index(i); return m ? m->path : NULL; }
+-g32 macho_image_header(uint32_t i)
++static g32 image_header(struct image *image)
+ {
+-	struct image *m = image_at_index(i);
+-	if (!m) return 0;
+-	for (int s = 0; s < m->nseg; s++)
+-		if (m->seg[s]->fileoff == 0 && m->seg[s]->filesize) return m->seg[s]->vmaddr + (g32)m->slide;
++	if (!image) return 0;
++	for (int s = 0; s < image->nseg; s++)
++		if (image->seg[s]->fileoff == 0 && image->seg[s]->filesize)
++			return image->seg[s]->vmaddr + (g32)image->slide;
+ 	return 0;
+ }
++g32 macho_image_header(uint32_t i) { return image_header(image_at_index(i)); }
+ int32_t macho_image_slide(uint32_t i) { struct image *m = image_at_index(i); return m ? m->slide : 0; }
+ 
+ int macho_section(struct image *img, const char *seg, const char *sect, g32 *addr, uint32_t *size)
+@@ -753,6 +754,36 @@ int macho_section(struct image *img, const char *seg, const char *sect, g32 *add
+ 	return 0;
+ }
+ 
++g32 macho_main_segment(const char *name)
++{
++	g32 header = image_header(main_image);
++	if (!header) return 0;
++	for (int i = 0; i < main_image->nseg; i++) {
++		struct segment_command *segment = main_image->seg[i];
++		if (!strncmp(segment->segname, name, sizeof segment->segname))
++			return header + (g32)((const uint8_t *)segment - main_image->f);
++	}
++	return 0;
++}
++
++// The old header-based API returns the unslid address. Its caller
++// can add _dyld_get_image_vmaddr_slide; getsectdata instead uses the
++// loaded main image and returns the usable address immediately.
++g32 macho_get_section_data(g32 header, const char *seg, const char *sect, uint32_t *size)
++{
++	struct image *image = main_image;
++	if (header) {
++		for (image = images; image; image = image->next)
++			if (image_header(image) == header) break;
++	}
++	g32 addr = 0;
++	uint32_t length = 0;
++	if (image && macho_section(image, seg, sect, &addr, &length) && header)
++		addr -= (g32)image->slide;
++	if (size) *size = length;
++	return addr;
++}
++
+ struct image *macho_dlopen(const char *path)
+ {
+ 	if (!path) return main_image;
+diff --git a/src/malloc_zones.c b/src/malloc_zones.c
+new file mode 100644
+index 0000000..4129d89
+--- /dev/null
++++ b/src/malloc_zones.c
+@@ -0,0 +1,257 @@
++// Guest malloc zones. Zone headers and function pointers use the i386 ABI.
++// mac32's own allocations always use its low heap directly.
++#include "thunks.h"
++#include <errno.h>
++#include <os/lock.h>
++#include <string.h>
++
++struct zone32 {
++	g32 reserved[2];
++	g32 size, malloc, calloc, valloc, free, realloc, destroy;
++	g32 name, batch_malloc, batch_free, introspect;
++	uint32_t version;
++	g32 memalign, free_definite_size;
++};
++_Static_assert(offsetof(struct zone32, version) == 52, "i386 malloc_zone_t version offset");
++
++static os_unfair_lock registry_lock = OS_UNFAIR_LOCK_INIT;
++static g32 builtin;
++static g32 initial_zones[4];
++static g32 *zones = initial_zones;
++static size_t zone_count, zone_capacity = sizeof initial_zones / sizeof initial_zones[0];
++
++// Calls made by a custom allocator to obtain its own backing storage use
++// the low heap. The host must never give a guest callback to libmalloc.
++static __thread unsigned inside_zone;
++
++static struct zone32 *zone_header(g32 zone)
++{
++	return G2H(zone);
++}
++
++static uint32_t invoke_zone(g32 callback, g32 zone, uint32_t a, uint32_t b)
++{
++	if (!callback) die("malloc: missing callback in guest zone %#x", zone);
++	inside_zone++;
++	uint32_t result = (uint32_t)gcall(callback, 3, zone, a, b);
++	inside_zone--;
++	return result;
++}
++
++static void register_zone(g32 zone)
++{
++	if (!zone) return;
++	os_unfair_lock_lock(&registry_lock);
++	for (size_t i = 0; i < zone_count; i++) {
++		if (zones[i] == zone) {
++			os_unfair_lock_unlock(&registry_lock);
++			return;
++		}
++	}
++	if (zone_count == zone_capacity) {
++		zone_capacity *= 2;
++		g32 *larger = malloc(zone_capacity * sizeof *larger);
++		if (!larger) die("malloc: cannot grow the guest zone registry");
++		memcpy(larger, zones, zone_count * sizeof *zones);
++		if (zones != initial_zones) free(zones);
++		zones = larger;
++	}
++	zones[zone_count++] = zone;
++	os_unfair_lock_unlock(&registry_lock);
++	LOG("malloc: registered guest zone %#x\n", zone);
++}
++
++static void unregister_zone(g32 zone)
++{
++	os_unfair_lock_lock(&registry_lock);
++	for (size_t i = 0; i < zone_count; i++) {
++		if (zones[i] == zone) {
++			zones[i] = zones[--zone_count];
++			break;
++		}
++	}
++	os_unfair_lock_unlock(&registry_lock);
++	LOG("malloc: unregistered guest zone %#x\n", zone);
++}
++
++static g32 default_zone(void)
++{
++	if (inside_zone) return builtin;
++	os_unfair_lock_lock(&registry_lock);
++	g32 zone = zone_count ? zones[0] : builtin;
++	os_unfair_lock_unlock(&registry_lock);
++	return zone;
++}
++
++static g32 allocation_zone(g32 ptr, uint32_t *size)
++{
++	*size = 0;
++	if (!ptr) return 0;
++
++	// Snapshot registrations and release the lock before entering any
++	// guest code. The caller of unregister owns the zone's lifetime.
++	g32 local[4];
++	g32 *snapshot = local;
++	size_t count = 0;
++	if (!inside_zone) {
++		os_unfair_lock_lock(&registry_lock);
++		count = zone_count;
++		if (count > sizeof local / sizeof local[0]) {
++			snapshot = malloc(count * sizeof *snapshot);
++			if (!snapshot) die("malloc: cannot copy the guest zone registry");
++		}
++		memcpy(snapshot, zones, count * sizeof *snapshot);
++		os_unfair_lock_unlock(&registry_lock);
++	}
++	g32 owner = 0;
++	for (size_t i = 0; i < count; i++) {
++		g32 zone = snapshot[i];
++		uint32_t n = zone == builtin ? gmalloc_query_size(ptr)
++			: invoke_zone(zone_header(zone)->size, zone, ptr, 0);
++		if (n) {
++			owner = zone;
++			*size = n;
++			break;
++		}
++	}
++	if (snapshot != local) free(snapshot);
++	if (!owner && (*size = gmalloc_query_size(ptr))) owner = builtin;
++	return owner;
++}
++
++static g32 zone_malloc(g32 zone, uint32_t n)
++{
++	return zone == builtin ? gmalloc(n) : invoke_zone(zone_header(zone)->malloc, zone, n, 0);
++}
++
++static g32 zone_calloc(g32 zone, uint32_t n, uint32_t size)
++{
++	if ((uint64_t)n * size > UINT32_MAX) return 0;
++	return zone == builtin ? gcalloc(n, size) : invoke_zone(zone_header(zone)->calloc, zone, n, size);
++}
++
++static g32 zone_valloc(g32 zone, uint32_t n)
++{
++	return zone == builtin ? gmemalign(4096, n) : invoke_zone(zone_header(zone)->valloc, zone, n, 0);
++}
++
++static void zone_free(g32 zone, g32 ptr)
++{
++	if (!ptr) return;
++	if (zone == builtin) gfree(ptr);
++	else invoke_zone(zone_header(zone)->free, zone, ptr, 0);
++}
++
++static g32 zone_realloc(g32 zone, g32 ptr, uint32_t n)
++{
++	return zone == builtin ? grealloc(ptr, n) : invoke_zone(zone_header(zone)->realloc, zone, ptr, n);
++}
++
++static g32 zone_memalign(g32 zone, uint32_t align, uint32_t n)
++{
++	if (align < sizeof(g32) || (align & (align - 1)) || (uint64_t)n + align + 0x2010 > UINT32_MAX)
++		return 0;
++	if (zone == builtin) return gmemalign(align, n);
++	struct zone32 *header = zone_header(zone);
++	return header->version >= 5 && header->memalign
++		? invoke_zone(header->memalign, zone, align, n) : 0;
++}
++
++static g32 app_malloc(uint32_t n) { return zone_malloc(default_zone(), n); }
++static g32 app_calloc(uint32_t n, uint32_t size) { return zone_calloc(default_zone(), n, size); }
++static g32 app_valloc(uint32_t n) { return zone_valloc(default_zone(), n); }
++g32 guest_memalign(uint32_t align, uint32_t n) { return zone_memalign(default_zone(), align, n); }
++
++static void app_free(g32 ptr)
++{
++	if (!ptr) return;
++	if (default_zone() == builtin && !inside_zone) {
++		// The common case uses the old low-heap path while only mac32's zone is registered.
++		os_unfair_lock_lock(&registry_lock);
++		int only_builtin = zone_count == 1 && zones[0] == builtin;
++		os_unfair_lock_unlock(&registry_lock);
++		if (only_builtin) { gfree(ptr); return; }
++	}
++	uint32_t size;
++	g32 owner = allocation_zone(ptr, &size);
++	if (!owner) die("free: no guest zone owns %#x", ptr);
++	zone_free(owner, ptr);
++}
++
++static g32 app_realloc(g32 ptr, uint32_t n)
++{
++	if (!ptr) return app_malloc(n);
++	uint32_t size;
++	g32 owner = allocation_zone(ptr, &size);
++	if (!owner) die("realloc: no guest zone owns %#x", ptr);
++	return zone_realloc(owner, ptr, n);
++}
++
++static uint32_t app_size(g32 ptr)
++{
++	uint32_t size;
++	allocation_zone(ptr, &size);
++	return size;
++}
++
++static g32 zone_from_ptr(g32 ptr)
++{
++	uint32_t size;
++	return allocation_zone(ptr, &size);
++}
++
++static uint32_t low_size(g32 zone, g32 ptr) { return gmalloc_query_size(ptr); }
++static g32 low_malloc(g32 zone, uint32_t n) { return gmalloc(n); }
++static g32 low_calloc(g32 zone, uint32_t n, uint32_t size) { return gcalloc(n, size); }
++static g32 low_valloc(g32 zone, uint32_t n) { return gmemalign(4096, n); }
++static void low_heap_free(g32 zone, g32 ptr) { gfree(ptr); }
++static g32 low_realloc(g32 zone, g32 ptr, uint32_t n) { return grealloc(ptr, n); }
++static g32 low_memalign(g32 zone, uint32_t align, uint32_t n) { return zone_memalign(builtin, align, n); }
++static void low_free_sized(g32 zone, g32 ptr, uint32_t size) { gfree(ptr); }
++
++static struct hfn builtin_callbacks[] = {
++	G("builtin zone size", low_size, "u:uu"),
++	G("builtin zone malloc", low_malloc, "u:uu"),
++	G("builtin zone calloc", low_calloc, "u:uuu"),
++	G("builtin zone valloc", low_valloc, "u:uu"),
++	G("builtin zone free", low_heap_free, "v:uu"),
++	G("builtin zone realloc", low_realloc, "u:uuu"),
++	G("builtin zone memalign", low_memalign, "u:uuu"),
++	G("builtin zone free_definite_size", low_free_sized, "v:uuu"),
++};
++
++static struct hfn entries[] = {
++	G("_malloc", app_malloc, "u:u"), G("_calloc", app_calloc, "u:uu"),
++	G("_realloc", app_realloc, "u:uu"), G("_free", app_free, "v:u"),
++	G("_malloc_size", app_size, "u:u"), G("_valloc", app_valloc, "u:u"),
++	G("_memalign", guest_memalign, "u:uu"),
++	G("_malloc_default_zone", default_zone, "u:"),
++	G("_malloc_zone_register", register_zone, "v:u"),
++	G("_malloc_zone_unregister", unregister_zone, "v:u"),
++	G("_malloc_zone_from_ptr", zone_from_ptr, "u:u"),
++	G("_malloc_zone_malloc", zone_malloc, "u:uu"),
++	G("_malloc_zone_calloc", zone_calloc, "u:uuu"),
++	G("_malloc_zone_valloc", zone_valloc, "u:uu"),
++	G("_malloc_zone_free", zone_free, "v:uu"),
++	G("_malloc_zone_realloc", zone_realloc, "u:uuu"),
++	G("_malloc_zone_memalign", zone_memalign, "u:uuu"),
++};
++
++void thunks_malloc_zones_init(void)
++{
++	builtin = gcalloc(1, sizeof(struct zone32));
++	*zone_header(builtin) = (struct zone32){
++		.size = hfn_stub(&builtin_callbacks[0]),
++		.malloc = hfn_stub(&builtin_callbacks[1]),
++		.calloc = hfn_stub(&builtin_callbacks[2]),
++		.valloc = hfn_stub(&builtin_callbacks[3]),
++		.free = hfn_stub(&builtin_callbacks[4]),
++		.realloc = hfn_stub(&builtin_callbacks[5]),
++		.name = gstrdup("mac32 low heap"),
++		.version = 6,
++		.memalign = hfn_stub(&builtin_callbacks[6]),
++		.free_definite_size = hfn_stub(&builtin_callbacks[7]),
++	};
++	register_zone(builtin);
++	REGISTER(entries);
++}
+diff --git a/src/pthread.c b/src/pthread.c
+index b9a8110..fabcbeb 100644
+--- a/src/pthread.c
++++ b/src/pthread.c
+@@ -339,6 +339,20 @@ static void t_setschedparam(uint32_t *args, struct hres *r)
+ 	RET(pthread_setschedparam(rec_host(A(0)), (int)A(1), &sp));
+ }
+ static void t_mach_thread_np(uint32_t *args, struct hres *r) { RET(pthread_mach_thread_np(rec_host(A(0)))); }
++static void t_getname_np(uint32_t *args, struct hres *r)
++{
++	RET(pthread_getname_np(rec_host(A(0)), G2H(A(1)), A(2)));
++}
++
++static void t_threadid_np(uint32_t *args, struct hres *r)
++{
++	uint64_t id = 0;
++	if (!A(1)) { RET(EINVAL); return; }
++	int status = pthread_threadid_np(A(0) ? rec_host(A(0)) : NULL, &id);
++	if (!status) memcpy(G2H(A(1)), &id, sizeof id);
++	RET(status);
++}
++
+ static void t_setname_np(uint32_t *args, struct hres *r) { RET(pthread_setname_np(G2H(A(0)))); }
+ 
+ // keys: guest values are 32 bits, stored zero-extended
+@@ -431,6 +445,8 @@ static struct hfn pth[] = {
+ 	R("_pthread_create", t_create), R("_pthread_create_suspended_np", t_create_suspended),
+ 	R("_thread_resume", t_thread_resume), R("_thread_policy_set", t_thread_policy_set), R("_pthread_join", t_join), R("_pthread_detach", t_detach),
+ 	R("_pthread_self", t_self), R("_pthread_equal", t_equal), R("_pthread_kill", t_kill),
++	G("_pthread_main_np", pthread_main_np, "i:"),
++	R("_pthread_getname_np", t_getname_np), R("_pthread_threadid_np", t_threadid_np),
+ 	R("_pthread_getschedparam", t_getschedparam), R("_pthread_setschedparam", t_setschedparam),
+ 	R("_pthread_mach_thread_np", t_mach_thread_np), R("_pthread_setname_np", t_setname_np),
+ 	R("_pthread_key_create", t_key_create), R("_pthread_key_delete", t_key_delete),
+diff --git a/src/thunks.c b/src/thunks.c
+index a5bde77..e6a8c08 100644
+--- a/src/thunks.c
++++ b/src/thunks.c
+@@ -319,6 +319,7 @@ void hostcall_dispatch(uint32_t idx, uint32_t *args, struct hres *r)
+ void thunks_init(void)
+ {
+ 	thunks_libc_init();
++	thunks_malloc_zones_init();
+ 	thunks_pthread_init();
+ 	thunks_cxx_init();
+ 	thunks_libc2_init();
+diff --git a/src/thunks.h b/src/thunks.h
+index ad15688..f26e3e9 100644
+--- a/src/thunks.h
++++ b/src/thunks.h
+@@ -26,6 +26,8 @@ g32 hfn_stub(struct hfn *f);				// a stub for a dynamically made entry
+ #define REGISTER(list) thunk_register(list, sizeof list / sizeof list[0])
+ 
+ void thunks_libc_init(void);
++void thunks_malloc_zones_init(void);
++g32 guest_memalign(uint32_t align, uint32_t n);
+ void thunks_pthread_init(void);
+ void thunks_cxx_init(void);
+ void thunks_libc2_init(void);

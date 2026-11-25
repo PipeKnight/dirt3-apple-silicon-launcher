@@ -1,2 +1,2 @@
-# Unified diffs preserve the leading context space before upstream tabs.
-*.patch whitespace=-space-before-tab
+# Unified diffs prefix every context line with a space, even blank ones.
+*.patch whitespace=-space-before-tab,-blank-at-eol

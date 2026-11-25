@@ -47,13 +47,28 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
    caller then gets the default zone, unregisters it, and registers it
    again. This sequence makes registration order relevant to the bridge.
 
-The next experiment needs a guest-side allocator zone implementation with
-i386 callback dispatch. Use a small i386 fixture to verify registration,
-ownership, realloc and unregister behavior before retesting the game.
-Record the first executed boundary after each change. First prove that the
-game reaches the main entry point and renders its menu. Playability
-requires loading and completing an offline race, verifying steering, audio,
-frame pacing and a save/reload cycle on the test Mac.
+## Startup through AppKit
+
+- The guest zone registry honors default-zone reordering and dispatches the
+  original i386 allocator callbacks. mac32's own objects stay in its low
+  heap. The guest `sbrk` implementation lazily commits pages in a dedicated
+  64 MiB address range. The i386 fixture exercised reordering, ownership,
+  reallocation, reentrant allocation and break growth and shrinkage.
+- Mach-O helpers expose the image's unslid section address to
+  `getsectdatafromheader` and the mapped address to `getsectdata`. The
+  fixture also checks the mapped segment-command pointer from `getsegbyname`.
+- Startup needed bridges for CoreFoundation allocator callbacks and ranges,
+  GCD semaphores, Carbon events and HIObject constructors, an empty libcurl
+  multi queue, and the packed i386 process and file catalog records. The
+  framework fixture exercised guest callbacks, returned ranges, semaphores,
+  Carbon event timing and the HIObject lifecycle.
+- The game reached its entry point after 282 recorded game initializer calls,
+  then entered `NSApplicationMain` with `MainMenu`. A restricted GUI run
+  timed out with macOS service errors. A normal graphical session proceeded
+  into the startup callbacks and reached `pthread_main_np`.
+
+Playability requires loading and completing an offline race, verifying
+steering, audio, frame pacing and a save/reload cycle on the test Mac.
 
 ## Comparable projects
 
