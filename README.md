@@ -105,6 +105,25 @@ select **Race** after the track loads. On the original keyboard mapping,
 Space accelerates, Shift or keypad 2 brakes or reverses, A and D steer, L
 applies the handbrake, and Esc pauses.
 
+### Run the built-in performance benchmark
+
+After building the experimental runtime, run this command from a logged-in
+macOS session.
+
+```sh
+"./Play DiRT 3.command" --benchmark
+```
+
+The game skips the startup videos, runs Aspen route 0 with eight cars using
+the current game settings, writes the result to
+`~/Library/Application Support/Feral Interactive/DiRT 3 Complete Edition/benchmarks/`,
+and exits. Use the FPS and graphics settings reported in the result XML for
+comparisons. Add `--timeout 300` to stop a stalled run after five minutes.
+Use **Options → Graphics Options** in the game to change the graphics
+settings before a run. See
+[the benchmark results](findings.md#frame-pacing-in-the-aspen-benchmark)
+for measurements and the tested settings on an M4.
+
 ## Package a disk image
 
 After the runtime build above, run `launcher/package.sh "$runtime"

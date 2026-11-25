@@ -297,6 +297,56 @@ with multiple cars vary. These runs establish a throughput improvement
 for the tested workload, with no consistent improvement in the slowest
 frames.
 
+#### Graphics settings and follow-up runtime trials
+
+The Feral startup code applies its saved graphics options from
+`Preferences Data` in the game's Application Support directory. Editing
+the generated `hardwaresettings/hardware_settings_config.xml` before
+launch was insufficient to keep MSAA, the worker map, or several graphics
+options. The following comparisons use the effective settings written in
+the completed benchmark's XML. They use the same game build and Aspen race,
+with VSync off and the two-core worker map.
+
+| Runtime and graphics | Resolution | Average FPS | Minimum FPS reported by the game |
+| --- | --- | ---: | ---: |
+| Native map first, original graphics, 4× MSAA | 640 × 480 | 46.62, 46.60 | 35.37, 18.56 |
+| Native map first, reduced graphics, MSAA off | 640 × 480 | 71.08 | 44.72 |
+| Native map first, reduced graphics, MSAA off, windowed | 1280 × 720 | 59.92 | 33.11 |
+| Same reduced profile, Shadows Ultra Low, windowed | 1280 × 720 | 64.92 | 44.38 |
+
+The reduced profile used Off for multisampling, mirrors, characters, and
+cloth. It used Low for ambient occlusion, night lighting, shadows, particles,
+ground cover, objects, trees, vehicle reflections, water, and post process,
+and Medium for distant vehicles. These are existing game options.
+[Feral's graphics options](https://www.feralinteractive.com/en/readmes/dirt3/latest/steam/).
+At 640 × 480, the reduced profile improved average FPS by about 53%.
+The median interval between swaps was 14.69 ms and the 95th percentile
+was 18.83 ms, so the race still dipped below 60 FPS. At 1280 × 720, the
+median swap interval was 16.95 ms and the 95th percentile was 23.13 ms.
+
+For the final 1280 × 720 run, Shadows Ultra Low disabled dynamic shadows.
+Shadows were the only effective settings difference from the 59.92 FPS
+run. The 95th-percentile swap interval dropped to 21.35 ms and the number
+of intervals over 33.3 ms dropped from 24 to 10 over the timed race.
+
+The game reported five cores on this Mac and selected its two-core worker
+map. A trial in an APFS clone of the game changed the five-core case to use
+the game's existing four-core map. At 1280 × 720, the benchmark reported
+56.79 FPS average and 35.95 minimum, with a 95th-percentile swap interval
+of 24.20 ms. The CPU section was the only difference in the effective
+settings XML.
+
+The 1280 × 720 race completed through `Play DiRT 3.command --benchmark`.
+A separate attempt with MSAA off as the only change stopped rendering
+before writing a result. A sample found the WinMain and force-feedback
+threads waiting on dispatch semaphores.
+
+Two additional buffer experiments kept the original graphics. A 64 KiB
+threshold for the game's built-in staging upload path averaged 46.49 FPS.
+A metadata cache averaged 47.61 FPS in one run and introduced new
+invalidation requirements for OpenGL buffers. Both experiments remain
+outside the runtime patch.
+
 ## Comparable projects
 
 | Route | Evidence and implications |

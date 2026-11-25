@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import os
 import plistlib
 import subprocess
 import sys
@@ -42,6 +43,7 @@ def main():
     parser.add_argument("--engine", type=Path, help="path to the compiled mac32 executable")
     parser.add_argument("--log", type=Path, help="write runtime output to a new file")
     parser.add_argument("--timeout", type=int, help="terminate the engine after this many seconds")
+    parser.add_argument("--benchmark", action="store_true", help="run the game's bundled Aspen benchmark")
     args = parser.parse_args()
     if args.mode == "inspect" and (args.engine or args.log or args.timeout is not None):
         parser.error("--engine, --log and --timeout apply to check and run")
@@ -49,6 +51,8 @@ def main():
         parser.error("check and run require --engine")
     if args.timeout is not None and args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.benchmark and args.mode != "run":
+        parser.error("--benchmark applies to run")
 
     try:
         bundle, info, executable, archs = read_bundle(args.app)
@@ -68,12 +72,25 @@ def main():
 
         engine = args.engine.expanduser().resolve(strict=True)
         command = [engine, "-v"]
+        environment = None
         if args.mode == "check":
             command.extend(
                 ["-L", bundle / "Contents" / "Frameworks", "-L", executable.parent, "--deps", executable]
             )
         else:
             command.append(bundle)
+        if args.benchmark:
+            if sha256 != REFERENCE_SHA256:
+                raise ValueError("benchmark mode requires the supported Feral build")
+            benchmark = "example_benchmark.xml"
+            if not (bundle / "Contents" / "Resources" / "Data" / benchmark).is_file():
+                raise ValueError(f"the game bundle is missing {benchmark}")
+            command.extend(["-benchmark", benchmark])
+            environment = {
+                **os.environ,
+                "MAC32_DIRT3_DIRECT": "1",
+                "MAC32_DIRT3_SKIP_STARTUP_VIDEOS": "1",
+            }
 
         log = args.log.expanduser().resolve() if args.log else None
         if log is not None and bundle in log.parents:
@@ -82,6 +99,7 @@ def main():
             result = subprocess.run(
                 command,
                 cwd=bundle.parent,
+                env=environment,
                 stdout=output,
                 stderr=subprocess.STDOUT if output else None,
                 timeout=args.timeout,
