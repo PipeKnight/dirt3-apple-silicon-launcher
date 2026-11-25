@@ -5,12 +5,12 @@ local installation of the game. This repository contains the probe, source
 patches for the compatibility runtime, and reproducible findings.
 
 **Status.** On an Apple M4 with macOS 15.7.7, **Play** in the original Feral
-launcher displays the DiRT 3 logo, plays the original startup videos, and
-opens the main menu. A new local profile was written with autosaving enabled,
-and keyboard navigation reaches **Singleplayer → Single Race**. The engine
-creates OpenGL and OpenCL contexts and starts audio output units. Some
-launches still fail in the resource check. Completing an offline race and
-reloading the saved profile remain unverified.
+launcher opens the main menu and starts an offline rally. The game saved a
+local profile with autosaving enabled and loaded it in a new process. The
+Ford Focus RS WRC responds to keyboard input on Finland's Tupasentie stage.
+The engine creates OpenGL and OpenCL contexts and starts audio output units.
+Some launches still fail in the resource check. Finishing a rally stage,
+audible audio, controllers and other macOS versions remain unverified.
 
 ## Inspect the installed copy
 
@@ -65,13 +65,21 @@ python3 probe.py check --engine "$runtime/mac32" --log local/check.log --timeout
 LLVM="$build_dir/llvm-project" make -C "$runtime" app
 codesign --force --deep --sign - "$runtime/Mac32.app"
 python3 probe.py run --engine "$runtime/Mac32.app/Contents/MacOS/mac32" \
-  --log local/startup.log --timeout 120
+  --log "$(mktemp -d "$PWD/local/session.XXXXXX")/session.log"
 ```
 
 `check` resolves startup imports without calling guest initializers. A completed
 check may report unresolved imports. `run` invokes the original game through
 mac32. Run the GUI probe in a logged-in macOS session. The log file must be a
 new path outside the game bundle.
+
+Click **Play**, press Enter at the title screen, and load or create a local
+profile. In **Singleplayer → Single Race**, choose a car and team, then
+select **Race** after the track loads. On the original keyboard mapping,
+Space accelerates, Shift brakes or reverses, A and D steer, L applies the
+handbrake, and Esc pauses. If the launcher reports an invalid installation
+with the verified game build, close it and launch a fresh process. A retry
+reached the game on the test Mac.
 
 See [findings.md](findings.md) for the execution trace, comparable projects and
 the conditions for calling the game playable.

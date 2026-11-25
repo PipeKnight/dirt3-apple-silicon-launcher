@@ -189,11 +189,22 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   wizard. Arrow keys and Enter worked in the profile screens.
 - Carbon’s active non-floating window query now uses the native AppKit key
   and main windows. The game created a fresh local profile with autosaving
-  enabled and wrote the profile files. It opened the main menu and reached
-  the **Singleplayer → Single Race** configuration using the keyboard.
+  enabled and wrote the profile files. A new process displayed the profile
+  in **Load Profile**, loaded it, and returned to the main menu with
+  autosaving enabled.
+- **Singleplayer → Single Race** loaded the Finland stage Tupasentie and
+  rendered the track and Ford Focus RS WRC. The original engine calls
+  `madvise` with `MADV_FREE` as the car goes to the start. Binding it with
+  a guest pointer and a 32-bit length let the race continue to countdown
+  and driving. An i386 fixture advised the middle page of a three-page
+  mapping and verified that both neighboring pages retained their contents.
+- Keyboard input accelerated the car past 70 mph, changed its heading and
+  opened the pause menu. **Reset Vehicle** returned it to the road and
+  driving resumed. The renderer displayed the racing line, timing, nearby
+  cars and collision damage during the rally.
 
-Playability requires loading and completing an offline race, verifying
-steering, audio, frame pacing and a save/reload cycle on the test Mac.
+A finish, audio playback, controller input and frame pacing still need
+verification. The resource check can still fail on startup.
 
 ## Comparable projects
 

@@ -3055,7 +3055,7 @@ index 8f40938..4c329a9 100644
  	G("_memcpy", memcpy, "p:ppu"),
  	G("_memmove", memmove, "p:ppu"),
 diff --git a/src/libc2.c b/src/libc2.c
-index 057bfcb..2800e93 100644
+index 057bfcb..910d173 100644
 --- a/src/libc2.c
 +++ b/src/libc2.c
 @@ -2,6 +2,8 @@
@@ -3172,7 +3172,11 @@ index 057bfcb..2800e93 100644
  	G("_getloadavg", getloadavg, "i:pi"), G("_wcscat", wcscat, "p:pp"), G("_wcsncmp", wcsncmp, "i:ppu"),
  	G("_wcschr", wcschr, "p:pi"), G("_wcsrchr", wcsrchr, "p:pi"), G("_wcsstr", wcsstr, "p:pp"),
  	G("_wcsncat", wcsncat, "p:ppu"), G("_wcscasecmp", wcscasecmp, "i:pp"), G("_wcsncasecmp", wcsncasecmp, "i:ppu"),
-@@ -465,6 +537,7 @@ static struct hfn libc2[] = {
+@@ -462,9 +534,11 @@ static struct hfn libc2[] = {
+ 	R("_sigaction", t_sigaction), R("_signal", t_signal), R("_sigprocmask", t_sigprocmask),
+ 	R("_pthread_sigmask", t_sigprocmask), R("_sigaltstack", t_ignore0),
+ 	R("_mmap", t_mmap), G("_munmap", w_munmap, "i:uu"), G("_mprotect", w_mprotect, "i:uui"),
++	G("_madvise", madvise, "i:pui"),
  	R("_getrlimit", t_getrlimit), R("_setrlimit", t_setrlimit),
  	// Mach / launchd: the game uses these for crash reporting and Steam IPC
  	D("_mach_task_self_", 4, init_task_self), D("_bootstrap_port", 4, init_bootstrap),
