@@ -105,9 +105,32 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   remains unverified.
 - After acknowledging two original startup dialogs, the game reached its
   exception handler setup and Cocoa window initialization. Some dialog
-  text was garbled. The next run stopped in `CFRetain` after the original
-  launcher asked an AppKit window for its legacy Carbon `windowRef`. The
-  failure is after renderer initialization and before the in-game menu.
+  text was garbled. A Carbon window bridge now adapts the AppKit window
+  and content view, exposes native event targets, and preserves legacy
+  control properties.
+
+## WebKit launcher
+
+- mac32 now links WebKit so the game's original Objective-C class references
+  see `WebView` when they are bound. The installed `FeralUI/feralUI.html`
+  reaches the game's `WebkitJSInterface` callbacks.
+- Without the stack change, the real WebKit constructor trapped inside
+  JavaScriptCore's stack check. Native framework calls now run on the
+  thread's native stack. A saved guest stack cursor keeps nested callbacks
+  below the suspended i386 frame. The upstream nested-call, exception and
+  allocator self-tests passed with the change.
+- Objective-C pointer-valued results now preserve pointers that are
+  already in guest address space. The i386 fixture boxed a callback in
+  `NSValue`, retrieved the same address, and called it.
+- For the verified game build, the runtime takes a missing WebView
+  user-agent name from the bundle and serves WebKit localization lookups
+  from the game's original resource tables in the expected JSON format.
+  Some text in the earlier native dialogs remains corrupted.
+- Instrumented runs received genuine JavaScript property requests from
+  the original launcher. With the resource lookups working, the game
+  still crashed inside `getValueOfProperty:withType:` when constructing
+  its reply for `LastUpdatedString`. The runtime does not substitute a
+  value for that property.
 
 Playability requires loading and completing an offline race, verifying
 steering, audio, frame pacing and a save/reload cycle on the test Mac.

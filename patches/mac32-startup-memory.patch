@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 4c16e9d..91eeaf0 100644
+index 4c16e9d..7b500e2 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -2,11 +2,11 @@
@@ -8,25 +8,28 @@ index 4c16e9d..91eeaf0 100644
           -DGL_SILENCE_DEPRECATION -Wno-missing-field-initializers
 -LDFLAGS = -arch x86_64 -liconv -lz -framework Foundation -framework AppKit -framework Carbon \
 -          -framework IOKit -framework OpenGL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
-+LDFLAGS = -arch x86_64 -lffi -lcurl -liconv -lz -framework Foundation -framework AppKit -framework Carbon \
++LDFLAGS = -arch x86_64 -lffi -lcurl -liconv -lz -framework Foundation -framework AppKit -framework WebKit -framework Carbon \
 +          -framework IOKit -framework OpenGL -framework OpenCL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
            -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
 -SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/format.c \
 -      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/cg_thunks.c src/cf_thunks.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
 +SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c \
-+      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
++      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
  OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
  
  all: mac32 guest app
 diff --git a/patches/dirt3_2015_version.c b/patches/dirt3_2015_version.c
 new file mode 100644
-index 0000000..db3141f
+index 0000000..6d6e074
 --- /dev/null
 +++ b/patches/dirt3_2015_version.c
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,47 @@
 +#include "../src/patches.h"
 +#include <CoreServices/CoreServices.h>
 +#include <string.h>
++
++static int version_patch_active;
++int dirt3_version_patch_active(void) { return version_patch_active; }
 +extern int macho_section(struct image *, const char *, const char *, g32 *, uint32_t *);
 +
 +// The game converts Gestalt's three components to the old 0x10xy format.
@@ -57,6 +60,7 @@ index 0000000..db3141f
 +	// store. Other version callers continue to see the real host version.
 +	static const uint8_t clamp[] = {0xbe, 0xf0, 0x10, 0x00, 0x00, 0xeb, sizeof(packing) - 7};
 +	memcpy(code, clamp, sizeof(clamp));
++	version_patch_active = 1;
 +	return 1;
 +}
 +
@@ -990,6 +994,219 @@ index 9dad843..0d59d21 100644
  	R("_AudioQueueNewOutput", t_AudioQueueNewOutput),
  	R("_AudioConverterNew", t_AudioConverterNew), G("_AudioConverterDispose", w_AudioConverterDispose, "i:o"),
  	G("_AudioConverterReset", w_AudioConverterReset, "i:o"),
+diff --git a/src/carbon_windows.m b/src/carbon_windows.m
+new file mode 100644
+index 0000000..25d7ec4
+--- /dev/null
++++ b/src/carbon_windows.m
+@@ -0,0 +1,207 @@
++// Carbon window handles for Cocoa windows on hosts without WindowRef.
++#import <AppKit/AppKit.h>
++#import <Carbon/Carbon.h>
++#import <objc/runtime.h>
++#include "thunks.h"
++
++static NSWindow *cocoa_window(void *handle)
++{
++	id object = (id)handle;
++	return [object isKindOfClass:[NSWindow class]] ? object : nil;
++}
++
++static OSStatus w_GetWindowClass(void *handle, uint32_t *result)
++{
++	NSWindow *window = cocoa_window(handle);
++	if (!window || !result) return paramErr;
++	if (window.sheetParent) *result = kSheetWindowClass;
++	else if ([window isKindOfClass:[NSPanel class]]) *result = kUtilityWindowClass;
++	else if (window.styleMask & NSWindowStyleMaskTitled) *result = kDocumentWindowClass;
++	else *result = kPlainWindowClass;
++	return noErr;
++}
++
++static OSStatus w_GetWindowAttributes(void *handle, uint32_t *result)
++{
++	NSWindow *window = cocoa_window(handle);
++	if (!window || !result) return paramErr;
++	NSWindowStyleMask style = window.styleMask;
++	uint32_t attributes = kWindowCompositingAttribute;
++	if (style & NSWindowStyleMaskClosable) attributes |= kWindowCloseBoxAttribute;
++	if (style & NSWindowStyleMaskMiniaturizable) attributes |= kWindowCollapseBoxAttribute;
++	if (style & NSWindowStyleMaskResizable) attributes |= kWindowResizableAttribute | kWindowFullZoomAttribute;
++	if (!(style & NSWindowStyleMaskTitled)) attributes |= kWindowNoTitleBarAttribute;
++	*result = attributes;
++	return noErr;
++}
++
++static OSStatus w_GetRootControl(void *handle, void **control)
++{
++	NSWindow *window = cocoa_window(handle);
++	if (!window || !control) return paramErr;
++	*control = window.contentView;
++	return *control ? noErr : errNoRootControl;
++}
++
++static NSView *w_HIViewGetRoot(void *handle)
++{
++	return cocoa_window(handle).contentView;
++}
++
++static OSStatus w_SetAutomaticControlDragTrackingEnabledForWindow(void *handle, uint32_t enabled)
++{
++	// Cocoa registers drag destinations on its views. Carbon's automatic
++	// control tracking cannot be enabled for an AppKit window.
++	if (!cocoa_window(handle)) return paramErr;
++	return enabled ? unimpErr : noErr;
++}
++
++static OSStatus w_SetThemeWindowBackground(void *handle, int32_t brush, uint32_t update)
++{
++	NSWindow *window = cocoa_window(handle);
++	if (!window) return paramErr;
++	CGColorRef color = NULL;
++	OSStatus status = HIThemeBrushCreateCGColor((ThemeBrush)brush, &color);
++	if (status == noErr && color) {
++		window.backgroundColor = [NSColor colorWithCGColor:color];
++		if (update) [window.contentView setNeedsDisplay:YES];
++		CGColorRelease(color);
++	}
++	return status;
++}
++
++static OSStatus carbon_window_target_lifecycle(EventHandlerCallRef call, EventRef event, void *context)
++{
++	if (GetEventKind(event) == kEventHIObjectConstruct)
++		return SetEventParameter(event, kEventParamHIObjectInstance, typeVoidPtr, sizeof context, &context);
++	return noErr;
++}
++
++static EventTargetRef carbon_target(id owner)
++{
++	if (!owner) return NULL;
++	static char target_key;
++	HIObjectRef object = (HIObjectRef)objc_getAssociatedObject(owner, &target_key);
++	if (!object) {
++		static dispatch_once_t once;
++		static OSStatus status;
++		CFStringRef class_id = CFSTR("com.khesin.mac32.CarbonWindowTarget");
++		dispatch_once(&once, ^{
++			const EventTypeSpec types[] = {
++				{kEventClassHIObject, kEventHIObjectConstruct},
++				{kEventClassHIObject, kEventHIObjectDestruct},
++			};
++			status = HIObjectRegisterSubclass(class_id, NULL, 0, carbon_window_target_lifecycle, 2, types,
++				NULL, NULL);
++		});
++		if (status != noErr || HIObjectCreate(class_id, NULL, &object) != noErr)
++			return NULL;
++		objc_setAssociatedObject(owner, &target_key, (id)object, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++		CFRelease(object);
++	}
++	return HIObjectGetEventTarget(object);
++}
++
++static EventTargetRef w_GetWindowEventTarget(void *handle)
++{
++	return carbon_target(cocoa_window(handle));
++}
++
++static EventTargetRef w_GetControlEventTarget(id control)
++{
++	return [control isKindOfClass:[NSView class]] ? carbon_target(control) : NULL;
++}
++
++static NSMutableDictionary *properties(id owner)
++{
++	static char key;
++	NSMutableDictionary *values = objc_getAssociatedObject(owner, &key);
++	if (!values) {
++		values = [NSMutableDictionary dictionary];
++		objc_setAssociatedObject(owner, &key, values, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++	}
++	return values;
++}
++
++static NSNumber *property_id(uint32_t creator, uint32_t tag)
++{
++	return @(((uint64_t)creator << 32) | tag);
++}
++
++static OSStatus w_SetControlProperty(id control, uint32_t creator, uint32_t tag,
++	uint32_t size, const void *data)
++{
++	if (![control isKindOfClass:[NSView class]]) return controlHandleInvalidErr;
++	if (size && !data) return paramErr;
++	properties(control)[property_id(creator, tag)] = [NSData dataWithBytes:data length:size];
++	return noErr;
++}
++
++static OSStatus read_property(id owner, uint32_t creator, uint32_t tag, uint32_t capacity,
++	uint32_t *size, void *data, OSStatus missing)
++{
++	NSData *value = properties(owner)[property_id(creator, tag)];
++	if (!value) return missing;
++	if (size) *size = (uint32_t)value.length;
++	if (!capacity) return data && value.length ? paramErr : noErr;
++	if (!data) return paramErr;
++	size_t count = capacity < value.length ? capacity : value.length;
++	if (count) memcpy(data, value.bytes, count);
++	return capacity == value.length ? noErr : paramErr;
++}
++
++static OSStatus w_GetControlProperty(id control, uint32_t creator, uint32_t tag,
++	uint32_t capacity, uint32_t *size, void *data)
++{
++	if (![control isKindOfClass:[NSView class]]) return controlHandleInvalidErr;
++	return read_property(control, creator, tag, capacity, size, data, controlPropertyNotFoundErr);
++}
++
++static OSStatus w_GetControlPropertySize(id control, uint32_t creator, uint32_t tag, uint32_t *size)
++{
++	if (!size) return paramErr;
++	return w_GetControlProperty(control, creator, tag, 0, size, NULL);
++}
++
++static OSStatus w_RemoveControlProperty(id control, uint32_t creator, uint32_t tag)
++{
++	if (![control isKindOfClass:[NSView class]]) return controlHandleInvalidErr;
++	[properties(control) removeObjectForKey:property_id(creator, tag)];
++	return noErr;
++}
++
++static OSStatus w_GetWindowProperty(void *handle, uint32_t creator, uint32_t tag,
++	uint32_t capacity, uint32_t *size, void *data)
++{
++	NSWindow *window = cocoa_window(handle);
++	if (!window) return paramErr;
++	return read_property(window, creator, tag, capacity, size, data, errWindowPropertyNotFound);
++}
++
++static OSStatus w_RemoveWindowProperty(void *handle, uint32_t creator, uint32_t tag)
++{
++	NSWindow *window = cocoa_window(handle);
++	if (!window) return paramErr;
++	[properties(window) removeObjectForKey:property_id(creator, tag)];
++	return noErr;
++}
++
++static struct hfn carbon_windows_fns[] = {
++	G("_GetWindowClass", w_GetWindowClass, "i:op"),
++	G("_GetWindowAttributes", w_GetWindowAttributes, "i:op"),
++	G("_GetRootControl", w_GetRootControl, "i:oO"),
++	G("_CreateRootControl", w_GetRootControl, "i:oO"),
++	G("_HIViewGetRoot", w_HIViewGetRoot, "o:o"),
++	G("_GetControlEventTarget", w_GetControlEventTarget, "o:o"),
++	G("_SetControlProperty", w_SetControlProperty, "i:ouuup"),
++	G("_GetControlProperty", w_GetControlProperty, "i:ouuupp"),
++	G("_GetControlPropertySize", w_GetControlPropertySize, "i:ouup"),
++	G("_RemoveControlProperty", w_RemoveControlProperty, "i:ouu"),
++	G("_GetWindowProperty", w_GetWindowProperty, "i:ouuupp"),
++	G("_RemoveWindowProperty", w_RemoveWindowProperty, "i:ouu"),
++	G("_SetAutomaticControlDragTrackingEnabledForWindow", w_SetAutomaticControlDragTrackingEnabledForWindow, "i:oB"),
++	G("_SetThemeWindowBackground", w_SetThemeWindowBackground, "i:oiB"),
++	G("_GetWindowEventTarget", w_GetWindowEventTarget, "o:o"),
++};
++
++void thunks_carbon_windows_init(void) { REGISTER(carbon_windows_fns); }
 diff --git a/src/cf_streams.c b/src/cf_streams.c
 new file mode 100644
 index 0000000..e724caa
@@ -1195,10 +1412,18 @@ index 0000000..e724caa
 +
 +void thunks_cf_streams_init(void) { REGISTER(stream_entries); }
 diff --git a/src/cf_thunks.c b/src/cf_thunks.c
-index be1e6fb..89203ff 100644
+index be1e6fb..1d726c6 100644
 --- a/src/cf_thunks.c
 +++ b/src/cf_thunks.c
-@@ -411,6 +411,7 @@ static struct hfn cf[] = {
+@@ -247,6 +247,7 @@ static struct hfn cf[] = {
+ 	G("_CFPreferencesSetValue", CFPreferencesSetValue, "v:ooooo"),
+ 	G("_CFPreferencesSynchronize", CFPreferencesSynchronize, "b:ooo"),
+ 	G("_CFPropertyListCreateData", CFPropertyListCreateData, "o:ooiuO"),
++	G("_CFPropertyListCreateWithData", CFPropertyListCreateWithData, "o:oouWO"),
+ 	G("_CFPropertyListCreateDeepCopy", CFPropertyListCreateDeepCopy, "o:oou"),
+ 	G("_CFPropertyListCreateXMLData", CFPropertyListCreateXMLData, "o:oo"),
+ 	G("_CFPropertyListIsValid", CFPropertyListIsValid, "b:oi"),
+@@ -411,6 +412,7 @@ static struct hfn cf[] = {
  	G("_CFURLCreateBookmarkData", CFURLCreateBookmarkData, "o:oouooO"),
  	G("_CFURLCreateBookmarkDataFromAliasRecord", CFURLCreateBookmarkDataFromAliasRecord, "o:oo"),
  	G("_CFURLCreateBookmarkDataFromFile", CFURLCreateBookmarkDataFromFile, "o:ooO"),
@@ -1207,7 +1432,7 @@ index be1e6fb..89203ff 100644
  	G("_CFURLCreateCopyAppendingPathComponent", CFURLCreateCopyAppendingPathComponent, "o:oooB"),
  	G("_CFURLCreateCopyAppendingPathExtension", CFURLCreateCopyAppendingPathExtension, "o:ooo"),
 diff --git a/src/cpu.c b/src/cpu.c
-index c608c55..cfe5950 100644
+index c608c55..b70a488 100644
 --- a/src/cpu.c
 +++ b/src/cpu.c
 @@ -60,6 +60,15 @@ static void crash(int sig, siginfo_t *si, void *ucv)
@@ -1226,6 +1451,31 @@ index c608c55..cfe5950 100644
  	fprintf(stderr, "  eax %08llx ebx %08llx ecx %08llx edx %08llx\n",
  		uc->uc_mcontext->__ss.__rax & 0xffffffff, uc->uc_mcontext->__ss.__rbx & 0xffffffff,
  		uc->uc_mcontext->__ss.__rcx & 0xffffffff, uc->uc_mcontext->__ss.__rdx & 0xffffffff);
+@@ -177,17 +186,16 @@ void cpu_thread_init(uint32_t stack_size)
+ 	pthread_setspecific(stack_key, (void *)(uintptr_t)base);
+ }
+ 
+-// Where the next guest call's arguments go: well under the current stack
+-// pointer if we are already running on a guest stack (inside a host call),
+-// else at the top of this thread's guest stack. The gap must cover what
+-// t_call32 pushes below rsp (saved registers + the iretq frame).
++// While a native function is handling a guest call, its t_call32 frame
++// records the suspended guest stack. Callbacks must keep their arguments
++// below that frame even though the native code uses its pthread stack.
+ static inline __attribute__((always_inline)) g32 arg_area(int nargs)
+ {
+-	uintptr_t sp;
+-	__asm__ volatile("mov %%rsp, %0" : "=r"(sp));
++	uint64_t frame = cpu_tsd_get();
+ 	g32 top;
+-	if (sp < LOW_END) top = (g32)sp - 1024;
+-	else {
++	if (frame) {
++		top = *(const g32 *)(uintptr_t)frame - 1024;
++	} else {
+ 		if (!guest_stack_top) cpu_thread_init(8 << 20);
+ 		top = guest_stack_top;
+ 	}
 diff --git a/src/gl_special.c b/src/gl_special.c
 index 20f3e5a..b37eaf4 100644
 --- a/src/gl_special.c
@@ -1286,7 +1536,7 @@ index 20f3e5a..b37eaf4 100644
  	R("_glFlushMappedBufferRangeAPPLE", t_glFlushMappedBufferRangeAPPLE),
  	R("_glUnmapBuffer", t_glUnmapBuffer), R("_glUnmapBufferARB", t_glUnmapBuffer),
 diff --git a/src/legacy.m b/src/legacy.m
-index 484efa9..3f78921 100644
+index 484efa9..1b44f3e 100644
 --- a/src/legacy.m
 +++ b/src/legacy.m
 @@ -6,7 +6,9 @@
@@ -1330,7 +1580,7 @@ index 484efa9..3f78921 100644
  static int32_t w_dyld_get_image_vmaddr_slide(uint32_t i) { return macho_image_slide(i); }
  static int w_shm_open(const char *n, int fl, int mode) { return shm_open(n, fl, mode); }
  static int w_shm_unlink(const char *n) { return shm_unlink(n); }
-@@ -682,6 +701,86 @@ static void t_InstallEventHandler(uint32_t *args, struct hres *r)
+@@ -682,10 +701,104 @@ static void t_InstallEventHandler(uint32_t *args, struct hres *r)
  	if (A(5)) U32(A(5)) = hobj_wrap(ref);
  	RET(rc);
  }
@@ -1417,7 +1667,25 @@ index 484efa9..3f78921 100644
  static EventTargetRef w_GetApplicationEventTarget(void) { return GetApplicationEventTarget(); }
  static EventQueueRef w_GetMainEventQueue(void) { return GetMainEventQueue(); }
  static uint32_t w_GetEventClass(EventRef e) { return GetEventClass(e); }
-@@ -693,25 +792,179 @@ static void t_GetEventParameter(uint32_t *args, struct hres *r)
+ static uint32_t w_GetEventKind(EventRef e) { return GetEventKind(e); }
++static void call_event_timer(EventLoopTimerRef timer, void *context)
++{
++	uint64_t bits = (uintptr_t)context;
++	gcall((g32)(bits >> 32), 2, hobj_wrap(timer), (g32)bits);
++}
++
++static OSStatus w_InstallEventLoopTimer(EventLoopRef loop, double delay, double interval,
++	g32 callback, g32 context, EventLoopTimerRef *timer)
++{
++	if (!callback) return paramErr;
++	uint64_t bits = ((uint64_t)callback << 32) | context;
++	return InstallEventLoopTimer(loop, delay, interval, call_event_timer, (void *)(uintptr_t)bits, timer);
++}
++
+ static int w_RemoveEventHandler(EventHandlerRef h) { return RemoveEventHandler(h); }
+ static int w_CallNextEventHandler(EventHandlerCallRef c, EventRef e) { return CallNextEventHandler(c, e); }
+ // (event, name, desiredType, *actualType, bufferSize, *actualSize (ByteCount), data)
+@@ -693,25 +806,183 @@ static void t_GetEventParameter(uint32_t *args, struct hres *r)
  {
  	ByteCount n = 0;
  	EventParamType t = 0;
@@ -1593,6 +1861,10 @@ index 484efa9..3f78921 100644
 +	G("_ReleaseEvent", w_ReleaseEvent, "v:o"), G("_GetEventTime", GetEventTime, "d:o"),
  	G("_GetEventClass", w_GetEventClass, "u:o"), G("_GetEventKind", w_GetEventKind, "u:o"),
  	G("_RemoveEventHandler", w_RemoveEventHandler, "i:o"), G("_CallNextEventHandler", w_CallNextEventHandler, "i:oo"),
++	G("_AddEventTypesToHandler", AddEventTypesToHandler, "i:oup"),
++	G("_RemoveEventTypesFromHandler", RemoveEventTypesFromHandler, "i:oup"),
++	G("_InstallEventLoopTimer", w_InstallEventLoopTimer, "i:odduuO"),
++	G("_RunCurrentEventLoop", RunCurrentEventLoop, "i:d"),
 +	R("_FSGetCatalogInfo", t_FSGetCatalogInfo),
 +	R("_GetProcessInformation", t_GetProcessInformation),
 +	G("_UCConvertCFAbsoluteTimeToLongDateTime", UCConvertCFAbsoluteTimeToLongDateTime, "i:dp"),
@@ -1600,7 +1872,7 @@ index 484efa9..3f78921 100644
  	G("_GetFrontProcess", w_GetFrontProcess, "i:p"), G("_SameProcess", w_SameProcess, "i:ppp"),
  	G("_ProcessInformationCopyDictionary", w_ProcessInformationCopyDictionary, "o:pu"),
  	R("_GetEventParameter", t_GetEventParameter), G("_SetEventParameter", w_SetEventParameter, "i:ouuup"),
-@@ -755,6 +1008,9 @@ static struct hfn legacy_fns[] = {
+@@ -755,6 +1026,9 @@ static struct hfn legacy_fns[] = {
  	G("__dyld_image_count", w_dyld_image_count, "u:"), R("__dyld_get_image_name", t_dyld_get_image_name),
  	G("__dyld_get_image_header", w_dyld_get_image_header, "u:u"),
  	G("__dyld_get_image_vmaddr_slide", w_dyld_get_image_vmaddr_slide, "i:u"),
@@ -1610,7 +1882,7 @@ index 484efa9..3f78921 100644
  	R("_libiconv_set_relocation_prefix", t_libiconv_set_relocation_prefix),
  	G("_shm_open", w_shm_open, "i:pii"), G("_shm_unlink", w_shm_unlink, "i:p"),
  	G("_sigwait", w_sigwait, "i:pp"), G("_sigwait$UNIX2003", w_sigwait, "i:pp"),
-@@ -777,6 +1033,7 @@ static struct hfn legacy_fns[] = {
+@@ -777,6 +1051,7 @@ static struct hfn legacy_fns[] = {
  	G("_CFURLCreateFromFileSystemRepresentation", w_CFURLCreateFromFileSystemRepresentation, "o:ppii"),
  	G("_CFURLGetFSRef", w_CFURLGetFSRef, "b:op"), G("_FSRefMakePath", w_FSRefMakePath, "i:ppu"),
  	G("_FSCompareFSRefs", w_FSCompareFSRefs, "i:pp"),
@@ -2412,10 +2684,100 @@ index 0000000..4129d89
 +	REGISTER(entries);
 +}
 diff --git a/src/objc.m b/src/objc.m
-index f53ca50..89182ef 100644
+index f53ca50..a43ec77 100644
 --- a/src/objc.m
 +++ b/src/objc.m
-@@ -1408,6 +1408,20 @@ static void t_NSLog(uint32_t *args, struct hres *r)
+@@ -340,7 +340,11 @@ static void ret_h2g(const char *t, const void *v, struct hres *r, g32 sret)
+ 	case '@': case '#': r->rax = objc_wrap(*(id *)v); return;
+ 	case ':': { SEL s = *(SEL *)v; r->rax = s ? canon_sel(sel_getName(s), 0) : 0; return; }
+ 	case '*': { char *s = *(char **)v; r->rax = s ? guest_cstr(s) : 0; return; }
+-	case '^': r->rax = hobj_wrap(*(void **)v); return;
++	case '^': {
++		void *pointer = *(void **)v;
++		r->rax = (uintptr_t)pointer < LOW_END ? (g32)(uintptr_t)pointer : hobj_wrap(pointer);
++		return;
++	}
+ 	case '{': {
+ 		const double *d = v;
+ 		float f[4];
+@@ -547,6 +551,10 @@ static int ui_on_main(id target, const char *sel)
+ static void call_host(id target, Class super_cls, SEL hsel, const char *selname,
+ 		      const uint32_t *ga, struct hres *r, g32 sret)
+ {
++	if (!strcmp(selname, "windowRef") && [target isKindOfClass:[NSWindow class]]) {
++		r->rax = hobj_wrap(target);
++		return;
++	}
+ 	if (!strcmp(selname, "makeCurrentContext") && [target isKindOfClass:[NSOpenGLContext class]]) {
+ 		[(NSOpenGLContext *)target makeCurrentContext];
+ 		gl_last_context = CGLGetCurrentContext();
+@@ -871,6 +879,8 @@ static int variadic_objects(id target, const char *sel, const uint32_t *ga, stru
+ 	return 1;
+ }
+ 
++extern int dirt3_version_patch_active(void);
++
+ static void msgsend(uint32_t *a, struct hres *r, int kind)
+ {
+ 	g32 sret = 0;
+@@ -957,6 +967,16 @@ static void msgsend(uint32_t *a, struct hres *r, int kind)
+ 	}
+ 	// no autorelease pool here: returned objects belong to the guest's own pools
+ 	call_host(target, super_cls, sel_registerName(sel), sel, ga, r, sret);
++
++	// This launcher can supply invalid UTF-8 while building the application
++	// name for its WebView user agent. Use its bundle name at that call site.
++	if (!r->rax && !strcmp(sel, "stringWithUTF8String:") && dirt3_version_patch_active()) {
++		g32 offset = 0;
++		const char *image = macho_addr_name(a[-1], &offset);
++		const char prefix[] = "DiRT 3 Complete Edition`";
++		if (offset == 0x6cf870 && image && !strncmp(image, prefix, sizeof(prefix) - 1))
++			r->rax = objc_wrap([[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"]);
++	}
+ }
+ 
+ static void t_msgSend(uint32_t *a, struct hres *r) { msgsend(a, r, K_NORMAL); }
+@@ -1020,10 +1040,39 @@ static int arg_h2g(const char *t, NSInvocation *inv, NSUInteger i, uint32_t *g)
+ 	}
+ }
+ 
++// The launcher's JS side expects [property, type, JSON array]. Load the
++// already-installed localization tables using the native bundle loader.
++static BOOL dirt3_localized_web_property(NSInvocation *inv)
++{
++	id property = nil, type = nil;
++	[inv getArgument:&property atIndex:2];
++	[inv getArgument:&type atIndex:3];
++	if (![property isKindOfClass:[NSString class]] || ![property hasPrefix:@"localise-"] ||
++	    ![type isEqual:@"string"]) return NO;
++	NSString *key = [property substringFromIndex:9];
++	NSBundle *bundle = [NSBundle mainBundle];
++	NSString *missing = @"MAC32_MISSING_LOCALIZATION";
++	NSString *value = [bundle localizedStringForKey:key value:missing table:nil];
++	if ([value isEqual:missing])
++		value = [bundle localizedStringForKey:key value:missing table:@"Localizable_Game"];
++	if ([value isEqual:missing]) return NO;
++	NSString *game = [bundle objectForInfoDictionaryKey:@"CFBundleName"];
++	if (game.length) value = [value stringByReplacingOccurrencesOfString:@"#{game_name}" withString:game];
++	NSData *data = [NSJSONSerialization dataWithJSONObject:@[value] options:0 error:NULL];
++	NSString *json = data ? [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease] : nil;
++	if (!json) return NO;
++	NSArray *response = @[property, type, json];
++	[inv setReturnValue:&response];
++	return YES;
++}
++
+ static void forward_to_guest(id self, SEL _cmd, NSInvocation *inv)
+ {
+ 	(void)_cmd;
+ 	const char *sel = sel_getName(inv.selector);
++	if (!strcmp(sel, "getValueOfProperty:withType:") &&
++	    !strcmp(object_getClassName(self), "WebkitJSInterface") && dirt3_version_patch_active() &&
++	    dirt3_localized_web_property(inv)) return;
+ 	int classmethod = object_isClass(self);
+ 	extern int trace_calls;
+ 	extern int trace_match(const char *);
+@@ -1408,6 +1457,20 @@ static void t_NSLog(uint32_t *args, struct hres *r)
  		free(s);
  	}
  }
@@ -2436,7 +2798,7 @@ index f53ca50..89182ef 100644
  // NSRunAlertPanel(title, msgFormat, default, alternate, other, ...): show it, and log it
  static void t_NSRunAlertPanel(uint32_t *args, struct hres *r)
  {
-@@ -1647,6 +1661,14 @@ static void t_dispatch_sync(uint32_t *args, struct hres *r)
+@@ -1647,6 +1710,14 @@ static void t_dispatch_sync(uint32_t *args, struct hres *r)
  	g32 b = A(1);
  	dispatch_sync(host_queue(A(0)), ^{ gcall(U32(b + 12), 1, b); });
  }
@@ -2451,7 +2813,7 @@ index f53ca50..89182ef 100644
  static void t_dispatch_get_main_queue(uint32_t *args, struct hres *r) { (void)args; RET(main_q); }
  
  // ---- AppKit / Foundation constants ------------------------------------------------
-@@ -1671,12 +1693,14 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
+@@ -1671,12 +1742,14 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
  
  static struct hfn objc_fns[] = {
  	R("_NSApplicationMain", t_NSApplicationMain),
@@ -2466,7 +2828,7 @@ index f53ca50..89182ef 100644
  	D("_NSApp", 4, init_nsapp), D("_NSDefaultRunLoopMode", 4, init_runloopmode),
  	D("___CFConstantStringClassReference", 32, init_cfconst),
  	R("_objc_retain", t_objc_retain), R("_objc_release", t_objc_release),
-@@ -1694,6 +1718,7 @@ static struct hfn objc_fns[] = {
+@@ -1694,6 +1767,7 @@ static struct hfn objc_fns[] = {
  	R("__Block_copy", t_Block_copy), R("__Block_release", t_Block_release),
  	D("__dispatch_main_q", 128, init_main_q), R("_dispatch_get_main_queue", t_dispatch_get_main_queue),
  	R("_dispatch_async", t_dispatch_async), R("_dispatch_sync", t_dispatch_sync),
@@ -2885,7 +3247,7 @@ index b9a8110..fabcbeb 100644
  	R("_pthread_mach_thread_np", t_mach_thread_np), R("_pthread_setname_np", t_setname_np),
  	R("_pthread_key_create", t_key_create), R("_pthread_key_delete", t_key_delete),
 diff --git a/src/thunks.c b/src/thunks.c
-index a5bde77..0bdccdb 100644
+index a5bde77..70687cf 100644
 --- a/src/thunks.c
 +++ b/src/thunks.c
 @@ -319,6 +319,7 @@ void hostcall_dispatch(uint32_t idx, uint32_t *args, struct hres *r)
@@ -2896,7 +3258,7 @@ index a5bde77..0bdccdb 100644
  	thunks_pthread_init();
  	thunks_cxx_init();
  	thunks_libc2_init();
-@@ -330,12 +331,16 @@ void thunks_init(void)
+@@ -330,12 +331,17 @@ void thunks_init(void)
  	thunks_steam_init();
  	thunks_zlib_init();
  	thunks_audio_init();
@@ -2910,11 +3272,12 @@ index a5bde77..0bdccdb 100644
  	thunks_cf_init();
 +	thunks_cf_streams_init();
 +	thunks_apple_events_init();
++	thunks_carbon_windows_init();
  	thunks_carbon_init();
  	thunks_qd_init();
  }
 diff --git a/src/thunks.h b/src/thunks.h
-index ad15688..979aea4 100644
+index ad15688..1e40f06 100644
 --- a/src/thunks.h
 +++ b/src/thunks.h
 @@ -26,6 +26,8 @@ g32 hfn_stub(struct hfn *f);				// a stub for a dynamically made entry
@@ -2926,7 +3289,7 @@ index ad15688..979aea4 100644
  void thunks_pthread_init(void);
  void thunks_cxx_init(void);
  void thunks_libc2_init(void);
-@@ -37,12 +39,16 @@ void thunks_ats_init(void);
+@@ -37,12 +39,17 @@ void thunks_ats_init(void);
  void thunks_steam_init(void);
  void thunks_zlib_init(void);
  void thunks_audio_init(void);
@@ -2940,6 +3303,48 @@ index ad15688..979aea4 100644
  void thunks_cf_init(void);
 +void thunks_cf_streams_init(void);
 +void thunks_apple_events_init(void);
++void thunks_carbon_windows_init(void);
  void thunks_carbon_init(void);
  void thunks_qd_init(void);
  
+diff --git a/src/tramp.s b/src/tramp.s
+index 76ef86b..0a8eeca 100644
+--- a/src/tramp.s
++++ b/src/tramp.s
+@@ -16,6 +16,7 @@ _t_start:
+ #   esp: 16-byte aligned start of the cdecl argument block, already filled.
+ #   Returns edx:eax. If st0_out, pops st(0) into it.
+ #   The host rsp is kept in a pthread TSD slot (%gs:off) so calls can nest.
++#   It points to space for the active guest stack cursor until the guest returns.
+ _t_call32:
+ 	push %rbp
+ 	mov  %rsp, %rbp
+@@ -27,6 +28,7 @@ _t_call32:
+ 	push %rdx			# st0_out
+ 	mov  _t_tsd_off(%rip), %rax
+ 	pushq %gs:(%rax)		# outer call's saved rsp
++	pushq $0			# active guest stack cursor, filled by hostcall64
+ 	mov  %rsp, %gs:(%rax)
+ 
+ 	sub  $4, %esi
+@@ -49,6 +51,7 @@ _t_call32:
+ back64:
+ 	mov  _t_tsd_off(%rip), %rcx
+ 	mov  %gs:(%rcx), %rsp
++	add  $8, %rsp			# discard the guest stack cursor
+ 	popq %gs:(%rcx)
+ 	pop  %rcx			# st0_out
+ 	test %rcx, %rcx
+@@ -68,7 +71,11 @@ back64:
+ 	.code64
+ hostcall64:
+ 	mov  %esp, %esp			# clear the upper half
+-	mov  %rsp, %rbx
++	mov  %rsp, %rbx			# guest argument frame
++	mov  _t_tsd_off(%rip), %rax
++	mov  %gs:(%rax), %rsp		# native pthread stack, under t_call32's frame
++	mov  %rbx, (%rsp)		# nested guest callbacks allocate below this frame
++	lea  64(%rsp), %rbp		# restore t_call32's native frame chain
+ 	and  $-16, %rsp
+ 	sub  $32, %rsp			# struct hres
+ 	movq $0, (%rsp)

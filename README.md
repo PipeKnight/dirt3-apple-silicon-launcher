@@ -6,9 +6,9 @@ patches for the compatibility runtime, and reproducible findings.
 
 **Status** — on Apple Silicon with macOS 15.7.7, the game passes the
 launcher's macOS version check, initializes OpenGL 4.1 and OpenCL, and
-displays the original startup dialogs. It currently stops while bringing
-the launcher's Cocoa window into its Carbon window code. The in-game menu
-and an offline race remain unverified.
+loads the original Feral launcher in WebKit. A crash while returning
+launcher properties to JavaScript still prevents the Play button from
+becoming usable. The in-game menu and an offline race remain unverified.
 
 ## Inspect the installed copy
 
