@@ -6,7 +6,8 @@ patches for the compatibility runtime, and reproducible findings.
 
 **Status.** On an Apple M4 with macOS 15.7.7, **Play** in the original Feral
 launcher displays the DiRT 3 logo, plays the original startup videos, and
-reaches the title screen with **Press Start or Enter**. The engine creates
+reaches the title screen with **Press Start or Enter**. Enter advances through
+**Checking Content** to the first-time profile setup. The engine creates
 OpenGL and OpenCL contexts and starts audio output units. Some launches
 still fail in the resource check. The first offline race remains unverified.
 

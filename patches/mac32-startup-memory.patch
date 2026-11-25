@@ -704,7 +704,7 @@ index 47c00de..e27be43 100644
  	G("_CGLDestroyRendererInfo", CGLDestroyRendererInfo, "i:o"),
  	G("_CGLSetCurrentContext", w_CGLSetCurrentContext, "i:o"),
 diff --git a/src/apple2.m b/src/apple2.m
-index acdd903..d2176e6 100644
+index acdd903..b862a30 100644
 --- a/src/apple2.m
 +++ b/src/apple2.m
 @@ -10,12 +10,121 @@
@@ -881,7 +881,61 @@ index acdd903..d2176e6 100644
  static void t_nothing(uint32_t *args, struct hres *r) { (void)args; (void)r; }
  static void t_zero(uint32_t *args, struct hres *r) { (void)args; RET(0); }
  static void t_IOServiceAddMatchingNotification(uint32_t *args, struct hres *r)
-@@ -215,6 +366,15 @@ static uint32_t w_KBGetLayoutType(int t) { return KBGetLayoutType((SInt16)t); }
+@@ -200,8 +351,51 @@ static void t_IOPMAssertionCreateWithDescription(uint32_t *args, struct hres *r)
+ static int w_IOPMAssertionRelease(uint32_t id) { return IOPMAssertionRelease(id); }
+ 
+ // ---- keyboard layout ---------------------------------------------------------------------
+-static TISInputSourceRef w_TISCopyCurrentKeyboardLayoutInputSource(void) { return TISCopyCurrentKeyboardLayoutInputSource(); }
+-static void *w_TISGetInputSourceProperty(TISInputSourceRef s, CFStringRef k) { return TISGetInputSourceProperty(s, k); }
++// HIToolbox's input-source registry is confined to the host main queue.
++static TISInputSourceRef copy_input_source(TISInputSourceRef (*copy)(void))
++{
++	if ([NSThread isMainThread]) return copy();
++	__block TISInputSourceRef source;
++	dispatch_sync(dispatch_get_main_queue(), ^{ source = copy(); });
++	return source;
++}
++
++static TISInputSourceRef w_TISCopyCurrentKeyboardLayoutInputSource(void)
++{
++	return copy_input_source(TISCopyCurrentKeyboardLayoutInputSource);
++}
++
++static TISInputSourceRef w_TISCopyCurrentASCIICapableKeyboardLayoutInputSource(void)
++{
++	return copy_input_source(TISCopyCurrentASCIICapableKeyboardLayoutInputSource);
++}
++
++static TISInputSourceRef w_TISCopyCurrentASCIICapableKeyboardInputSource(void)
++{
++	return copy_input_source(TISCopyCurrentASCIICapableKeyboardInputSource);
++}
++
++static TISInputSourceRef w_TISCopyCurrentKeyboardInputSource(void)
++{
++	return copy_input_source(TISCopyCurrentKeyboardInputSource);
++}
++
++static OSStatus w_TISSelectInputSource(TISInputSourceRef source)
++{
++	if ([NSThread isMainThread]) return TISSelectInputSource(source);
++	__block OSStatus status;
++	dispatch_sync(dispatch_get_main_queue(), ^{ status = TISSelectInputSource(source); });
++	return status;
++}
++
++static void *w_TISGetInputSourceProperty(TISInputSourceRef source, CFStringRef key)
++{
++	if ([NSThread isMainThread]) return TISGetInputSourceProperty(source, key);
++	__block void *property;
++	dispatch_sync(dispatch_get_main_queue(), ^{ property = TISGetInputSourceProperty(source, key); });
++	return property;
++}
++
+ static void init_uchr(g32 a) { U32(a) = hobj_wrap((void *)kTISPropertyUnicodeKeyLayoutData); }
+ static void t_UCKeyTranslate(uint32_t *args, struct hres *r)
+ {
+@@ -215,6 +409,15 @@ static uint32_t w_KBGetLayoutType(int t) { return KBGetLayoutType((SInt16)t); }
  static uint32_t w_LMGetKbdType(void) { return LMGetKbdType(); }
  
  // ---- AppKit and Launch Services ---------------------------------------------------------
@@ -897,7 +951,7 @@ index acdd903..d2176e6 100644
  static void t_LSOpenCFURLRef(uint32_t *args, struct hres *r)
  {
  	if (A(1)) U32(A(1)) = 0;
-@@ -296,7 +456,9 @@ static struct hfn apple2_fns[] = {
+@@ -296,7 +499,9 @@ static struct hfn apple2_fns[] = {
  	G("_CFRunLoopStop", CFRunLoopStop, "v:o"), G("_CFRunLoopWakeUp", CFRunLoopWakeUp, "v:o"),
  	D("_kCFRunLoopDefaultMode", 4, init_rlmode), D("_kCFRunLoopCommonModes", 4, init_rlcommon),
  	G("_CFRunLoopRemoveSource", CFRunLoopRemoveSource, "v:ooo"),
@@ -907,7 +961,7 @@ index acdd903..d2176e6 100644
  	// a real event tap needs the Accessibility permission, which mac32 does not
  	// have: return no tap, as macOS does (SDL copes; VLC 1.1's media keys assert).
  	// MAC32_FAKE_EVENT_TAP=1 hands out a port that never fires instead.
-@@ -348,12 +510,24 @@ static struct hfn apple2_fns[] = {
+@@ -348,12 +553,24 @@ static struct hfn apple2_fns[] = {
  	R("_CVDisplayLinkGetNominalOutputVideoRefreshPeriod", t_CVDisplayLinkGetNominalOutputVideoRefreshPeriod),
  	G("_CVDisplayLinkRelease", w_CVDisplayLinkRelease, "v:o"),
  
@@ -937,14 +991,14 @@ index acdd903..d2176e6 100644
  	R("_IOServiceAddMatchingNotification", t_IOServiceAddMatchingNotification),
  	// no notification ports: SDL's HID discovery then stays off (it also
  	// destroys a port twice when matching fails)
-@@ -369,12 +543,16 @@ static struct hfn apple2_fns[] = {
+@@ -369,12 +586,16 @@ static struct hfn apple2_fns[] = {
  	G("_IOPMAssertionRelease", w_IOPMAssertionRelease, "i:u"),
  
  	G("_TISCopyCurrentKeyboardLayoutInputSource", w_TISCopyCurrentKeyboardLayoutInputSource, "o:"),
-+	G("_TISCopyCurrentASCIICapableKeyboardLayoutInputSource", TISCopyCurrentASCIICapableKeyboardLayoutInputSource, "o:"),
-+	G("_TISCopyCurrentASCIICapableKeyboardInputSource", TISCopyCurrentASCIICapableKeyboardInputSource, "o:"),
-+	G("_TISCopyCurrentKeyboardInputSource", TISCopyCurrentKeyboardInputSource, "o:"),
-+	G("_TISSelectInputSource", TISSelectInputSource, "i:o"),
++	G("_TISCopyCurrentASCIICapableKeyboardLayoutInputSource", w_TISCopyCurrentASCIICapableKeyboardLayoutInputSource, "o:"),
++	G("_TISCopyCurrentASCIICapableKeyboardInputSource", w_TISCopyCurrentASCIICapableKeyboardInputSource, "o:"),
++	G("_TISCopyCurrentKeyboardInputSource", w_TISCopyCurrentKeyboardInputSource, "o:"),
++	G("_TISSelectInputSource", w_TISSelectInputSource, "i:o"),
  	G("_TISGetInputSourceProperty", w_TISGetInputSourceProperty, "o:oo"),
  	D("_kTISPropertyUnicodeKeyLayoutData", 4, init_uchr),
  	R("_UCKeyTranslate", t_UCKeyTranslate),
@@ -1903,10 +1957,41 @@ index 0000000..e724caa
 +
 +void thunks_cf_streams_init(void) { REGISTER(stream_entries); }
 diff --git a/src/cf_thunks.c b/src/cf_thunks.c
-index be1e6fb..1d726c6 100644
+index be1e6fb..3121c2f 100644
 --- a/src/cf_thunks.c
 +++ b/src/cf_thunks.c
-@@ -247,6 +247,7 @@ static struct hfn cf[] = {
+@@ -14,6 +14,7 @@ static struct hfn cf[] = {
+ 	G("_CFAllocatorGetTypeID", CFAllocatorGetTypeID, "u:"),
+ 	G("_CFAllocatorSetDefault", CFAllocatorSetDefault, "v:o"),
+ 	G("_CFArrayAppendArray", CFArrayAppendArray, "v:ooN"),
++	G("_CFArrayInsertValueAtIndex", CFArrayInsertValueAtIndex, "v:oio"),
+ 	G("_CFArrayCreateCopy", CFArrayCreateCopy, "o:oo"),
+ 	G("_CFArrayCreateMutableCopy", CFArrayCreateMutableCopy, "o:oio"),
+ 	G("_CFArrayRemoveAllValues", CFArrayRemoveAllValues, "v:o"),
+@@ -184,11 +185,14 @@ static struct hfn cf[] = {
+ 	G("_CFLocaleCopyISOCountryCodes", CFLocaleCopyISOCountryCodes, "o:"),
+ 	G("_CFLocaleCopyISOCurrencyCodes", CFLocaleCopyISOCurrencyCodes, "o:"),
+ 	G("_CFLocaleCopyISOLanguageCodes", CFLocaleCopyISOLanguageCodes, "o:"),
++	G("_CFLocaleCreate", CFLocaleCreate, "o:oo"),
+ 	G("_CFLocaleCreateCopy", CFLocaleCreateCopy, "o:oo"),
+ 	G("_CFLocaleGetLanguageCharacterDirection", CFLocaleGetLanguageCharacterDirection, "i:o"),
+ 	G("_CFLocaleGetLanguageLineDirection", CFLocaleGetLanguageLineDirection, "i:o"),
+ 	G("_CFLocaleGetSystem", CFLocaleGetSystem, "o:"),
+ 	G("_CFLocaleGetTypeID", CFLocaleGetTypeID, "u:"),
++	G("_CFLocaleGetValue", CFLocaleGetValue, "o:oo"),
++	G("_CFLocaleGetWindowsLocaleCodeFromLocaleIdentifier", CFLocaleGetWindowsLocaleCodeFromLocaleIdentifier, "u:o"),
+ 	G("_CFMachPortGetPort", CFMachPortGetPort, "u:o"),
+ 	G("_CFMachPortGetTypeID", CFMachPortGetTypeID, "u:"),
+ 	G("_CFMachPortInvalidate", CFMachPortInvalidate, "v:o"),
+@@ -216,6 +220,7 @@ static struct hfn cf[] = {
+ 	G("_CFNumberFormatterGetStyle", CFNumberFormatterGetStyle, "i:o"),
+ 	G("_CFNumberFormatterGetTypeID", CFNumberFormatterGetTypeID, "u:"),
+ 	G("_CFNumberFormatterSetFormat", CFNumberFormatterSetFormat, "v:oo"),
++	G("_CFNumberFormatterSetProperty", CFNumberFormatterSetProperty, "v:ooo"),
+ 	G("_CFNumberGetByteSize", CFNumberGetByteSize, "i:o"),
+ 	G("_CFNumberGetType", CFNumberGetType, "i:o"),
+ 	G("_CFNumberIsFloatType", CFNumberIsFloatType, "b:o"),
+@@ -247,6 +252,7 @@ static struct hfn cf[] = {
  	G("_CFPreferencesSetValue", CFPreferencesSetValue, "v:ooooo"),
  	G("_CFPreferencesSynchronize", CFPreferencesSynchronize, "b:ooo"),
  	G("_CFPropertyListCreateData", CFPropertyListCreateData, "o:ooiuO"),
@@ -1914,7 +1999,7 @@ index be1e6fb..1d726c6 100644
  	G("_CFPropertyListCreateDeepCopy", CFPropertyListCreateDeepCopy, "o:oou"),
  	G("_CFPropertyListCreateXMLData", CFPropertyListCreateXMLData, "o:oo"),
  	G("_CFPropertyListIsValid", CFPropertyListIsValid, "b:oi"),
-@@ -411,6 +412,7 @@ static struct hfn cf[] = {
+@@ -411,6 +417,7 @@ static struct hfn cf[] = {
  	G("_CFURLCreateBookmarkData", CFURLCreateBookmarkData, "o:oouooO"),
  	G("_CFURLCreateBookmarkDataFromAliasRecord", CFURLCreateBookmarkDataFromAliasRecord, "o:oo"),
  	G("_CFURLCreateBookmarkDataFromFile", CFURLCreateBookmarkDataFromFile, "o:ooO"),

@@ -181,8 +181,12 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   AudioQueue output callbacks executed during the video. Audible output
   and mixer behavior still need verification.
 - The game reached its rendered **Press Start or Enter** title screen. An
-  Enter keypress advanced to the keyboard-layout query. mac32 now binds the
-  corresponding Carbon Text Input Source functions to the host layout.
+  Enter keypress advanced to the keyboard-layout query. The runtime routes
+  Carbon Text Input Source calls to the host main queue, as required by
+  HIToolbox, and uses CoreFoundation to translate the current locale into
+  the locale code used by the game. The original **Checking Content**
+  screen and next intro played, followed by the interactive **New Profile**
+  wizard. Arrow keys and Enter worked in the profile screens.
 
 Playability requires loading and completing an offline race, verifying
 steering, audio, frame pacing and a save/reload cycle on the test Mac.
