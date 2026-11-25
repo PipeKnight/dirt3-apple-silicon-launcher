@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 4c16e9d..b6b24c1 100644
+index 4c16e9d..91eeaf0 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -2,11 +2,11 @@
@@ -14,12 +14,61 @@ index 4c16e9d..b6b24c1 100644
 -SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/format.c \
 -      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/cg_thunks.c src/cf_thunks.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
 +SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c \
-+      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
++      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
  OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
  
  all: mac32 guest app
+diff --git a/patches/dirt3_2015_version.c b/patches/dirt3_2015_version.c
+new file mode 100644
+index 0000000..db3141f
+--- /dev/null
++++ b/patches/dirt3_2015_version.c
+@@ -0,0 +1,43 @@
++#include "../src/patches.h"
++#include <CoreServices/CoreServices.h>
++#include <string.h>
++extern int macho_section(struct image *, const char *, const char *, g32 *, uint32_t *);
++
++// The game converts Gestalt's three components to the old 0x10xy format.
++// Its calculation clears the major field for releases 11 through 15, so
++// its launcher rejects a newer system as older than its 10.x minimum.
++static int apply(struct image *image)
++{
++	SInt32 major = 0;
++	if (Gestalt(gestaltSystemVersionMajor, &major) != noErr || major <= 10)
++		return 0;
++
++	static const uint8_t packing[] = {
++		0x89, 0xd9, 0x83, 0xe1, 0x10, 0xc1, 0xe1, 0x08,
++		0xba, 0x00, 0x10, 0x00, 0x00, 0x83, 0xfb, 0x0a,
++		0x0f, 0x45, 0xd1, 0x09, 0xd6, 0x09, 0xc6,
++	};
++	enum { packing_offset = 0x781938 - 0xb980 };
++	g32 text;
++	uint32_t text_size;
++	if (!macho_section(image, "__TEXT", "__text", &text, &text_size) ||
++		text_size < packing_offset + sizeof(packing))
++		return 0;
++	uint8_t *code = G2H(text + packing_offset);
++	if (memcmp(code, packing, sizeof(packing)))
++		return 0;
++
++	// Saturate the legacy result at 10.15.0 and jump to its original cache
++	// store. Other version callers continue to see the real host version.
++	static const uint8_t clamp[] = {0xbe, 0xf0, 0x10, 0x00, 0x00, 0xeb, sizeof(packing) - 7};
++	memcpy(code, clamp, sizeof(clamp));
++	return 1;
++}
++
++const struct guest_patch patch_dirt3_2015_version = {
++	.library = "DiRT 3 Complete Edition",
++	.sha256 = "0415a9ecbaccdc25752a327c7b8a0dbd62435a308d0a95652d4a286e6a579014",
++	.game = "DiRT 3 Complete Edition 1.0 (85186.17625.4091)",
++	.what = "encode newer macOS releases in the launcher's legacy version format",
++	.apply = apply,
++};
 diff --git a/src/apple.m b/src/apple.m
-index 47c00de..c118227 100644
+index 47c00de..54a8947 100644
 --- a/src/apple.m
 +++ b/src/apple.m
 @@ -9,7 +9,9 @@
@@ -136,10 +185,24 @@ index 47c00de..c118227 100644
  static void t_CFStringGetBytes(uint32_t *args, struct hres *r)
  {
  	// str, CFRange (2 words), enc, lossByte, isExternal, buf, maxLen, *usedLen
-@@ -277,6 +362,96 @@ static void t_CFArrayApplyFunction(uint32_t *args, struct hres *r)
+@@ -277,6 +362,131 @@ static void t_CFArrayApplyFunction(uint32_t *args, struct hres *r)
  	for (uint32_t i = A(1); i < A(1) + A(2); i++)
  		gcall(A(3), 2, hobj_wrap((void *)CFArrayGetValueAtIndex(a, i)), A(4));
  }
++struct dict_outputs { g32 *keys, *values; };
++static void write_dict_entry(const void *key, const void *value, void *opaque)
++{
++	struct dict_outputs *outputs = opaque;
++	if (outputs->keys) *outputs->keys++ = hobj_wrap((void *)key);
++	if (outputs->values) *outputs->values++ = hobj_wrap((void *)value);
++}
++
++static void t_CFDictionaryGetKeysAndValues(uint32_t *args, struct hres *r)
++{
++	struct dict_outputs outputs = { G2H(A(1)), G2H(A(2)) };
++	CFDictionaryApplyFunction(hobj_unwrap(A(0)), write_dict_entry, &outputs);
++}
++
 +struct dict_applier { g32 function, context; };
 +
 +static void call_cf_dictionary_applier(const void *key, const void *value, void *opaque)
@@ -230,10 +293,31 @@ index 47c00de..c118227 100644
 +		hobj_unwrap(A(2)), info, (int32_t)A(4))));
 +}
 +
++// Both ABIs use an eight-byte second field at offset eight. The i386
++// caller passes four words and uses a hidden pointer for a struct result.
++static void t_CFGregorianDateGetAbsoluteTime(uint32_t *args, struct hres *r)
++{
++	CFGregorianDate date;
++	_Static_assert(sizeof(date) == 16, "CFGregorianDate layout");
++	memcpy(&date, args, sizeof(date));
++	r->st0 = CFGregorianDateGetAbsoluteTime(date, hobj_unwrap(A(4)));
++	r->flags |= F_ST0;
++}
++
++static void t_CFAbsoluteTimeGetGregorianDate(uint32_t *args, struct hres *r)
++{
++	double time;
++	memcpy(&time, args + 1, sizeof(time));
++	CFGregorianDate date = CFAbsoluteTimeGetGregorianDate(time, hobj_unwrap(A(3)));
++	memcpy(G2H(A(0)), &date, sizeof(date));
++	RET(A(0));
++	r->flags |= F_POP4;
++}
++
  // CFUUIDBytes is 16 bytes: passed by value (4 words), returned through a hidden pointer
  static void t_CFUUIDGetConstantUUIDWithBytes(uint32_t *args, struct hres *r)
  {
-@@ -319,6 +494,21 @@ static void t_ff_none(uint32_t *args, struct hres *r) { (void)args; RET(0x800400
+@@ -319,6 +529,21 @@ static void t_ff_none(uint32_t *args, struct hres *r) { (void)args; RET(0x800400
  static int w_CFEqual(CFTypeRef a, CFTypeRef b) { return CFEqual(a, b) ? 1 : 0; }
  static CFURLRef w_CFURLCreateWithBytes(CFAllocatorRef a, const UInt8 *b, int32_t n, uint32_t enc, CFURLRef base)
  { return CFURLCreateWithBytes(a, b, n, enc, base); }
@@ -255,7 +339,7 @@ index 47c00de..c118227 100644
  static void t_CFStringCreateWithFormat(uint32_t *args, struct hres *r)
  {
  	// alloc, formatOptions, format, ...: %@ handled by our formatter
-@@ -352,6 +542,9 @@ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
+@@ -352,6 +577,9 @@ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
  static int w_CGLSetCurrentContext(CGLContextObj c) { if (c) gl_last_context = c; return CGLSetCurrentContext(c); }
  
  static struct hfn apple[] = {
@@ -265,17 +349,19 @@ index 47c00de..c118227 100644
  	// CoreFoundation
  	G("_CFArrayGetCount", w_CFArrayGetCount, "i:o"),
  	G("_CFArrayGetValueAtIndex", w_CFArrayGetValueAtIndex, "o:oi"),
-@@ -376,6 +569,9 @@ static struct hfn apple[] = {
+@@ -376,6 +604,11 @@ static struct hfn apple[] = {
  	G("_CFDictionarySetValue", CFDictionarySetValue, "v:ooo"), G("_CFDictionaryAddValue", CFDictionaryAddValue, "v:ooo"),
  	G("_CFDictionaryRemoveValue", CFDictionaryRemoveValue, "v:oo"),
  	G("_CFDictionaryGetCount", w_CFDictionaryGetCount, "i:o"),
++	G("_CFDictionaryGetCountOfKey", CFDictionaryGetCountOfKey, "i:oo"),
 +	R("_CFDictionaryApplyFunction", t_CFDictionaryApplyFunction),
++	R("_CFDictionaryGetKeysAndValues", t_CFDictionaryGetKeysAndValues),
 +	R("_CFTreeApplyFunctionToChildren", t_CFTreeApplyFunctionToChildren),
 +	R("_CFXMLNodeGetInfoPtr", t_CFXMLNodeGetInfoPtr), R("_CFXMLNodeCreate", t_CFXMLNodeCreate),
  	G("_CFDictionaryContainsKey", w_CFDictionaryContainsKey, "i:oo"),
  	G("_CFArrayAppendValue", CFArrayAppendValue, "v:oo"),
  	G("_CFStringCompare", w_CFStringCompare, "i:oou"),
-@@ -383,6 +579,8 @@ static struct hfn apple[] = {
+@@ -383,6 +616,8 @@ static struct hfn apple[] = {
  	G("_CFCharacterSetIsCharacterMember", w_CFCharacterSetIsCharacterMember, "i:ou"),
  	G("_CFCharacterSetIsLongCharacterMember", w_CFCharacterSetIsLongCharacterMember, "i:ou"),
  	G("_CFDataCreate", w_CFDataCreate, "o:opi"),
@@ -284,7 +370,14 @@ index 47c00de..c118227 100644
  	R("_CFStringFind", t_CFStringFind), R("_CFStringGetBytes", t_CFStringGetBytes),
  	G("_CFStringCreateWithBytes", w_CFStringCreateWithBytes, "o:opiuu"),
  	G("_CFStringCreateWithCharacters", w_CFStringCreateWithCharacters, "o:opi"),
-@@ -416,6 +614,7 @@ static struct hfn apple[] = {
+@@ -411,11 +646,14 @@ static struct hfn apple[] = {
+ 	G("_CFLocaleCopyCurrent", CFLocaleCopyCurrent, "o:"), G("_CFLocaleGetIdentifier", CFLocaleGetIdentifier, "o:o"),
+ 	G("_CFLocaleCopyPreferredLanguages", CFLocaleCopyPreferredLanguages, "o:"),
+ 	G("_CFAbsoluteTimeGetCurrent", CFAbsoluteTimeGetCurrent, "d:"),
++	R("_CFAbsoluteTimeGetGregorianDate", t_CFAbsoluteTimeGetGregorianDate),
++	R("_CFGregorianDateGetAbsoluteTime", t_CFGregorianDateGetAbsoluteTime),
+ 	G("_CFRunLoopGetCurrent", CFRunLoopGetCurrent, "o:"), G("_CFRunLoopGetMain", CFRunLoopGetMain, "o:"),
+ 	G("_CFRunLoopRunInMode", w_CFRunLoopRunInMode, "i:odu"),
  	G("_CFUUIDCreate", CFUUIDCreate, "o:o"), G("_CFUUIDCreateString", CFUUIDCreateString, "o:oo"),
  	G("_CFEqual", w_CFEqual, "i:oo"),
  	R("_CFStringCreateWithFormat", t_CFStringCreateWithFormat),
@@ -292,7 +385,7 @@ index 47c00de..c118227 100644
  	G("_CFURLCreateWithBytes", w_CFURLCreateWithBytes, "o:opiuo"),
  	R("_CGDisplayBounds", t_CGDisplayBounds),
  	R("_CFArrayApplyFunction", t_CFArrayApplyFunction),
-@@ -461,6 +660,8 @@ static struct hfn apple[] = {
+@@ -461,6 +699,8 @@ static struct hfn apple[] = {
  	G("_CGDisplayPixelsHigh", w_CGDisplayPixelsHigh, "u:u"),
  	G("_CGDisplayPixelsWide", w_CGDisplayPixelsWide, "u:u"),
  	G("_CGMainDisplayID", CGMainDisplayID, "u:"),
@@ -301,7 +394,7 @@ index 47c00de..c118227 100644
  	G("_CGDisplayIOServicePort", CGDisplayIOServicePort, "u:u"),
  	G("_CGSetDisplayTransferByTable", CGSetDisplayTransferByTable, "i:uuppp"),
  	G("_CGImageSourceCreateWithURL", CGImageSourceCreateWithURL, "o:oo"),
-@@ -488,6 +689,8 @@ static struct hfn apple[] = {
+@@ -488,6 +728,8 @@ static struct hfn apple[] = {
  	R("_CGLCreateContext", t_CGLCreateContext),
  	R("_CGLQueryRendererInfo", t_CGLQueryRendererInfo),
  	G("_CGLDestroyContext", CGLDestroyContext, "i:o"),
@@ -311,7 +404,7 @@ index 47c00de..c118227 100644
  	G("_CGLDestroyRendererInfo", CGLDestroyRendererInfo, "i:o"),
  	G("_CGLSetCurrentContext", w_CGLSetCurrentContext, "i:o"),
 diff --git a/src/apple2.m b/src/apple2.m
-index acdd903..53fa4c8 100644
+index acdd903..ed9d6b8 100644
 --- a/src/apple2.m
 +++ b/src/apple2.m
 @@ -10,12 +10,121 @@
@@ -436,7 +529,59 @@ index acdd903..53fa4c8 100644
  static void t_CFDictionaryGetValueIfPresent(uint32_t *args, struct hres *r)
  {
  	const void *v = NULL;
-@@ -215,6 +324,15 @@ static uint32_t w_KBGetLayoutType(int t) { return KBGetLayoutType((SInt16)t); }
+@@ -158,8 +267,50 @@ static void w_CVDisplayLinkRelease(CVDisplayLinkRef l) { CVDisplayLinkRelease(l)
+ // ---- IOKit -----------------------------------------------------------------------------
+ // HID: a real manager that never reports devices, so SDL sees no game
+ // controllers (their callbacks are not bridged yet) and asks for no permission.
+-static IOHIDManagerRef w_IOHIDManagerCreate(void *alloc, uint32_t opts) { (void)alloc; return IOHIDManagerCreate(NULL, opts); }
+ static void w_IOHIDManagerSetDeviceMatchingMultiple(IOHIDManagerRef m, CFArrayRef a) { IOHIDManagerSetDeviceMatchingMultiple(m, a); }
++
++// IOKit stores the registration's refcon as an opaque word. On the host
++// that word can carry both original i386 arguments without owning a heap record.
++static void *hid_refcon(g32 function, g32 context)
++{
++	return (void *)(uintptr_t)(((uint64_t)function << 32) | context);
++}
++
++static void call_hid_callback(void *opaque, IOReturn result, void *sender, CFTypeRef object)
++{
++	uint64_t refcon = (uintptr_t)opaque;
++	gcall((g32)(refcon >> 32), 4, (g32)refcon, (uint32_t)result, hobj_wrap(sender),
++		hobj_wrap((void *)object));
++}
++
++static void hid_device_callback(void *opaque, IOReturn result, void *sender, IOHIDDeviceRef device)
++{
++	call_hid_callback(opaque, result, sender, device);
++}
++
++static void hid_input_callback(void *opaque, IOReturn result, void *sender, IOHIDValueRef value)
++{
++	call_hid_callback(opaque, result, sender, value);
++}
++
++static void w_IOHIDManagerRegisterDeviceMatchingCallback(IOHIDManagerRef manager, g32 function, g32 context)
++{
++	IOHIDManagerRegisterDeviceMatchingCallback(manager, function ? hid_device_callback : NULL,
++		hid_refcon(function, context));
++}
++
++static void w_IOHIDManagerRegisterDeviceRemovalCallback(IOHIDManagerRef manager, g32 function, g32 context)
++{
++	IOHIDManagerRegisterDeviceRemovalCallback(manager, function ? hid_device_callback : NULL,
++		hid_refcon(function, context));
++}
++
++static void w_IOHIDManagerRegisterInputValueCallback(IOHIDManagerRef manager, g32 function, g32 context)
++{
++	IOHIDManagerRegisterInputValueCallback(manager, function ? hid_input_callback : NULL,
++		hid_refcon(function, context));
++}
++
+ static void t_nothing(uint32_t *args, struct hres *r) { (void)args; (void)r; }
+ static void t_zero(uint32_t *args, struct hres *r) { (void)args; RET(0); }
+ static void t_IOServiceAddMatchingNotification(uint32_t *args, struct hres *r)
+@@ -215,6 +366,15 @@ static uint32_t w_KBGetLayoutType(int t) { return KBGetLayoutType((SInt16)t); }
  static uint32_t w_LMGetKbdType(void) { return LMGetKbdType(); }
  
  // ---- AppKit and Launch Services ---------------------------------------------------------
@@ -452,7 +597,7 @@ index acdd903..53fa4c8 100644
  static void t_LSOpenCFURLRef(uint32_t *args, struct hres *r)
  {
  	if (A(1)) U32(A(1)) = 0;
-@@ -296,7 +414,9 @@ static struct hfn apple2_fns[] = {
+@@ -296,7 +456,9 @@ static struct hfn apple2_fns[] = {
  	G("_CFRunLoopStop", CFRunLoopStop, "v:o"), G("_CFRunLoopWakeUp", CFRunLoopWakeUp, "v:o"),
  	D("_kCFRunLoopDefaultMode", 4, init_rlmode), D("_kCFRunLoopCommonModes", 4, init_rlcommon),
  	G("_CFRunLoopRemoveSource", CFRunLoopRemoveSource, "v:ooo"),
@@ -462,7 +607,37 @@ index acdd903..53fa4c8 100644
  	// a real event tap needs the Accessibility permission, which mac32 does not
  	// have: return no tap, as macOS does (SDL copes; VLC 1.1's media keys assert).
  	// MAC32_FAKE_EVENT_TAP=1 hands out a port that never fires instead.
-@@ -374,7 +494,7 @@ static struct hfn apple2_fns[] = {
+@@ -348,12 +510,24 @@ static struct hfn apple2_fns[] = {
+ 	R("_CVDisplayLinkGetNominalOutputVideoRefreshPeriod", t_CVDisplayLinkGetNominalOutputVideoRefreshPeriod),
+ 	G("_CVDisplayLinkRelease", w_CVDisplayLinkRelease, "v:o"),
+ 
+-	G("_IOHIDManagerCreate", w_IOHIDManagerCreate, "o:pu"),
++	G("_IOHIDManagerCreate", IOHIDManagerCreate, "o:ou"),
+ 	G("_IOHIDManagerSetDeviceMatchingMultiple", w_IOHIDManagerSetDeviceMatchingMultiple, "v:oo"),
+-	R("_IOHIDManagerRegisterDeviceMatchingCallback", t_nothing),
+-	R("_IOHIDManagerRegisterDeviceRemovalCallback", t_nothing),
+-	R("_IOHIDManagerScheduleWithRunLoop", t_nothing), R("_IOHIDManagerUnscheduleFromRunLoop", t_nothing),
+-	R("_IOHIDManagerOpen", t_zero), R("_IOHIDManagerClose", t_zero), R("_IOHIDManagerCopyDevices", t_zero),
++	G("_IOHIDManagerRegisterDeviceMatchingCallback", w_IOHIDManagerRegisterDeviceMatchingCallback, "v:ouu"),
++	G("_IOHIDManagerRegisterDeviceRemovalCallback", w_IOHIDManagerRegisterDeviceRemovalCallback, "v:ouu"),
++	G("_IOHIDManagerRegisterInputValueCallback", w_IOHIDManagerRegisterInputValueCallback, "v:ouu"),
++	G("_IOHIDManagerScheduleWithRunLoop", IOHIDManagerScheduleWithRunLoop, "v:ooo"),
++	G("_IOHIDManagerUnscheduleFromRunLoop", IOHIDManagerUnscheduleFromRunLoop, "v:ooo"),
++	G("_IOHIDManagerOpen", IOHIDManagerOpen, "i:ou"), G("_IOHIDManagerClose", IOHIDManagerClose, "i:ou"),
++	G("_IOHIDManagerCopyDevices", IOHIDManagerCopyDevices, "o:o"),
++	G("_IOHIDDeviceGetProperty", IOHIDDeviceGetProperty, "o:oo"),
++	G("_IOHIDDeviceUnscheduleFromRunLoop", IOHIDDeviceUnscheduleFromRunLoop, "v:ooo"),
++	G("_IOHIDElementGetCookie", IOHIDElementGetCookie, "u:o"),
++	G("_IOHIDElementGetDevice", IOHIDElementGetDevice, "o:o"),
++	G("_IOHIDElementGetUsage", IOHIDElementGetUsage, "u:o"),
++	G("_IOHIDElementGetUsagePage", IOHIDElementGetUsagePage, "u:o"),
++	G("_IOHIDValueGetElement", IOHIDValueGetElement, "o:o"),
++	G("_IOHIDValueGetIntegerValue", IOHIDValueGetIntegerValue, "i:o"),
++	G("_IOHIDValueGetTimeStamp", IOHIDValueGetTimeStamp, "l:o"),
+ 	R("_IOServiceAddMatchingNotification", t_IOServiceAddMatchingNotification),
+ 	// no notification ports: SDL's HID discovery then stays off (it also
+ 	// destroys a port twice when matching fails)
+@@ -374,7 +548,7 @@ static struct hfn apple2_fns[] = {
  	R("_UCKeyTranslate", t_UCKeyTranslate),
  	G("_KBGetLayoutType", w_KBGetLayoutType, "u:i"), G("_LMGetKbdType", w_LMGetKbdType, "u:"),
  
@@ -471,6 +646,191 @@ index acdd903..53fa4c8 100644
  	G("_NSSearchPathForDirectoriesInDomains", w_NSSearchPathForDirectoriesInDomains, "o:uui"),
  
  	R("_Microseconds", t_Microseconds), R("_NSUnLinkModule", t_one), R("_WaitNextEvent", t_zero),
+diff --git a/src/apple_events.c b/src/apple_events.c
+new file mode 100644
+index 0000000..7d3a975
+--- /dev/null
++++ b/src/apple_events.c
+@@ -0,0 +1,179 @@
++#include <Carbon/Carbon.h>
++#include <stdlib.h>
++
++#include "thunks.h"
++
++struct ae_desc32 {
++	uint32_t type;
++	g32 handle;
++} __attribute__((packed, aligned(2)));
++
++static AEDesc ae_read(g32 addr)
++{
++	const struct ae_desc32 *desc = G2H(addr);
++	return desc ? (AEDesc){desc->type, hobj_unwrap(desc->handle)} : (AEDesc){typeNull, NULL};
++}
++
++static void ae_write(g32 addr, const AEDesc *host)
++{
++	struct ae_desc32 *desc = G2H(addr);
++	if (desc) *desc = (struct ae_desc32){host->descriptorType, hobj_wrap(host->dataHandle)};
++}
++
++struct ae_handler {
++	struct ae_handler *next;
++	uint32_t event_class, event_id;
++	Boolean system;
++	g32 function, refcon;
++};
++
++static struct ae_handler *handlers;
++
++static OSErr call_ae_handler(const AppleEvent *event, AppleEvent *reply, SRefCon refcon)
++{
++	const struct ae_handler *handler = (void *)(uintptr_t)refcon;
++	g32 input = gmalloc(2 * sizeof(struct ae_desc32));
++	g32 output = reply ? input + sizeof(struct ae_desc32) : 0;
++	ae_write(input, event);
++	ae_write(output, reply);
++	OSErr status = (OSErr)gcall(handler->function, 3, input, output, handler->refcon);
++	if (reply) *reply = ae_read(output);
++	gfree(input);
++	return status;
++}
++
++static struct ae_handler **find_ae_handler(uint32_t event_class, uint32_t event_id, Boolean system)
++{
++	struct ae_handler **slot = &handlers;
++	while (*slot && ((*slot)->event_class != event_class || (*slot)->event_id != event_id ||
++		(*slot)->system != system)) {
++		slot = &(*slot)->next;
++	}
++	return slot;
++}
++
++static void t_AEInstallEventHandler(uint32_t *args, struct hres *r)
++{
++	if (!A(2)) { RET(paramErr); return; }
++	Boolean system = A(4) != 0;
++	struct ae_handler **slot = find_ae_handler(A(0), A(1), system);
++	struct ae_handler *handler = calloc(1, sizeof(*handler));
++	if (!handler) { RET(memFullErr); return; }
++	*handler = (struct ae_handler){NULL, A(0), A(1), system, A(2), A(3)};
++	OSErr status = AEInstallEventHandler(A(0), A(1), call_ae_handler,
++		(SRefCon)(uintptr_t)handler, system);
++	if (status == noErr) {
++		struct ae_handler *previous = *slot;
++		handler->next = previous ? previous->next : NULL;
++		*slot = handler;
++		free(previous);
++	} else {
++		free(handler);
++	}
++	RET(status);
++}
++
++static void t_AERemoveEventHandler(uint32_t *args, struct hres *r)
++{
++	Boolean system = A(3) != 0;
++	struct ae_handler **slot = find_ae_handler(A(0), A(1), system);
++	struct ae_handler *handler = *slot;
++	if (!handler || handler->function != A(2)) { RET(errAEHandlerNotFound); return; }
++	OSErr status = AERemoveEventHandler(A(0), A(1), call_ae_handler, system);
++	if (status == noErr) {
++		*slot = handler->next;
++		free(handler);
++	}
++	RET(status);
++}
++
++static void t_AECreateDesc(uint32_t *args, struct hres *r)
++{
++	AEDesc output = {typeNull, NULL};
++	OSErr status = AECreateDesc(A(0), G2H(A(1)), (int32_t)A(2), A(3) ? &output : NULL);
++	ae_write(A(3), &output);
++	RET(status);
++}
++
++static void t_AEDisposeDesc(uint32_t *args, struct hres *r)
++{
++	AEDesc desc = ae_read(A(0));
++	OSErr status = AEDisposeDesc(A(0) ? &desc : NULL);
++	ae_write(A(0), &desc);
++	RET(status);
++}
++
++static void t_AECreateAppleEvent(uint32_t *args, struct hres *r)
++{
++	AEDesc target = ae_read(A(2));
++	AppleEvent output = {typeNull, NULL};
++	OSErr status = AECreateAppleEvent(A(0), A(1), A(2) ? &target : NULL, (AEReturnID)A(3),
++		(AETransactionID)A(4), A(5) ? &output : NULL);
++	ae_write(A(5), &output);
++	RET(status);
++}
++
++static void t_AECoerceDesc(uint32_t *args, struct hres *r)
++{
++	AEDesc desc = ae_read(A(0)), output = {typeNull, NULL};
++	OSErr status = AECoerceDesc(A(0) ? &desc : NULL, A(1), A(2) ? &output : NULL);
++	ae_write(A(2), &output);
++	RET(status);
++}
++
++static void t_AEGetDescData(uint32_t *args, struct hres *r)
++{
++	AEDesc desc = ae_read(A(0));
++	RET(AEGetDescData(A(0) ? &desc : NULL, G2H(A(1)), (int32_t)A(2)));
++}
++
++static void t_AEGetDescDataSize(uint32_t *args, struct hres *r)
++{
++	AEDesc desc = ae_read(A(0));
++	RET(AEGetDescDataSize(A(0) ? &desc : NULL));
++}
++
++static void t_AECountItems(uint32_t *args, struct hres *r)
++{
++	AEDesc desc = ae_read(A(0));
++	long count;
++	OSErr status = AECountItems(A(0) ? &desc : NULL, A(1) ? &count : NULL);
++	if (status == noErr && A(1)) *(int32_t *)G2H(A(1)) = (int32_t)count;
++	RET(status);
++}
++
++static void t_AEGetNthDesc(uint32_t *args, struct hres *r)
++{
++	AEDesc desc = ae_read(A(0)), output = {typeNull, NULL};
++	OSErr status = AEGetNthDesc(A(0) ? &desc : NULL, (int32_t)A(1), A(2), G2H(A(3)),
++		A(4) ? &output : NULL);
++	ae_write(A(4), &output);
++	RET(status);
++}
++
++static void t_AEGetParamDesc(uint32_t *args, struct hres *r)
++{
++	AEDesc event = ae_read(A(0)), output = {typeNull, NULL};
++	OSErr status = AEGetParamDesc(A(0) ? &event : NULL, A(1), A(2), A(3) ? &output : NULL);
++	ae_write(A(3), &output);
++	RET(status);
++}
++
++static void t_AEPutParamPtr(uint32_t *args, struct hres *r)
++{
++	AEDesc event = ae_read(A(0));
++	OSErr status = AEPutParamPtr(A(0) ? &event : NULL, A(1), A(2), G2H(A(3)), (int32_t)A(4));
++	ae_write(A(0), &event);
++	RET(status);
++}
++
++static struct hfn apple_events_fns[] = {
++	R("_AEInstallEventHandler", t_AEInstallEventHandler), R("_AERemoveEventHandler", t_AERemoveEventHandler),
++	R("_AECreateDesc", t_AECreateDesc), R("_AEDisposeDesc", t_AEDisposeDesc),
++	R("_AECreateAppleEvent", t_AECreateAppleEvent), R("_AECoerceDesc", t_AECoerceDesc),
++	R("_AEGetDescData", t_AEGetDescData), R("_AEGetDescDataSize", t_AEGetDescDataSize),
++	R("_AECountItems", t_AECountItems), R("_AEGetNthDesc", t_AEGetNthDesc),
++	R("_AEGetParamDesc", t_AEGetParamDesc), R("_AEPutParamPtr", t_AEPutParamPtr),
++};
++
++void thunks_apple_events_init(void) { REGISTER(apple_events_fns); }
 diff --git a/src/audio.c b/src/audio.c
 index 9dad843..0d59d21 100644
 --- a/src/audio.c
@@ -834,6 +1194,18 @@ index 0000000..e724caa
 +};
 +
 +void thunks_cf_streams_init(void) { REGISTER(stream_entries); }
+diff --git a/src/cf_thunks.c b/src/cf_thunks.c
+index be1e6fb..89203ff 100644
+--- a/src/cf_thunks.c
++++ b/src/cf_thunks.c
+@@ -411,6 +411,7 @@ static struct hfn cf[] = {
+ 	G("_CFURLCreateBookmarkData", CFURLCreateBookmarkData, "o:oouooO"),
+ 	G("_CFURLCreateBookmarkDataFromAliasRecord", CFURLCreateBookmarkDataFromAliasRecord, "o:oo"),
+ 	G("_CFURLCreateBookmarkDataFromFile", CFURLCreateBookmarkDataFromFile, "o:ooO"),
++	G("_CFURLWriteBookmarkDataToFile", CFURLWriteBookmarkDataToFile, "b:oouO"),
+ 	G("_CFURLCreateByResolvingBookmarkData", CFURLCreateByResolvingBookmarkData, "o:oouoopO"),
+ 	G("_CFURLCreateCopyAppendingPathComponent", CFURLCreateCopyAppendingPathComponent, "o:oooB"),
+ 	G("_CFURLCreateCopyAppendingPathExtension", CFURLCreateCopyAppendingPathExtension, "o:ooo"),
 diff --git a/src/cpu.c b/src/cpu.c
 index c608c55..cfe5950 100644
 --- a/src/cpu.c
@@ -854,8 +1226,67 @@ index c608c55..cfe5950 100644
  	fprintf(stderr, "  eax %08llx ebx %08llx ecx %08llx edx %08llx\n",
  		uc->uc_mcontext->__ss.__rax & 0xffffffff, uc->uc_mcontext->__ss.__rbx & 0xffffffff,
  		uc->uc_mcontext->__ss.__rcx & 0xffffffff, uc->uc_mcontext->__ss.__rdx & 0xffffffff);
+diff --git a/src/gl_special.c b/src/gl_special.c
+index 20f3e5a..b37eaf4 100644
+--- a/src/gl_special.c
++++ b/src/gl_special.c
+@@ -65,21 +65,35 @@ static void put_ptr(g32 dst, void *p) { *(g32 *)G2H(dst) = (g32)(uintptr_t)p; }
+ static void t_glGetPointerv(uint32_t *args, struct hres *r) { (void)r; void *p = NULL; glGetPointerv(A(0), &p); put_ptr(A(1), p); }
+ static void t_glGetVertexAttribPointerv(uint32_t *args, struct hres *r) { (void)r; void *p = NULL; glGetVertexAttribPointerv(A(0), A(1), &p); put_ptr(A(2), p); }
+ 
+-// glGetString results are kept for good: programs hold on to them
++// glGetString results are kept for good: programs hold on to them. The
++// version and extension strings can differ between contexts in one process.
++extern const GLubyte *glGetStringi(GLenum name, GLuint index);
+ static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+-static g32 strcache[64][2];
+-static int nstr;
+-static g32 keep_string(uint32_t key, const char *s)
++struct gl_string { struct gl_string *next; g32 value; };
++static struct gl_string *strings;
++
++static g32 keep_string(const GLubyte *value)
+ {
+-	if (!s) return 0;
++	if (!value) return 0;
+ 	pthread_mutex_lock(&lk);
+-	for (int i = 0; i < nstr; i++) if (strcache[i][0] == key) { pthread_mutex_unlock(&lk); return strcache[i][1]; }
+-	g32 g = gstrdup(s);
+-	if (nstr < 64) { strcache[nstr][0] = key; strcache[nstr][1] = g; nstr++; }
++	for (struct gl_string *item = strings; item; item = item->next) {
++		if (!strcmp(G2H(item->value), (const char *)value)) {
++			pthread_mutex_unlock(&lk);
++			return item->value;
++		}
++	}
++	g32 address = gstrdup((const char *)value);
++	struct gl_string *item = malloc(sizeof(*item));
++	if (item) {
++		*item = (struct gl_string){strings, address};
++		strings = item;
++	}
+ 	pthread_mutex_unlock(&lk);
+-	return g;
++	return address;
+ }
+-static void t_glGetString(uint32_t *args, struct hres *r) { RET(keep_string(A(0), (const char *)glGetString(A(0)))); }
++
++static void t_glGetString(uint32_t *args, struct hres *r) { RET(keep_string(glGetString(A(0)))); }
++static void t_glGetStringi(uint32_t *args, struct hres *r) { RET(keep_string(glGetStringi(A(0), A(1)))); }
+ 
+ // ---- mapped buffers ---------------------------------------------------------
+ // One shadow per buffer object name, kept between maps and freed when the
+@@ -206,7 +220,7 @@ static struct hfn gls[] = {
+ 	R("_glGetPointerv", t_glGetPointerv), R("_glGetPointervEXT", t_glGetPointerv),
+ 	R("_glGetVertexAttribPointerv", t_glGetVertexAttribPointerv),
+ 	R("_glGetVertexAttribPointervARB", t_glGetVertexAttribPointerv),
+-	R("_glGetString", t_glGetString),
++	R("_glGetString", t_glGetString), R("_glGetStringi", t_glGetStringi),
+ 	R("_glMapBuffer", t_glMapBuffer), R("_glMapBufferARB", t_glMapBuffer),
+ 	R("_glFlushMappedBufferRangeAPPLE", t_glFlushMappedBufferRangeAPPLE),
+ 	R("_glUnmapBuffer", t_glUnmapBuffer), R("_glUnmapBufferARB", t_glUnmapBuffer),
 diff --git a/src/legacy.m b/src/legacy.m
-index 484efa9..909a94a 100644
+index 484efa9..3f78921 100644
 --- a/src/legacy.m
 +++ b/src/legacy.m
 @@ -6,7 +6,9 @@
@@ -986,7 +1417,7 @@ index 484efa9..909a94a 100644
  static EventTargetRef w_GetApplicationEventTarget(void) { return GetApplicationEventTarget(); }
  static EventQueueRef w_GetMainEventQueue(void) { return GetMainEventQueue(); }
  static uint32_t w_GetEventClass(EventRef e) { return GetEventClass(e); }
-@@ -693,25 +792,177 @@ static void t_GetEventParameter(uint32_t *args, struct hres *r)
+@@ -693,25 +792,179 @@ static void t_GetEventParameter(uint32_t *args, struct hres *r)
  {
  	ByteCount n = 0;
  	EventParamType t = 0;
@@ -1164,10 +1595,12 @@ index 484efa9..909a94a 100644
  	G("_RemoveEventHandler", w_RemoveEventHandler, "i:o"), G("_CallNextEventHandler", w_CallNextEventHandler, "i:oo"),
 +	R("_FSGetCatalogInfo", t_FSGetCatalogInfo),
 +	R("_GetProcessInformation", t_GetProcessInformation),
++	G("_UCConvertCFAbsoluteTimeToLongDateTime", UCConvertCFAbsoluteTimeToLongDateTime, "i:dp"),
++	G("_UCConvertLongDateTimeToCFAbsoluteTime", UCConvertLongDateTimeToCFAbsoluteTime, "i:lp"),
  	G("_GetFrontProcess", w_GetFrontProcess, "i:p"), G("_SameProcess", w_SameProcess, "i:ppp"),
  	G("_ProcessInformationCopyDictionary", w_ProcessInformationCopyDictionary, "o:pu"),
  	R("_GetEventParameter", t_GetEventParameter), G("_SetEventParameter", w_SetEventParameter, "i:ouuup"),
-@@ -755,6 +1006,9 @@ static struct hfn legacy_fns[] = {
+@@ -755,6 +1008,9 @@ static struct hfn legacy_fns[] = {
  	G("__dyld_image_count", w_dyld_image_count, "u:"), R("__dyld_get_image_name", t_dyld_get_image_name),
  	G("__dyld_get_image_header", w_dyld_get_image_header, "u:u"),
  	G("__dyld_get_image_vmaddr_slide", w_dyld_get_image_vmaddr_slide, "i:u"),
@@ -1177,7 +1610,7 @@ index 484efa9..909a94a 100644
  	R("_libiconv_set_relocation_prefix", t_libiconv_set_relocation_prefix),
  	G("_shm_open", w_shm_open, "i:pii"), G("_shm_unlink", w_shm_unlink, "i:p"),
  	G("_sigwait", w_sigwait, "i:pp"), G("_sigwait$UNIX2003", w_sigwait, "i:pp"),
-@@ -777,6 +1031,7 @@ static struct hfn legacy_fns[] = {
+@@ -777,6 +1033,7 @@ static struct hfn legacy_fns[] = {
  	G("_CFURLCreateFromFileSystemRepresentation", w_CFURLCreateFromFileSystemRepresentation, "o:ppii"),
  	G("_CFURLGetFSRef", w_CFURLGetFSRef, "b:op"), G("_FSRefMakePath", w_FSRefMakePath, "i:ppu"),
  	G("_FSCompareFSRefs", w_FSCompareFSRefs, "i:pp"),
@@ -1979,10 +2412,31 @@ index 0000000..4129d89
 +	REGISTER(entries);
 +}
 diff --git a/src/objc.m b/src/objc.m
-index f53ca50..d14916d 100644
+index f53ca50..89182ef 100644
 --- a/src/objc.m
 +++ b/src/objc.m
-@@ -1647,6 +1647,14 @@ static void t_dispatch_sync(uint32_t *args, struct hres *r)
+@@ -1408,6 +1408,20 @@ static void t_NSLog(uint32_t *args, struct hres *r)
+ 		free(s);
+ 	}
+ }
++static g32 guest_uncaught_exception_handler;
++
++static void call_guest_uncaught_exception(NSException *exception)
++{
++	g32 function = __atomic_load_n(&guest_uncaught_exception_handler, __ATOMIC_ACQUIRE);
++	if (function) gcall(function, 1, objc_wrap(exception));
++}
++
++static void t_NSSetUncaughtExceptionHandler(uint32_t *args, struct hres *r)
++{
++	__atomic_store_n(&guest_uncaught_exception_handler, A(0), __ATOMIC_RELEASE);
++	NSSetUncaughtExceptionHandler(A(0) ? call_guest_uncaught_exception : NULL);
++}
++
+ // NSRunAlertPanel(title, msgFormat, default, alternate, other, ...): show it, and log it
+ static void t_NSRunAlertPanel(uint32_t *args, struct hres *r)
+ {
+@@ -1647,6 +1661,14 @@ static void t_dispatch_sync(uint32_t *args, struct hres *r)
  	g32 b = A(1);
  	dispatch_sync(host_queue(A(0)), ^{ gcall(U32(b + 12), 1, b); });
  }
@@ -1997,7 +2451,7 @@ index f53ca50..d14916d 100644
  static void t_dispatch_get_main_queue(uint32_t *args, struct hres *r) { (void)args; RET(main_q); }
  
  // ---- AppKit / Foundation constants ------------------------------------------------
-@@ -1671,6 +1679,7 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
+@@ -1671,12 +1693,14 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
  
  static struct hfn objc_fns[] = {
  	R("_NSApplicationMain", t_NSApplicationMain),
@@ -2005,7 +2459,14 @@ index f53ca50..d14916d 100644
  	R("_objc_msgSend", t_msgSend), R("_objc_msgSend_stret", t_msgSend_stret),
  	R("_objc_msgSend_fpret", t_msgSend_fpret), R("_objc_msgSendSuper", t_msgSendSuper),
  	R("_objc_msgSendSuper_stret", t_msgSendSuper_stret),
-@@ -1694,6 +1703,7 @@ static struct hfn objc_fns[] = {
+ 	R("_objc_enumerationMutation", t_enum_mutation),
+ 	R("_objc_setProperty", t_objc_setProperty), R("_objc_getProperty", t_objc_getProperty),
+ 	R("_NSClassFromString", t_NSClassFromString), R("_NSRunAlertPanel", t_NSRunAlertPanel), R("_NSLog", t_NSLog),
++	R("_NSSetUncaughtExceptionHandler", t_NSSetUncaughtExceptionHandler),
+ 	D("_NSApp", 4, init_nsapp), D("_NSDefaultRunLoopMode", 4, init_runloopmode),
+ 	D("___CFConstantStringClassReference", 32, init_cfconst),
+ 	R("_objc_retain", t_objc_retain), R("_objc_release", t_objc_release),
+@@ -1694,6 +1718,7 @@ static struct hfn objc_fns[] = {
  	R("__Block_copy", t_Block_copy), R("__Block_release", t_Block_release),
  	D("__dispatch_main_q", 128, init_main_q), R("_dispatch_get_main_queue", t_dispatch_get_main_queue),
  	R("_dispatch_async", t_dispatch_async), R("_dispatch_sync", t_dispatch_sync),
@@ -2373,6 +2834,22 @@ index 0000000..bcbede9
 +};
 +
 +void thunks_opencl_init(void) { REGISTER(opencl_entries); }
+diff --git a/src/patches.c b/src/patches.c
+index d89b800..b30212c 100644
+--- a/src/patches.c
++++ b/src/patches.c
+@@ -8,9 +8,11 @@
+ 
+ // ---- the list: one entry per file in patches/ ----------------------------------
+ extern const struct guest_patch patch_source2024_vguimatsurface, patch_css2024_launcher;
++extern const struct guest_patch patch_dirt3_2015_version;
+ static const struct guest_patch *const all[] = {
+ 	&patch_source2024_vguimatsurface,
+ 	&patch_css2024_launcher,
++	&patch_dirt3_2015_version,
+ };
+ 
+ int patch_jump(struct image *img, const char *fn, struct hfn *h)
 diff --git a/src/pthread.c b/src/pthread.c
 index b9a8110..fabcbeb 100644
 --- a/src/pthread.c
@@ -2408,7 +2885,7 @@ index b9a8110..fabcbeb 100644
  	R("_pthread_mach_thread_np", t_mach_thread_np), R("_pthread_setname_np", t_setname_np),
  	R("_pthread_key_create", t_key_create), R("_pthread_key_delete", t_key_delete),
 diff --git a/src/thunks.c b/src/thunks.c
-index a5bde77..d5fd756 100644
+index a5bde77..0bdccdb 100644
 --- a/src/thunks.c
 +++ b/src/thunks.c
 @@ -319,6 +319,7 @@ void hostcall_dispatch(uint32_t idx, uint32_t *args, struct hres *r)
@@ -2419,7 +2896,7 @@ index a5bde77..d5fd756 100644
  	thunks_pthread_init();
  	thunks_cxx_init();
  	thunks_libc2_init();
-@@ -330,12 +331,15 @@ void thunks_init(void)
+@@ -330,12 +331,16 @@ void thunks_init(void)
  	thunks_steam_init();
  	thunks_zlib_init();
  	thunks_audio_init();
@@ -2432,11 +2909,12 @@ index a5bde77..d5fd756 100644
  	thunks_cg_init();
  	thunks_cf_init();
 +	thunks_cf_streams_init();
++	thunks_apple_events_init();
  	thunks_carbon_init();
  	thunks_qd_init();
  }
 diff --git a/src/thunks.h b/src/thunks.h
-index ad15688..0506e2f 100644
+index ad15688..979aea4 100644
 --- a/src/thunks.h
 +++ b/src/thunks.h
 @@ -26,6 +26,8 @@ g32 hfn_stub(struct hfn *f);				// a stub for a dynamically made entry
@@ -2448,7 +2926,7 @@ index ad15688..0506e2f 100644
  void thunks_pthread_init(void);
  void thunks_cxx_init(void);
  void thunks_libc2_init(void);
-@@ -37,12 +39,15 @@ void thunks_ats_init(void);
+@@ -37,12 +39,16 @@ void thunks_ats_init(void);
  void thunks_steam_init(void);
  void thunks_zlib_init(void);
  void thunks_audio_init(void);
@@ -2461,6 +2939,7 @@ index ad15688..0506e2f 100644
  void thunks_cg_init(void);
  void thunks_cf_init(void);
 +void thunks_cf_streams_init(void);
++void thunks_apple_events_init(void);
  void thunks_carbon_init(void);
  void thunks_qd_init(void);
  

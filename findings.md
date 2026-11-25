@@ -81,8 +81,33 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   CoreFoundation stream, timer, and XML bridges. Kernel execution, rendered
   frames, and audio output from the game remain unverified.
 - The installed bundle has no `libsteam_api.dylib`. The game reported the
-  missing file, continued through Carbon event registration, and then stopped
-  at its first call to `AEInstallEventHandler` in this checkpoint.
+  missing file and continued. The Apple Events bridge forwards the original
+  registrations and translates AEDesc records. The i386 fixture verifies
+  registration, removal, descriptor data, and both directions of the
+  Carbon and CoreFoundation date conversions.
+
+## Launcher and OpenGL profiles
+
+- The first visible alert came from `kErrorRequireMacOSTenVersion`.
+  The game read the actual component values 15, 7 and 7. Its packing
+  routine encoded those components as `0x0077`, below its 10.x minimum.
+  The runtime patch checks the original executable SHA-256 and instruction
+  bytes. For macOS major versions above 10 it saturates that routine's
+  legacy result at `0x10f0` (10.15.0), leaving other system version queries
+  on their original path. The installed app is read-only input.
+- The game used both OpenGL 2.1 and 4.1 on the test Mac. mac32 had reused
+  the 2.1 version string in the 4.1 context, which sent the game down its
+  legacy extension query and crashed on a null result. mac32 now returns
+  the current context's version and exposes indexed extension queries.
+  A standalone i386 fixture verified both real profiles in one process.
+- IOKit manager registrations now forward to native device and input
+  callbacks. Delivery of keyboard and controller events to the game
+  remains unverified.
+- After acknowledging two original startup dialogs, the game reached its
+  exception handler setup and Cocoa window initialization. Some dialog
+  text was garbled. The next run stopped in `CFRetain` after the original
+  launcher asked an AppKit window for its legacy Carbon `windowRef`. The
+  failure is after renderer initialization and before the in-game menu.
 
 Playability requires loading and completing an offline race, verifying
 steering, audio, frame pacing and a save/reload cycle on the test Mac.

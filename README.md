@@ -4,10 +4,11 @@ Compatibility experiments for the original Feral Mac release. The test input is 
 local installation of the game. This repository contains the probe, source
 patches for the compatibility runtime, and reproducible findings.
 
-**Status** — on Apple Silicon with macOS 15.7.7, the patched game reaches
-AppKit, creates a shared OpenGL/OpenCL context and an OpenCL command queue,
-and proceeds through XML initialization to Apple Event registration. The
-in-game menu and an offline race remain unverified.
+**Status** — on Apple Silicon with macOS 15.7.7, the game passes the
+launcher's macOS version check, initializes OpenGL 4.1 and OpenCL, and
+displays the original startup dialogs. It currently stops while bringing
+the launcher's Cocoa window into its Carbon window code. The in-game menu
+and an offline race remain unverified.
 
 ## Inspect the installed copy
 
@@ -28,6 +29,7 @@ The mac32 patches follow the upstream GPL-3.0 license.
 The host binary runs under Rosetta. The commands below were used with Xcode's
 macOS 26.2 SDK and a macOS 15 deployment target. On this Mac, an implicit
 macOS 15 SDK failed to compile mac32's generated CoreGraphics bindings.
+Run the OpenGL fixture and the game from a logged-in graphical session.
 Build in a temporary directory with no spaces in its path because mac32's
 guest Makefile passes the LLVM include path to the compiler.
 
