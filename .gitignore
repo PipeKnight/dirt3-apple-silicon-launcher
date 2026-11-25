@@ -1,0 +1,10 @@
+/.deps/
+/local/
+__pycache__/
+*.log
+*.app/
+*.exe
+*.dylib
+*.dmg
+*.gpr
+*.rep/

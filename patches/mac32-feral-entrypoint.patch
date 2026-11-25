@@ -1,0 +1,19 @@
+diff --git a/src/objc.m b/src/objc.m
+index 2d12a92..f53ca50 100644
+--- a/src/objc.m
++++ b/src/objc.m
+@@ -1155,6 +1155,14 @@ static void install(Class cls, Class lookup, struct gmeth *m, int n, int meta)
+ 		}
+ 		SEL s = sel_registerName(m[i].sel);
+ 		Method hm = meta ? class_getClassMethod(lookup, s) : class_getInstanceMethod(lookup, s);
++		// This method takes a C++ std::function by value. Its guest i386 ABI
++		// stays in the guest method table for direct dispatch by msgsend().
++		// Foundation cannot construct a host signature from its encoding.
++		if (!hm && !strcmp(class_getName(cls), "FeralApplication") &&
++		    !strcmp(m[i].sel, "setEntryPoint:") && strstr(m[i].types, "{function<void ()>=")) {
++			LOG("objc: keeping FeralApplication.setEntryPoint: guest-only\n");
++			continue;
++		}
+ 		const char *t = hm ? method_getTypeEncoding(hm) : host_types(m[i].types);
+ 		class_replaceMethod(cls, s, fwd_for(t), t);
+ 	}
