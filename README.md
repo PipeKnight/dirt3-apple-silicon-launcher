@@ -13,7 +13,7 @@ controllers and other macOS versions remain unverified.
 
 ## Open the launcher
 
-Download the DMG from [GitHub Releases](https://github.com/PipeKnight/dirt3-apple-silicon/releases).
+Download the DMG from [GitHub Releases](https://github.com/PipeKnight/dirt3-launcher/releases).
 Mount the disk image and drag **DiRT 3 Launcher.app** into
 **Applications**. Open the launcher and click **Play**. It looks for your
 original Mac installation. Use **Choose Game…** to locate a copy in another
@@ -103,9 +103,6 @@ profile. In **Singleplayer → Single Race**, choose a car and team, then
 select **Race** after the track loads. On the original keyboard mapping,
 Space accelerates, Shift or keypad 2 brakes or reverses, A and D steer, L
 applies the handbrake, and Esc pauses.
-
-See [findings.md](findings.md) for the execution trace, comparable projects and
-the conditions for calling the game playable.
 
 ## Package a disk image
 
