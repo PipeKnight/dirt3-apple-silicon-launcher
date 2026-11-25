@@ -4,10 +4,11 @@ Compatibility experiments for the original Feral Mac release. The test input is 
 local installation of the game. This repository contains the probe, source
 patches for the compatibility runtime, and reproducible findings.
 
-**Status** — on Apple Silicon with macOS 15.7.7, the original Feral
-launcher renders its controls. Its **Play** button starts the game's
-initialization, which reaches OpenGL, OpenCL, Grand Central Dispatch
-and IOKit. The in-game menu and an offline race remain unverified.
+**Status.** On an Apple M4 with macOS 15.7.7, **Play** in the original Feral
+launcher reaches the game's full-screen DiRT 3 logo. The engine creates
+OpenGL and OpenCL contexts and starts audio output units. Some launches
+still fail in the resource check. The in-game menu and first offline race
+remain unverified.
 
 ## Inspect the installed copy
 

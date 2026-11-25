@@ -162,6 +162,15 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   core and extension headers, and the OpenGL fixture creates and binds a
   real core-profile vertex array. With those calls bound, the game reached
   a subsequent OpenCL context and polled the Carbon mouse position.
+- The remaining launch path required Theme font selection, CoreText glyph
+  and rectangle conversion, and the fixed-width Mach task information
+  query. The CoreText fixture retrieved the system font and native glyph
+  bounds into a guarded i386 buffer.
+- After bridging Carbon window ordering to AppKit, the game displayed its
+  full-screen DiRT 3 logo on the M4. It then queried disk space using legacy
+  `statfs` and started two output units through the bundled OpenAL library.
+  The legacy disk query uses the i386 record and real volume sizes.
+  [Darwin's legacy statfs conversion](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c#L13461-L13561)
 
 Playability requires loading and completing an offline race, verifying
 steering, audio, frame pacing and a save/reload cycle on the test Mac.

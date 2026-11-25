@@ -263,12 +263,14 @@ index 0000000..c3047da
 +
 +void thunks_aio_init(void) { REGISTER(aio_functions); }
 diff --git a/src/apple.m b/src/apple.m
-index 47c00de..e2fbe30 100644
+index 47c00de..e27be43 100644
 --- a/src/apple.m
 +++ b/src/apple.m
-@@ -9,7 +9,9 @@
+@@ -8,8 +8,11 @@
+ #import <OpenGL/OpenGL.h>
  #import <ImageIO/ImageIO.h>
  #import <CFNetwork/CFNetwork.h>
++#import <CoreText/CoreText.h>
  #import <SystemConfiguration/SystemConfiguration.h>
 +#include <Security/SecRandom.h>
  #include "thunks.h"
@@ -276,7 +278,7 @@ index 47c00de..e2fbe30 100644
  
  // Boolean / OSErr results: the host leaves junk above the low byte/half
  static int w_CFBooleanGetValue(CFBooleanRef b) { return CFBooleanGetValue(b) ? 1 : 0; }
-@@ -114,6 +116,62 @@ static void t_CFUserNotificationDisplayAlert(uint32_t *args, struct hres *r)
+@@ -114,6 +117,62 @@ static void t_CFUserNotificationDisplayAlert(uint32_t *args, struct hres *r)
  	RET(0);
  }
  
@@ -339,7 +341,7 @@ index 47c00de..e2fbe30 100644
  // CGL: object out-parameters become handles
  static void t_CGLChoosePixelFormat(uint32_t *args, struct hres *r)
  {
-@@ -181,6 +239,7 @@ static void t_CGDisplayCurrentMode(uint32_t *args, struct hres *r)
+@@ -181,6 +240,7 @@ static void t_CGDisplayCurrentMode(uint32_t *args, struct hres *r)
  	RET(hobj_wrap((void *)d));
  }
  
@@ -347,7 +349,7 @@ index 47c00de..e2fbe30 100644
  static void init_zero(g32 a) { *(uint32_t *)G2H(a) = 0; }
  
  // ---- more CoreFoundation ----------------------------------------------------------
-@@ -239,6 +298,32 @@ static void t_CFStringFind(uint32_t *args, struct hres *r)
+@@ -239,6 +299,32 @@ static void t_CFStringFind(uint32_t *args, struct hres *r)
  	CFRange rg = CFStringFind(hobj_unwrap(A(0)), hobj_unwrap(A(1)), A(2));
  	r->rax = (uint32_t)rg.location | (uint64_t)(uint32_t)rg.length << 32;
  }
@@ -380,7 +382,7 @@ index 47c00de..e2fbe30 100644
  static void t_CFStringGetBytes(uint32_t *args, struct hres *r)
  {
  	// str, CFRange (2 words), enc, lossByte, isExternal, buf, maxLen, *usedLen
-@@ -277,6 +362,131 @@ static void t_CFArrayApplyFunction(uint32_t *args, struct hres *r)
+@@ -277,6 +363,131 @@ static void t_CFArrayApplyFunction(uint32_t *args, struct hres *r)
  	for (uint32_t i = A(1); i < A(1) + A(2); i++)
  		gcall(A(3), 2, hobj_wrap((void *)CFArrayGetValueAtIndex(a, i)), A(4));
  }
@@ -512,7 +514,7 @@ index 47c00de..e2fbe30 100644
  // CFUUIDBytes is 16 bytes: passed by value (4 words), returned through a hidden pointer
  static void t_CFUUIDGetConstantUUIDWithBytes(uint32_t *args, struct hres *r)
  {
-@@ -314,11 +524,37 @@ static void t_GetGlobalMouse(uint32_t *args, struct hres *r)
+@@ -314,11 +525,37 @@ static void t_GetGlobalMouse(uint32_t *args, struct hres *r)
  	pt[0] = (int16_t)p.y;
  	pt[1] = (int16_t)p.x;
  }
@@ -550,19 +552,75 @@ index 47c00de..e2fbe30 100644
  static void t_CFStringCreateWithFormat(uint32_t *args, struct hres *r)
  {
  	// alloc, formatOptions, format, ...: %@ handled by our formatter
-@@ -352,6 +588,11 @@ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
+@@ -351,7 +588,67 @@ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
+ 
  static int w_CGLSetCurrentContext(CGLContextObj c) { if (c) gl_last_context = c; return CGLSetCurrentContext(c); }
  
++static const CGAffineTransform *host_font_matrix(const float *guest, CGAffineTransform *matrix)
++{
++	if (!guest) return NULL;
++	*matrix = CGAffineTransformMake(guest[0], guest[1], guest[2], guest[3], guest[4], guest[5]);
++	return matrix;
++}
++
++static CTFontRef w_CTFontCreateWithName(CFStringRef name, CGFloat size, const float *guest)
++{
++	CGAffineTransform matrix;
++	return CTFontCreateWithName(name, size, host_font_matrix(guest, &matrix));
++}
++
++static CTFontRef w_CTFontCreateCopyWithSymbolicTraits(CTFontRef font, CGFloat size, const float *guest,
++	CTFontSymbolicTraits value, CTFontSymbolicTraits mask)
++{
++	CGAffineTransform matrix;
++	return CTFontCreateCopyWithSymbolicTraits(font, size, host_font_matrix(guest, &matrix), value, mask);
++}
++
++static void guest_font_rect(float *guest, CGRect native)
++{
++	guest[0] = (float)native.origin.x;
++	guest[1] = (float)native.origin.y;
++	guest[2] = (float)native.size.width;
++	guest[3] = (float)native.size.height;
++}
++
++static void t_CTFontGetBoundingRectsForGlyphs(uint32_t *args, struct hres *r)
++{
++	int32_t count = A(5);
++	float (*guest_rects)[4] = G2H(A(4));
++	CGRect *rects = guest_rects && count > 0 ? malloc((size_t)count * sizeof *rects) : NULL;
++	if (guest_rects && count > 0 && !rects) die("CTFontGetBoundingRectsForGlyphs: allocation failed");
++	CGRect bounds = CTFontGetBoundingRectsForGlyphs(hobj_unwrap(A(1)), A(2), G2H(A(3)), rects, count);
++	if (rects) for (int32_t i = 0; i < count; i++) guest_font_rect(guest_rects[i], rects[i]);
++	free(rects);
++	guest_font_rect(G2H(A(0)), bounds);
++	r->flags |= F_POP4;
++	RET(A(0));
++}
++
  static struct hfn apple[] = {
 +	G("_SecRandomCopyBytes", SecRandomCopyBytes, "i:oup"),
 +	D("_kSecRandomDefault", 4, init_sec_random_default),
 +	G("_CSCopyUserName", CSCopyUserName, "o:B"),
 +	G("_CSCopyMachineName", CSCopyMachineName, "o:"),
++	G("_CTFontCopyFullName", CTFontCopyFullName, "o:o"),
++	G("_CTFontCopyGraphicsFont", CTFontCopyGraphicsFont, "o:oO"),
++	G("_CTFontCreateCopyWithSymbolicTraits", w_CTFontCreateCopyWithSymbolicTraits, "o:ogpuu"),
++	G("_CTFontCreateUIFontForLanguage", CTFontCreateUIFontForLanguage, "o:ugo"),
++	G("_CTFontCreateWithName", w_CTFontCreateWithName, "o:ogp"),
++	G("_CTFontGetAscent", CTFontGetAscent, "g:o"),
++	G("_CTFontGetBoundingBox", CTFontGetBoundingBox, "R:o"),
++	R("_CTFontGetBoundingRectsForGlyphs", t_CTFontGetBoundingRectsForGlyphs),
++	G("_CTFontGetDescent", CTFontGetDescent, "g:o"),
++	G("_CTFontGetGlyphsForCharacters", CTFontGetGlyphsForCharacters, "b:oppi"),
++	G("_CTFontGetLeading", CTFontGetLeading, "g:o"),
++	G("_CTFontGetSize", CTFontGetSize, "g:o"),
++	G("_CTFontGetSymbolicTraits", CTFontGetSymbolicTraits, "u:o"),
 +
  	// CoreFoundation
  	G("_CFArrayGetCount", w_CFArrayGetCount, "i:o"),
  	G("_CFArrayGetValueAtIndex", w_CFArrayGetValueAtIndex, "o:oi"),
-@@ -376,6 +617,11 @@ static struct hfn apple[] = {
+@@ -376,6 +673,11 @@ static struct hfn apple[] = {
  	G("_CFDictionarySetValue", CFDictionarySetValue, "v:ooo"), G("_CFDictionaryAddValue", CFDictionaryAddValue, "v:ooo"),
  	G("_CFDictionaryRemoveValue", CFDictionaryRemoveValue, "v:oo"),
  	G("_CFDictionaryGetCount", w_CFDictionaryGetCount, "i:o"),
@@ -574,7 +632,7 @@ index 47c00de..e2fbe30 100644
  	G("_CFDictionaryContainsKey", w_CFDictionaryContainsKey, "i:oo"),
  	G("_CFArrayAppendValue", CFArrayAppendValue, "v:oo"),
  	G("_CFStringCompare", w_CFStringCompare, "i:oou"),
-@@ -383,6 +629,8 @@ static struct hfn apple[] = {
+@@ -383,6 +685,8 @@ static struct hfn apple[] = {
  	G("_CFCharacterSetIsCharacterMember", w_CFCharacterSetIsCharacterMember, "i:ou"),
  	G("_CFCharacterSetIsLongCharacterMember", w_CFCharacterSetIsLongCharacterMember, "i:ou"),
  	G("_CFDataCreate", w_CFDataCreate, "o:opi"),
@@ -583,7 +641,7 @@ index 47c00de..e2fbe30 100644
  	R("_CFStringFind", t_CFStringFind), R("_CFStringGetBytes", t_CFStringGetBytes),
  	G("_CFStringCreateWithBytes", w_CFStringCreateWithBytes, "o:opiuu"),
  	G("_CFStringCreateWithCharacters", w_CFStringCreateWithCharacters, "o:opi"),
-@@ -411,11 +659,14 @@ static struct hfn apple[] = {
+@@ -411,11 +715,14 @@ static struct hfn apple[] = {
  	G("_CFLocaleCopyCurrent", CFLocaleCopyCurrent, "o:"), G("_CFLocaleGetIdentifier", CFLocaleGetIdentifier, "o:o"),
  	G("_CFLocaleCopyPreferredLanguages", CFLocaleCopyPreferredLanguages, "o:"),
  	G("_CFAbsoluteTimeGetCurrent", CFAbsoluteTimeGetCurrent, "d:"),
@@ -598,15 +656,16 @@ index 47c00de..e2fbe30 100644
  	G("_CFURLCreateWithBytes", w_CFURLCreateWithBytes, "o:opiuo"),
  	R("_CGDisplayBounds", t_CGDisplayBounds),
  	R("_CFArrayApplyFunction", t_CFArrayApplyFunction),
-@@ -430,6 +681,7 @@ static struct hfn apple[] = {
+@@ -430,6 +737,8 @@ static struct hfn apple[] = {
  	R("_FFIsForceFeedback", t_ff_none), R("_FFCreateDevice", t_ff_none),
  	R("_FFReleaseDevice", t_ff_none), R("_FFDeviceEscape", t_ff_none),
  	R("_GetGlobalMouse", t_GetGlobalMouse),
 +	R("_HIGetMousePosition", t_HIGetMousePosition),
++	G("_HIThemeGetUIFontType", HIThemeGetUIFontType, "u:u"),
  	G("_CGGetActiveDisplayList", CGGetActiveDisplayList, "i:upp"),
  	G("_SCDynamicStoreCopyProxies", SCDynamicStoreCopyProxies, "o:o"),
  	G("_CFNetworkCopyProxiesForURL", w_CFNetworkCopyProxiesForURL, "o:oo"),
-@@ -461,6 +713,8 @@ static struct hfn apple[] = {
+@@ -461,6 +770,8 @@ static struct hfn apple[] = {
  	G("_CGDisplayPixelsHigh", w_CGDisplayPixelsHigh, "u:u"),
  	G("_CGDisplayPixelsWide", w_CGDisplayPixelsWide, "u:u"),
  	G("_CGMainDisplayID", CGMainDisplayID, "u:"),
@@ -615,7 +674,7 @@ index 47c00de..e2fbe30 100644
  	G("_CGDisplayIOServicePort", CGDisplayIOServicePort, "u:u"),
  	G("_CGSetDisplayTransferByTable", CGSetDisplayTransferByTable, "i:uuppp"),
  	G("_CGImageSourceCreateWithURL", CGImageSourceCreateWithURL, "o:oo"),
-@@ -468,12 +722,19 @@ static struct hfn apple[] = {
+@@ -468,12 +779,19 @@ static struct hfn apple[] = {
  	// IOKit (io_object_t are 32-bit Mach port names on both sides)
  	D("_kIOMasterPortDefault", 4, init_zero),
  	G("_IOServiceMatching", IOServiceMatching, "o:p"),
@@ -635,7 +694,7 @@ index 47c00de..e2fbe30 100644
  	// Carbon
  	G("_Gestalt", w_Gestalt, "i:up"),
  	G("_GetCurrentEventButtonState", w_GetCurrentEventButtonState, "u:"),
-@@ -488,6 +749,8 @@ static struct hfn apple[] = {
+@@ -488,6 +806,8 @@ static struct hfn apple[] = {
  	R("_CGLCreateContext", t_CGLCreateContext),
  	R("_CGLQueryRendererInfo", t_CGLQueryRendererInfo),
  	G("_CGLDestroyContext", CGLDestroyContext, "i:o"),
@@ -1233,10 +1292,10 @@ index 9dad843..0d59d21 100644
  	G("_AudioConverterReset", w_AudioConverterReset, "i:o"),
 diff --git a/src/carbon_windows.m b/src/carbon_windows.m
 new file mode 100644
-index 0000000..25d7ec4
+index 0000000..1997423
 --- /dev/null
 +++ b/src/carbon_windows.m
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,221 @@
 +// Carbon window handles for Cocoa windows on hosts without WindowRef.
 +#import <AppKit/AppKit.h>
 +#import <Carbon/Carbon.h>
@@ -1248,6 +1307,18 @@ index 0000000..25d7ec4
 +	id object = (id)handle;
 +	return [object isKindOfClass:[NSWindow class]] ? object : nil;
 +}
++
++static NSWindow *w_GetNextWindow(void *handle)
++{
++	NSWindow *window = cocoa_window(handle);
++	if (!window) return nil;
++	NSArray<NSWindow *> *windows = [NSApp orderedWindows];
++	NSUInteger index = [windows indexOfObjectIdenticalTo:window];
++	return index != NSNotFound && index + 1 < windows.count ? windows[index + 1] : nil;
++}
++
++static void w_ShowWindow(void *handle) { [cocoa_window(handle) orderFront:nil]; }
++static void w_HideWindow(void *handle) { [cocoa_window(handle) orderOut:nil]; }
 +
 +static OSStatus w_GetWindowClass(void *handle, uint32_t *result)
 +{
@@ -1426,6 +1497,8 @@ index 0000000..25d7ec4
 +}
 +
 +static struct hfn carbon_windows_fns[] = {
++	G("_GetNextWindow", w_GetNextWindow, "o:o"),
++	G("_ShowWindow", w_ShowWindow, "v:o"), G("_HideWindow", w_HideWindow, "v:o"),
 +	G("_GetWindowClass", w_GetWindowClass, "i:op"),
 +	G("_GetWindowAttributes", w_GetWindowAttributes, "i:op"),
 +	G("_GetRootControl", w_GetRootControl, "i:oO"),
@@ -2699,10 +2772,80 @@ index 8f40938..4c329a9 100644
  	G("_memcpy", memcpy, "p:ppu"),
  	G("_memmove", memmove, "p:ppu"),
 diff --git a/src/libc2.c b/src/libc2.c
-index 057bfcb..5b9047b 100644
+index 057bfcb..2800e93 100644
 --- a/src/libc2.c
 +++ b/src/libc2.c
-@@ -292,6 +292,10 @@ static int64_t w_wcstoll(const wchar_t *s, uint32_t endp, int base)
+@@ -2,6 +2,8 @@
+ // signals (ignored for now), and Mach/launchd calls the game only uses for
+ // crash reporting.
+ #include "thunks.h"
++#include <stddef.h>
++#include <sys/mount.h>
+ #include <string.h>
+ #include <strings.h>
+ #include <fcntl.h>
+@@ -139,6 +141,60 @@ static void t_stat64(uint32_t *args, struct hres *r) { struct stat s; int rc = s
+ static void t_lstat64(uint32_t *args, struct hres *r) { struct stat s; int rc = lstat(G2H(A(0)), &s); if (!rc) stat64_to_guest(&s, A(1)); RET(rc); }
+ static void t_fstat64(uint32_t *args, struct hres *r) { struct stat s; int rc = fstat((int)A(0), &s); if (!rc) stat64_to_guest(&s, A(1)); RET(rc); }
+ 
++struct guest_statfs {
++	int16_t old_type, old_flags;
++	int32_t block_size, io_size, blocks, free_blocks, available_blocks, files, free_files;
++	fsid_t fsid;
++	uint32_t owner;
++	int16_t subtype, type;
++	uint32_t flags, reserved2[2];
++	char type_name[15], mount_path[90], source_path[90];
++	char reserved3;
++	int32_t reserved4[4];
++};
++_Static_assert(sizeof(struct guest_statfs) == 272, "legacy i386 statfs size");
++
++static int32_t count_to_guest(uint64_t count, unsigned shift)
++{
++	if (count == UINT64_MAX) return -1;
++	count >>= shift;
++	return count > INT32_MAX ? INT32_MAX : (int32_t)count;
++}
++
++static int w_statfs(const char *path, struct guest_statfs *out)
++{
++	if (!out) { errno = EFAULT; return -1; }
++	struct statfs native;
++	int status = statfs(path, &native);
++	if (status) return status;
++
++	// As in Darwin's legacy interface, increase the reported block size
++	// when the actual block count does not fit in a signed 32-bit long.
++	uint64_t block_size = native.f_bsize;
++	unsigned shift = 0;
++	if (block_size && native.f_blocks != UINT64_MAX && native.f_bfree != UINT64_MAX &&
++	    native.f_bavail != UINT64_MAX) {
++		while ((native.f_blocks >> shift) > INT32_MAX && block_size <= INT32_MAX / 2) {
++			block_size *= 2;
++			++shift;
++		}
++	}
++	struct guest_statfs converted = {
++		.block_size = (int32_t)block_size, .io_size = native.f_iosize,
++		.blocks = count_to_guest(native.f_blocks, shift),
++		.free_blocks = count_to_guest(native.f_bfree, shift),
++		.available_blocks = count_to_guest(native.f_bavail, shift),
++		.files = (int32_t)native.f_files, .free_files = (int32_t)native.f_ffree,
++		.fsid = native.f_fsid, .owner = native.f_owner, .subtype = (int16_t)native.f_fssubtype,
++		.type = (int16_t)native.f_type, .flags = native.f_flags,
++	};
++	strlcpy(converted.type_name, native.f_fstypename, sizeof converted.type_name);
++	strlcpy(converted.mount_path, native.f_mntonname, sizeof converted.mount_path);
++	strlcpy(converted.source_path, native.f_mntfromname, sizeof converted.source_path);
++	memcpy(out, &converted, offsetof(struct guest_statfs, reserved3));
++	return 0;
++}
++
+ // lseek: off_t is 64-bit on i386 Darwin too
+ static int64_t w_lseek(int fd, int64_t off, int wh) { return lseek(fd, off, wh); }
+ static int32_t w_read(int fd, void *b, uint32_t n) { return (int32_t)read(fd, b, n); }
+@@ -292,6 +348,10 @@ static int64_t w_wcstoll(const wchar_t *s, uint32_t endp, int base)
  	return v;
  }
  static int w_isnanf(float f) { return isnan(f); }
@@ -2713,15 +2856,31 @@ index 057bfcb..5b9047b 100644
  static int32_t w_wcstol(const wchar_t *s, uint32_t endp, int base)
  {
  	wchar_t *e;
-@@ -419,6 +423,7 @@ static struct hfn libc2[] = {
+@@ -351,6 +411,14 @@ static void t_setrlimit(uint32_t *args, struct hres *r)
+ static void init_task_self(g32 g) { *(uint32_t *)G2H(g) = mach_task_self(); }
+ static void init_bootstrap(g32 g) { *(uint32_t *)G2H(g) = bootstrap_port; }
+ 
++static kern_return_t w_task_info(task_name_t task, task_flavor_t flavor,
++	 task_info_t info, mach_msg_type_number_t *count)
++{
++	// Flavor 20 uses Mach's fixed 64-bit sizes and 32-bit count on both ABIs.
++	if (flavor != MACH_TASK_BASIC_INFO) return KERN_INVALID_ARGUMENT;
++	return task_info(task, flavor, info, count);
++}
++
+ static double w_ldexp(double x, int e) { return ldexp(x, e); }
+ static double w_frexp(double x, uint32_t e) { int ee; double v = frexp(x, &ee); *(int32_t *)G2H(e) = ee; return v; }
+ static double w_modf(double x, uint32_t ip) { double i; double v = modf(x, &i); memcpy(G2H(ip), &i, 8); return v; }
+@@ -419,6 +487,8 @@ static struct hfn libc2[] = {
  	R("_sscanf", t_sscanf), R("_vsscanf", t_vsscanf), R("_fscanf", t_fscanf),
  	R("_stat", t_stat), R("_lstat", t_lstat), R("_fstat", t_fstat),
  	R("_stat$INODE64", t_stat64), R("_lstat$INODE64", t_lstat64), R("_fstat$INODE64", t_fstat64),
 +	R("_stat64", t_stat64), R("_lstat64", t_lstat64), R("_fstat64", t_fstat64),
++	G("_statfs", w_statfs, "i:pp"),
  	G("_open", w_open, "i:pii"), G("_close", close, "i:i"),
  	G("_read", w_read, "i:ipu"), G("_write", w_write, "i:ipu"),
  	G("_pread", w_pread, "i:ipul"), G("_pwrite", w_pwrite, "i:ipul"),
-@@ -453,6 +458,8 @@ static struct hfn libc2[] = {
+@@ -453,6 +523,8 @@ static struct hfn libc2[] = {
  	G("_strdup", gstrdup, "p:p"),
  	G("_wcstol", w_wcstol, "i:ppi"), G("_wcstoll", w_wcstoll, "l:ppi"),
  	G("_fminf", fminf, "f:ff"), G("_fmaxf", fmaxf, "f:ff"), G("___isnanf", w_isnanf, "i:f"),
@@ -2730,8 +2889,16 @@ index 057bfcb..5b9047b 100644
  	G("_getloadavg", getloadavg, "i:pi"), G("_wcscat", wcscat, "p:pp"), G("_wcsncmp", wcsncmp, "i:ppu"),
  	G("_wcschr", wcschr, "p:pi"), G("_wcsrchr", wcsrchr, "p:pi"), G("_wcsstr", wcsstr, "p:pp"),
  	G("_wcsncat", wcsncat, "p:ppu"), G("_wcscasecmp", wcscasecmp, "i:pp"), G("_wcsncasecmp", wcsncasecmp, "i:ppu"),
+@@ -465,6 +537,7 @@ static struct hfn libc2[] = {
+ 	R("_getrlimit", t_getrlimit), R("_setrlimit", t_setrlimit),
+ 	// Mach / launchd: the game uses these for crash reporting and Steam IPC
+ 	D("_mach_task_self_", 4, init_task_self), D("_bootstrap_port", 4, init_bootstrap),
++	G("_task_info", w_task_info, "i:uipp"),
+ 	// Mach IPC: port names and message headers are 32-bit in every process,
+ 	// so these pass straight through (libsteam_api finds Steam this way)
+ 	G("_bootstrap_look_up", bootstrap_look_up, "i:upp"),
 diff --git a/src/libc3.c b/src/libc3.c
-index 7437c1d..da7a505 100644
+index 7437c1d..89a73ca 100644
 --- a/src/libc3.c
 +++ b/src/libc3.c
 @@ -12,6 +12,7 @@
@@ -2742,7 +2909,15 @@ index 7437c1d..da7a505 100644
  #include <uuid/uuid.h>
  #include <malloc/malloc.h>
  #include <arpa/inet.h>
-@@ -573,15 +574,27 @@ static void t_dyld_find_unwind_sections(uint32_t *args, struct hres *r) { RET(ma
+@@ -368,6 +369,7 @@ static void t_freopen(uint32_t *args, struct hres *r)
+ static uint32_t w_clock(void) { return (uint32_t)clock(); }
+ static double w_difftime(int32_t a, int32_t b) { return difftime(a, b); }
+ static int w_finite(double d) { return isfinite(d); }
++static int w_finitef(float f) { return isfinite(f); }
+ // struct lconv (i386): 10 char pointers, then 14 chars
+ static g32 lconv_buf;
+ static void t_localeconv(uint32_t *args, struct hres *r)
+@@ -573,15 +575,27 @@ static void t_dyld_find_unwind_sections(uint32_t *args, struct hres *r) { RET(ma
  static void t_dladdr(uint32_t *args, struct hres *r) { RET(macho_dladdr(A(0), A(1))); }
  static void t_posix_memalign(uint32_t *args, struct hres *r)
  {
@@ -2773,7 +2948,7 @@ index 7437c1d..da7a505 100644
  static void t_MPCreateSemaphore(uint32_t *args, struct hres *r)
  {
  	dispatch_semaphore_t s = dispatch_semaphore_create((long)A(1));
-@@ -622,10 +635,43 @@ static void audio_off(void)
+@@ -622,10 +636,43 @@ static void audio_off(void)
  }
  static void t_audio_err(uint32_t *args, struct hres *r) { (void)args; audio_off(); RET(0x77686174); }	// 'what'
  static void t_noop0(uint32_t *args, struct hres *r) { (void)args; RET(0); }
@@ -2817,11 +2992,12 @@ index 7437c1d..da7a505 100644
  	G("_socket", socket, "i:iii"), G("_bind", bind, "i:ipu"), G("_connect", connect, "i:ipu"),
  	G("_listen", listen, "i:ii"), G("_accept", accept, "i:ipp"),
  	G("_send", w_send, "i:ipui"), G("_recv", w_recv, "i:ipui"),
-@@ -701,15 +747,23 @@ static struct hfn libc3[] = {
+@@ -701,17 +748,26 @@ static struct hfn libc3[] = {
  	R("_LocalToGlobal", t_noop0), R("_GetDeviceList", t_noop0), R("_GetMainDevice", t_noop0), R("_GetNextDevice", t_noop0),
  	R("_clearerr", t_clearerr), R("_tmpfile", t_tmpfile), R("_tmpnam", t_tmpnam), R("_freopen", t_freopen),
  	G("_clock", w_clock, "u:"), G("_difftime", w_difftime, "d:ii"), G("_finite", w_finite, "i:d"),
 +	G("___isfinited", w_finite, "i:d"),
++	G("___isfinitef", w_finitef, "i:f"),
  	G("_strcoll", strcoll, "i:pp"), R("_localeconv", t_localeconv),
  	// audio units: src/audio.c; pulling samples out of a unit is not bridged
  	R("_AudioUnitRender", t_audio_err),
@@ -2843,8 +3019,11 @@ index 7437c1d..da7a505 100644
 -	R("_SendEventToEventTarget", t_noop0), R("_ReleaseEvent", t_noop0),
 +	R("_ReceiveNextEvent", t_event_timeout),
  	R("_ConvertEventRefToEventRecord", t_noop0), R("_AEProcessAppleEvent", t_noop0),
- 	R("_ShowWindow", t_noop0), R("_CollapseWindow", t_noop0), R("_SetUserFocusWindow", t_noop0),
+-	R("_ShowWindow", t_noop0), R("_CollapseWindow", t_noop0), R("_SetUserFocusWindow", t_noop0),
++	R("_CollapseWindow", t_noop0), R("_SetUserFocusWindow", t_noop0),
  	R("_InvalWindowRect", t_noop0),
+ };
+ 
 diff --git a/src/lowmem.c b/src/lowmem.c
 index f643f3f..4a9ae57 100644
 --- a/src/lowmem.c
