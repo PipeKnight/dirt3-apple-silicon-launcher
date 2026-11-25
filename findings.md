@@ -202,9 +202,15 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   opened the pause menu. **Reset Vehicle** returned it to the road and
   driving resumed. The renderer displayed the racing line, timing, nearby
   cars and collision damage during the rally.
+- Player One completed the offline stage in the Ford Focus RS WRC. The
+  original **Session Results** screen displayed eighth place and `6:53.844`.
+  **Continue** went through **Event Results** and returned to the single-race
+  setup. Backing out returned to the main menu. The game wrote its save files
+  after the event. A fresh process launched by `Play DiRT 3.command` loaded
+  Player One again and reached the main menu with autosaving enabled.
 
-A finish, audio playback, controller input and frame pacing still need
-verification. The resource check can still fail on startup.
+Audible audio, controller input and frame pacing still need verification.
+The resource check can still fail on startup.
 
 ## Comparable projects
 
