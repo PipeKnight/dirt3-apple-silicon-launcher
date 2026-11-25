@@ -5,6 +5,7 @@ enum {
     gl_version = 0x1f02,
     gl_extensions = 0x1f03,
     gl_num_extensions = 0x821d,
+    gl_invalid_value = 0x0501,
 };
 
 extern int CGLChoosePixelFormat(const int *attributes, void **format, int *count);
@@ -15,6 +16,11 @@ extern int CGLSetCurrentContext(void *context);
 extern const unsigned char *glGetString(unsigned name);
 extern const unsigned char *glGetStringi(unsigned name, unsigned index);
 extern void glGetIntegerv(unsigned name, int *data);
+extern void glGenVertexArrays(int count, unsigned *arrays);
+extern void glBindVertexArray(unsigned array);
+extern unsigned char glIsVertexArray(unsigned array);
+extern void glDeleteVertexArrays(int count, const unsigned *arrays);
+extern unsigned glGetError(void);
 
 static int create_context(int profile, void **context)
 {
@@ -45,10 +51,16 @@ int main(void)
     glGetIntegerv(gl_num_extensions, &count);
     if (count <= 0 || !glGetStringi(gl_extensions, 0) ||
         !glGetStringi(gl_extensions, (unsigned)count - 1) ||
-        glGetStringi(gl_extensions, (unsigned)count))
+        glGetStringi(gl_extensions, (unsigned)count) || glGetError() != gl_invalid_value)
         return 5;
-    if (CGLSetCurrentContext(legacy) || glGetString(gl_version) != legacy_version)
+    unsigned array = 0;
+    glGenVertexArrays(1, &array);
+    glBindVertexArray(array);
+    if (!array || !glIsVertexArray(array) || glGetError())
         return 6;
+    glDeleteVertexArrays(1, &array);
+    if (CGLSetCurrentContext(legacy) || glGetString(gl_version) != legacy_version)
+        return 7;
     CGLSetCurrentContext(0);
     CGLDestroyContext(core);
     CGLDestroyContext(legacy);

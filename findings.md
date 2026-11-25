@@ -138,6 +138,31 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   fixture verified that the GCD once callback runs once and preserves the
   four-byte predicate's neighboring data.
 
+## Game engine startup
+
+- The game formats a wide-string reference using `%018p`, then parses the
+  resulting fixed-width field. mac32 had discarded the width. The short
+  field led to an out-of-bounds substring in CoreFoundation. mac32 now
+  preserves the full conversion. The i386 regression fixture checks padded,
+  unpadded, left-aligned, and truncated pointer formatting.
+- The game reached its original critical-file check. A trace confirmed it
+  resolved `CriticalFiles.1` and found the original `logo/logo.bmp`. Some
+  starts still raise `kErrorInvalidInstallation` even with the file present.
+  The resource check runs on its original path.
+- After clearing that check, the engine proceeded through native POSIX
+  asynchronous I/O and its original `stat64` entry points. The i386 fixture
+  verified asynchronous reads and writes beyond 4 GiB, waiting on the
+  completion list and reusing the request. The bridge supports requests
+  that use `SIGEV_NONE` and wait for completion.
+- CoreGraphics now creates the engine's image from the original provider.
+  The subsequent AppKit call attempted to initialize a window on a worker
+  thread. The bridge routes the native initializer to the main thread.
+- The engine then initialized OpenGL framebuffers and attempted to create a
+  core-profile vertex array. The binding generator now includes the SDK's
+  core and extension headers, and the OpenGL fixture creates and binds a
+  real core-profile vertex array. With those calls bound, the game reached
+  a subsequent OpenCL context and polled the Carbon mouse position.
+
 Playability requires loading and completing an offline race, verifying
 steering, audio, frame pacing and a save/reload cycle on the test Mac.
 

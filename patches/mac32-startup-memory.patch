@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 4c16e9d..7b500e2 100644
+index 4c16e9d..31e064f 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -2,11 +2,11 @@
@@ -13,7 +13,7 @@ index 4c16e9d..7b500e2 100644
            -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
 -SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/format.c \
 -      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/cg_thunks.c src/cf_thunks.c src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
-+SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c \
++SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c \
 +      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
  OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
  
@@ -104,8 +104,166 @@ index 0000000..83dcc88
 +	.what = "encode newer macOS releases and preserve missing launcher text",
 +	.apply = apply,
 +};
+diff --git a/src/aio_bridge.c b/src/aio_bridge.c
+new file mode 100644
+index 0000000..c3047da
+--- /dev/null
++++ b/src/aio_bridge.c
+@@ -0,0 +1,152 @@
++#include "thunks.h"
++
++#include <aio.h>
++#include <errno.h>
++#include <pthread.h>
++#include <stddef.h>
++
++struct __attribute__((packed, aligned(4))) guest_aiocb {
++	int32_t fd;
++	int64_t offset;
++	g32 buffer;
++	uint32_t size;
++	int32_t priority;
++	int32_t notify, signal;
++	uint32_t value;
++	g32 notify_function, notify_attributes;
++	int32_t opcode;
++};
++_Static_assert(sizeof(struct guest_aiocb) == 48, "i386 aiocb size");
++_Static_assert(offsetof(struct guest_aiocb, notify) == 24, "i386 aio_sigevent offset");
++
++struct aio_request {
++	struct aio_request *next;
++	g32 guest;
++	unsigned references;
++	struct aiocb host;
++};
++
++static pthread_mutex_t aio_lock = PTHREAD_MUTEX_INITIALIZER;
++static struct aio_request *requests;
++
++static struct aio_request **request_slot(g32 guest)
++{
++	struct aio_request **slot = &requests;
++	while (*slot && (*slot)->guest != guest) slot = &(*slot)->next;
++	return slot;
++}
++
++static void release_request(struct aio_request *request)
++{
++	if (request && !--request->references) free(request);
++}
++
++static int aio_fail(int error)
++{
++	errno = error;
++	return -1;
++}
++
++static int submit(g32 guest, int (*operation)(struct aiocb *))
++{
++	const struct guest_aiocb *control = G2H(guest);
++	if (!control || control->size > INT32_MAX) return aio_fail(EINVAL);
++	if (control->notify != SIGEV_NONE) return aio_fail(ENOTSUP);
++
++	struct aio_request *request = calloc(1, sizeof *request);
++	if (!request) return aio_fail(EAGAIN);
++	request->guest = guest;
++	request->references = 1;
++	request->host.aio_fildes = control->fd;
++	request->host.aio_offset = control->offset;
++	request->host.aio_buf = G2H(control->buffer);
++	request->host.aio_nbytes = control->size;
++	request->host.aio_reqprio = control->priority;
++	request->host.aio_sigevent.sigev_notify = SIGEV_NONE;
++	request->host.aio_lio_opcode = control->opcode;
++
++	pthread_mutex_lock(&aio_lock);
++	int status = *request_slot(guest) ? aio_fail(EINVAL) : operation(&request->host);
++	if (!status) {
++		request->next = requests;
++		requests = request;
++	}
++	pthread_mutex_unlock(&aio_lock);
++	if (status) {
++		int error = errno;
++		free(request);
++		return aio_fail(error);
++	}
++	return 0;
++}
++
++static int guest_aio_read(g32 guest) { return submit(guest, aio_read); }
++static int guest_aio_write(g32 guest) { return submit(guest, aio_write); }
++
++static int guest_aio_error(g32 guest)
++{
++	pthread_mutex_lock(&aio_lock);
++	struct aio_request *request = *request_slot(guest);
++	int status = request ? aio_error(&request->host) : aio_fail(EINVAL);
++	pthread_mutex_unlock(&aio_lock);
++	return status;
++}
++
++static int32_t guest_aio_return(g32 guest)
++{
++	pthread_mutex_lock(&aio_lock);
++	struct aio_request **slot = request_slot(guest);
++	struct aio_request *request = *slot;
++	int32_t result = -1;
++	if (!request) errno = EINVAL;
++	else if (aio_error(&request->host) == EINPROGRESS) errno = EINPROGRESS;
++	else {
++		result = (int32_t)aio_return(&request->host);
++		int error = errno;
++		*slot = request->next;
++		release_request(request);
++		errno = error;
++	}
++	pthread_mutex_unlock(&aio_lock);
++	return result;
++}
++
++static int guest_aio_suspend(const g32 *list, int32_t count, const int32_t *timeout32)
++{
++	if (!list || count < 1) return aio_fail(EINVAL);
++	struct timespec timeout;
++	if (timeout32) timeout = (struct timespec){timeout32[0], timeout32[1]};
++	const struct aiocb **controls = calloc((size_t)count, sizeof *controls);
++	struct aio_request **pending = calloc((size_t)count, sizeof *pending);
++	int result = -1, error = ENOMEM;
++	if (controls && pending) {
++		int valid = 1;
++		pthread_mutex_lock(&aio_lock);
++		for (int32_t i = 0; i < count; ++i) {
++			if (!list[i]) continue;
++			struct aio_request *request = *request_slot(list[i]);
++			if (!request) { valid = 0; break; }
++			++request->references;
++			pending[i] = request;
++			controls[i] = &request->host;
++		}
++		pthread_mutex_unlock(&aio_lock);
++		result = valid ? aio_suspend(controls, count, timeout32 ? &timeout : NULL) : aio_fail(EINVAL);
++		error = errno;
++		pthread_mutex_lock(&aio_lock);
++		for (int32_t i = 0; i < count; ++i) release_request(pending[i]);
++		pthread_mutex_unlock(&aio_lock);
++	}
++	free(pending);
++	free(controls);
++	if (result < 0) errno = error;
++	return result;
++}
++
++static struct hfn aio_functions[] = {
++	G("_aio_read", guest_aio_read, "i:u"), G("_aio_write", guest_aio_write, "i:u"),
++	G("_aio_error", guest_aio_error, "i:u"), G("_aio_return", guest_aio_return, "i:u"),
++	G("_aio_suspend", guest_aio_suspend, "i:pip"),
++};
++
++void thunks_aio_init(void) { REGISTER(aio_functions); }
 diff --git a/src/apple.m b/src/apple.m
-index 47c00de..80e4106 100644
+index 47c00de..e2fbe30 100644
 --- a/src/apple.m
 +++ b/src/apple.m
 @@ -9,7 +9,9 @@
@@ -354,7 +512,23 @@ index 47c00de..80e4106 100644
  // CFUUIDBytes is 16 bytes: passed by value (4 words), returned through a hidden pointer
  static void t_CFUUIDGetConstantUUIDWithBytes(uint32_t *args, struct hres *r)
  {
-@@ -319,6 +529,21 @@ static void t_ff_none(uint32_t *args, struct hres *r) { (void)args; RET(0x800400
+@@ -314,11 +524,37 @@ static void t_GetGlobalMouse(uint32_t *args, struct hres *r)
+ 	pt[0] = (int16_t)p.y;
+ 	pt[1] = (int16_t)p.x;
+ }
++static void t_HIGetMousePosition(uint32_t *args, struct hres *r)
++{
++	float *point = G2H(A(2));
++	if (!point) { RET(0); return; }
++	HIPoint native = {0, 0};
++	if (!A(1) && (A(0) == kHICoordSpace72DPIGlobal || A(0) == kHICoordSpaceScreenPixel))
++		HIGetMousePosition(A(0), NULL, &native);
++	point[0] = (float)native.x;
++	point[1] = (float)native.y;
++	RET(A(2));
++}
+ static void t_io_unsupported(uint32_t *args, struct hres *r) { (void)args; RET(0xe00002c7); }	// kIOReturnUnsupported
+ static void t_ff_none(uint32_t *args, struct hres *r) { (void)args; RET(0x80040001); }		// FFERR_NOINTERFACE
  static int w_CFEqual(CFTypeRef a, CFTypeRef b) { return CFEqual(a, b) ? 1 : 0; }
  static CFURLRef w_CFURLCreateWithBytes(CFAllocatorRef a, const UInt8 *b, int32_t n, uint32_t enc, CFURLRef base)
  { return CFURLCreateWithBytes(a, b, n, enc, base); }
@@ -376,17 +550,19 @@ index 47c00de..80e4106 100644
  static void t_CFStringCreateWithFormat(uint32_t *args, struct hres *r)
  {
  	// alloc, formatOptions, format, ...: %@ handled by our formatter
-@@ -352,6 +577,9 @@ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
+@@ -352,6 +588,11 @@ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
  static int w_CGLSetCurrentContext(CGLContextObj c) { if (c) gl_last_context = c; return CGLSetCurrentContext(c); }
  
  static struct hfn apple[] = {
 +	G("_SecRandomCopyBytes", SecRandomCopyBytes, "i:oup"),
 +	D("_kSecRandomDefault", 4, init_sec_random_default),
++	G("_CSCopyUserName", CSCopyUserName, "o:B"),
++	G("_CSCopyMachineName", CSCopyMachineName, "o:"),
 +
  	// CoreFoundation
  	G("_CFArrayGetCount", w_CFArrayGetCount, "i:o"),
  	G("_CFArrayGetValueAtIndex", w_CFArrayGetValueAtIndex, "o:oi"),
-@@ -376,6 +604,11 @@ static struct hfn apple[] = {
+@@ -376,6 +617,11 @@ static struct hfn apple[] = {
  	G("_CFDictionarySetValue", CFDictionarySetValue, "v:ooo"), G("_CFDictionaryAddValue", CFDictionaryAddValue, "v:ooo"),
  	G("_CFDictionaryRemoveValue", CFDictionaryRemoveValue, "v:oo"),
  	G("_CFDictionaryGetCount", w_CFDictionaryGetCount, "i:o"),
@@ -398,7 +574,7 @@ index 47c00de..80e4106 100644
  	G("_CFDictionaryContainsKey", w_CFDictionaryContainsKey, "i:oo"),
  	G("_CFArrayAppendValue", CFArrayAppendValue, "v:oo"),
  	G("_CFStringCompare", w_CFStringCompare, "i:oou"),
-@@ -383,6 +616,8 @@ static struct hfn apple[] = {
+@@ -383,6 +629,8 @@ static struct hfn apple[] = {
  	G("_CFCharacterSetIsCharacterMember", w_CFCharacterSetIsCharacterMember, "i:ou"),
  	G("_CFCharacterSetIsLongCharacterMember", w_CFCharacterSetIsLongCharacterMember, "i:ou"),
  	G("_CFDataCreate", w_CFDataCreate, "o:opi"),
@@ -407,7 +583,7 @@ index 47c00de..80e4106 100644
  	R("_CFStringFind", t_CFStringFind), R("_CFStringGetBytes", t_CFStringGetBytes),
  	G("_CFStringCreateWithBytes", w_CFStringCreateWithBytes, "o:opiuu"),
  	G("_CFStringCreateWithCharacters", w_CFStringCreateWithCharacters, "o:opi"),
-@@ -411,11 +646,14 @@ static struct hfn apple[] = {
+@@ -411,11 +659,14 @@ static struct hfn apple[] = {
  	G("_CFLocaleCopyCurrent", CFLocaleCopyCurrent, "o:"), G("_CFLocaleGetIdentifier", CFLocaleGetIdentifier, "o:o"),
  	G("_CFLocaleCopyPreferredLanguages", CFLocaleCopyPreferredLanguages, "o:"),
  	G("_CFAbsoluteTimeGetCurrent", CFAbsoluteTimeGetCurrent, "d:"),
@@ -422,7 +598,15 @@ index 47c00de..80e4106 100644
  	G("_CFURLCreateWithBytes", w_CFURLCreateWithBytes, "o:opiuo"),
  	R("_CGDisplayBounds", t_CGDisplayBounds),
  	R("_CFArrayApplyFunction", t_CFArrayApplyFunction),
-@@ -461,6 +699,8 @@ static struct hfn apple[] = {
+@@ -430,6 +681,7 @@ static struct hfn apple[] = {
+ 	R("_FFIsForceFeedback", t_ff_none), R("_FFCreateDevice", t_ff_none),
+ 	R("_FFReleaseDevice", t_ff_none), R("_FFDeviceEscape", t_ff_none),
+ 	R("_GetGlobalMouse", t_GetGlobalMouse),
++	R("_HIGetMousePosition", t_HIGetMousePosition),
+ 	G("_CGGetActiveDisplayList", CGGetActiveDisplayList, "i:upp"),
+ 	G("_SCDynamicStoreCopyProxies", SCDynamicStoreCopyProxies, "o:o"),
+ 	G("_CFNetworkCopyProxiesForURL", w_CFNetworkCopyProxiesForURL, "o:oo"),
+@@ -461,6 +713,8 @@ static struct hfn apple[] = {
  	G("_CGDisplayPixelsHigh", w_CGDisplayPixelsHigh, "u:u"),
  	G("_CGDisplayPixelsWide", w_CGDisplayPixelsWide, "u:u"),
  	G("_CGMainDisplayID", CGMainDisplayID, "u:"),
@@ -431,7 +615,14 @@ index 47c00de..80e4106 100644
  	G("_CGDisplayIOServicePort", CGDisplayIOServicePort, "u:u"),
  	G("_CGSetDisplayTransferByTable", CGSetDisplayTransferByTable, "i:uuppp"),
  	G("_CGImageSourceCreateWithURL", CGImageSourceCreateWithURL, "o:oo"),
-@@ -474,6 +714,12 @@ static struct hfn apple[] = {
+@@ -468,12 +722,19 @@ static struct hfn apple[] = {
+ 	// IOKit (io_object_t are 32-bit Mach port names on both sides)
+ 	D("_kIOMasterPortDefault", 4, init_zero),
+ 	G("_IOServiceMatching", IOServiceMatching, "o:p"),
++	G("_IOBSDNameMatching", IOBSDNameMatching, "o:uup"),
+ 	G("_IOServiceGetMatchingServices", IOServiceGetMatchingServices, "i:uop"),
+ 	G("_IOIteratorNext", IOIteratorNext, "u:u"),
+ 	G("_IOObjectRelease", IOObjectRelease, "i:u"),
  	G("_IORegistryEntryCreateCFProperty", IORegistryEntryCreateCFProperty, "o:uoou"),
  	G("_IORegistryEntrySearchCFProperty", IORegistryEntrySearchCFProperty, "o:upoou"),
  	G("_IORegistryEntryGetParentEntry", IORegistryEntryGetParentEntry, "i:upp"),
@@ -444,7 +635,7 @@ index 47c00de..80e4106 100644
  	// Carbon
  	G("_Gestalt", w_Gestalt, "i:up"),
  	G("_GetCurrentEventButtonState", w_GetCurrentEventButtonState, "u:"),
-@@ -488,6 +734,8 @@ static struct hfn apple[] = {
+@@ -488,6 +749,8 @@ static struct hfn apple[] = {
  	R("_CGLCreateContext", t_CGLCreateContext),
  	R("_CGLQueryRendererInfo", t_CGLQueryRendererInfo),
  	G("_CGLDestroyContext", CGLDestroyContext, "i:o"),
@@ -1522,11 +1713,50 @@ index c608c55..b70a488 100644
  		if (!guest_stack_top) cpu_thread_init(8 << 20);
  		top = guest_stack_top;
  	}
+diff --git a/src/format.c b/src/format.c
+index 4f33ea0..d2efc00 100644
+--- a/src/format.c
++++ b/src/format.c
+@@ -105,9 +105,17 @@ char *gvformat_objc(const char *fmt, const uint32_t *ap, int *len, const char *(
+ 			       : snprintf(o, (size_t)need + 1, spec, "(null)");
+ 			break;
+ 		}
+-		case 'p':
+-			on = snprintf(out, sizeof out, "0x%x", *ap++);
++		case 'p': {
++			void *p = G2H(*ap++);
++			spec[n++] = 'p';
++			spec[n] = 0;
++			on = snprintf(out, sizeof out, spec, p);
++			if (on >= (int)sizeof out) {
++				o = malloc((size_t)on + 1);
++				on = snprintf(o, (size_t)on + 1, spec, p);
++			}
+ 			break;
++		}
+ 		case '@':
+ 			if (obj) {
+ 				const char *d = obj(*ap++);
 diff --git a/src/gl_special.c b/src/gl_special.c
-index 20f3e5a..b37eaf4 100644
+index 20f3e5a..212300f 100644
 --- a/src/gl_special.c
 +++ b/src/gl_special.c
-@@ -65,21 +65,35 @@ static void put_ptr(g32 dst, void *p) { *(g32 *)G2H(dst) = (g32)(uintptr_t)p; }
+@@ -50,6 +50,14 @@ static void t_glTransformFeedbackVaryingsEXT(uint32_t *args, struct hres *r)
+ 	glTransformFeedbackVaryingsEXT(A(0), (GLsizei)A(1), (const GLchar *const *)s, A(3));
+ 	free(s);
+ }
++extern void glTransformFeedbackVaryings(GLuint, GLsizei, const GLchar *const *, GLenum);
++static void t_glTransformFeedbackVaryings(uint32_t *args, struct hres *r)
++{
++	(void)r;
++	const void **varyings = ptrs(A(2), (GLsizei)A(1));
++	glTransformFeedbackVaryings(A(0), (GLsizei)A(1), (const GLchar *const *)varyings, A(3));
++	free(varyings);
++}
+ static void t_glGetAttachedObjectsARB(uint32_t *args, struct hres *r)
+ {
+ 	(void)r;
+@@ -65,21 +73,35 @@ static void put_ptr(g32 dst, void *p) { *(g32 *)G2H(dst) = (g32)(uintptr_t)p; }
  static void t_glGetPointerv(uint32_t *args, struct hres *r) { (void)r; void *p = NULL; glGetPointerv(A(0), &p); put_ptr(A(1), p); }
  static void t_glGetVertexAttribPointerv(uint32_t *args, struct hres *r) { (void)r; void *p = NULL; glGetVertexAttribPointerv(A(0), A(1), &p); put_ptr(A(2), p); }
  
@@ -1572,7 +1802,12 @@ index 20f3e5a..b37eaf4 100644
  
  // ---- mapped buffers ---------------------------------------------------------
  // One shadow per buffer object name, kept between maps and freed when the
-@@ -206,7 +220,7 @@ static struct hfn gls[] = {
+@@ -202,11 +224,12 @@ static struct hfn gls[] = {
+ 	R("_glShaderSource", t_glShaderSource), R("_glShaderSourceARB", t_glShaderSourceARB),
+ 	R("_glMultiDrawElements", t_glMultiDrawElements), R("_glMultiDrawElementsEXT", t_glMultiDrawElements),
+ 	R("_glTransformFeedbackVaryingsEXT", t_glTransformFeedbackVaryingsEXT),
++	R("_glTransformFeedbackVaryings", t_glTransformFeedbackVaryings),
+ 	R("_glGetAttachedObjectsARB", t_glGetAttachedObjectsARB),
  	R("_glGetPointerv", t_glGetPointerv), R("_glGetPointervEXT", t_glGetPointerv),
  	R("_glGetVertexAttribPointerv", t_glGetVertexAttribPointerv),
  	R("_glGetVertexAttribPointervARB", t_glGetVertexAttribPointerv),
@@ -1581,8 +1816,272 @@ index 20f3e5a..b37eaf4 100644
  	R("_glMapBuffer", t_glMapBuffer), R("_glMapBufferARB", t_glMapBuffer),
  	R("_glFlushMappedBufferRangeAPPLE", t_glFlushMappedBufferRangeAPPLE),
  	R("_glUnmapBuffer", t_glUnmapBuffer), R("_glUnmapBufferARB", t_glUnmapBuffer),
+diff --git a/src/gl_thunks.c b/src/gl_thunks.c
+index 70ff9a0..ced06e1 100644
+--- a/src/gl_thunks.c
++++ b/src/gl_thunks.c
+@@ -1038,6 +1038,259 @@ static struct hfn gl[] = {
+ 	G("_glVertexAttribs4fvNV", NULL, "v:uip"),
+ 	G("_glVertexAttribs4dvNV", NULL, "v:uip"),
+ 	G("_glVertexAttribs4ubvNV", NULL, "v:uip"),
++	G("_glColorMaski", NULL, "v:uuuuu"),
++	G("_glGetBooleani_v", NULL, "v:uup"),
++	G("_glGetIntegeri_v", NULL, "v:uup"),
++	G("_glEnablei", NULL, "v:uu"),
++	G("_glDisablei", NULL, "v:uu"),
++	G("_glIsEnabledi", NULL, "b:uu"),
++	G("_glBeginTransformFeedback", NULL, "v:u"),
++	G("_glEndTransformFeedback", NULL, "v:"),
++	G("_glBindBufferRange", NULL, "v:uuuii"),
++	G("_glBindBufferBase", NULL, "v:uuu"),
++	G("_glGetTransformFeedbackVarying", NULL, "v:uuipppp"),
++	G("_glClampColor", NULL, "v:uu"),
++	G("_glBeginConditionalRender", NULL, "v:uu"),
++	G("_glEndConditionalRender", NULL, "v:"),
++	G("_glVertexAttribIPointer", NULL, "v:uiuip"),
++	G("_glGetVertexAttribIiv", NULL, "v:uup"),
++	G("_glGetVertexAttribIuiv", NULL, "v:uup"),
++	G("_glVertexAttribI1i", NULL, "v:ui"),
++	G("_glVertexAttribI2i", NULL, "v:uii"),
++	G("_glVertexAttribI3i", NULL, "v:uiii"),
++	G("_glVertexAttribI4i", NULL, "v:uiiii"),
++	G("_glVertexAttribI1ui", NULL, "v:uu"),
++	G("_glVertexAttribI2ui", NULL, "v:uuu"),
++	G("_glVertexAttribI3ui", NULL, "v:uuuu"),
++	G("_glVertexAttribI4ui", NULL, "v:uuuuu"),
++	G("_glVertexAttribI1iv", NULL, "v:up"),
++	G("_glVertexAttribI2iv", NULL, "v:up"),
++	G("_glVertexAttribI3iv", NULL, "v:up"),
++	G("_glVertexAttribI4iv", NULL, "v:up"),
++	G("_glVertexAttribI1uiv", NULL, "v:up"),
++	G("_glVertexAttribI2uiv", NULL, "v:up"),
++	G("_glVertexAttribI3uiv", NULL, "v:up"),
++	G("_glVertexAttribI4uiv", NULL, "v:up"),
++	G("_glVertexAttribI4bv", NULL, "v:up"),
++	G("_glVertexAttribI4sv", NULL, "v:up"),
++	G("_glVertexAttribI4ubv", NULL, "v:up"),
++	G("_glVertexAttribI4usv", NULL, "v:up"),
++	G("_glGetUniformuiv", NULL, "v:uip"),
++	G("_glBindFragDataLocation", NULL, "v:uup"),
++	G("_glGetFragDataLocation", NULL, "i:up"),
++	G("_glUniform1ui", NULL, "v:iu"),
++	G("_glUniform2ui", NULL, "v:iuu"),
++	G("_glUniform3ui", NULL, "v:iuuu"),
++	G("_glUniform4ui", NULL, "v:iuuuu"),
++	G("_glUniform1uiv", NULL, "v:iip"),
++	G("_glUniform2uiv", NULL, "v:iip"),
++	G("_glUniform3uiv", NULL, "v:iip"),
++	G("_glUniform4uiv", NULL, "v:iip"),
++	G("_glTexParameterIiv", NULL, "v:uup"),
++	G("_glTexParameterIuiv", NULL, "v:uup"),
++	G("_glGetTexParameterIiv", NULL, "v:uup"),
++	G("_glGetTexParameterIuiv", NULL, "v:uup"),
++	G("_glClearBufferiv", NULL, "v:uip"),
++	G("_glClearBufferuiv", NULL, "v:uip"),
++	G("_glClearBufferfv", NULL, "v:uip"),
++	G("_glClearBufferfi", NULL, "v:uifi"),
++	G("_glDrawArraysInstanced", NULL, "v:uiii"),
++	G("_glDrawElementsInstanced", NULL, "v:uiupi"),
++	G("_glTexBuffer", NULL, "v:uuu"),
++	G("_glPrimitiveRestartIndex", NULL, "v:u"),
++	G("_glGetInteger64i_v", NULL, "v:uup"),
++	G("_glGetBufferParameteri64v", NULL, "v:uup"),
++	G("_glFramebufferTexture", NULL, "v:uuui"),
++	G("_glVertexAttribDivisor", NULL, "v:uu"),
++	G("_glMinSampleShading", NULL, "v:f"),
++	G("_glBlendEquationi", NULL, "v:uu"),
++	G("_glBlendEquationSeparatei", NULL, "v:uuu"),
++	G("_glBlendFunci", NULL, "v:uuu"),
++	G("_glBlendFuncSeparatei", NULL, "v:uuuuu"),
++	G("_glBindVertexArray", NULL, "v:u"),
++	G("_glDeleteVertexArrays", NULL, "v:ip"),
++	G("_glGenVertexArrays", NULL, "v:ip"),
++	G("_glIsVertexArray", NULL, "b:u"),
++	G("_glGetActiveUniformsiv", NULL, "v:uipup"),
++	G("_glGetActiveUniformName", NULL, "v:uuipp"),
++	G("_glGetUniformBlockIndex", NULL, "u:up"),
++	G("_glGetActiveUniformBlockiv", NULL, "v:uuup"),
++	G("_glGetActiveUniformBlockName", NULL, "v:uuipp"),
++	G("_glUniformBlockBinding", NULL, "v:uuu"),
++	G("_glCopyBufferSubData", NULL, "v:uuiii"),
++	G("_glTexImage2DMultisample", NULL, "v:uiiiiu"),
++	G("_glTexImage3DMultisample", NULL, "v:uiiiiiu"),
++	G("_glGetMultisamplefv", NULL, "v:uup"),
++	G("_glSampleMaski", NULL, "v:uu"),
++	G("_glBindFragDataLocationIndexed", NULL, "v:uuup"),
++	G("_glGetFragDataIndex", NULL, "i:up"),
++	G("_glGenSamplers", NULL, "v:ip"),
++	G("_glDeleteSamplers", NULL, "v:ip"),
++	G("_glIsSampler", NULL, "b:u"),
++	G("_glBindSampler", NULL, "v:uu"),
++	G("_glSamplerParameteri", NULL, "v:uui"),
++	G("_glSamplerParameteriv", NULL, "v:uup"),
++	G("_glSamplerParameterf", NULL, "v:uuf"),
++	G("_glSamplerParameterfv", NULL, "v:uup"),
++	G("_glSamplerParameterIiv", NULL, "v:uup"),
++	G("_glSamplerParameterIuiv", NULL, "v:uup"),
++	G("_glGetSamplerParameteriv", NULL, "v:uup"),
++	G("_glGetSamplerParameterIiv", NULL, "v:uup"),
++	G("_glGetSamplerParameterfv", NULL, "v:uup"),
++	G("_glGetSamplerParameterIuiv", NULL, "v:uup"),
++	G("_glQueryCounter", NULL, "v:uu"),
++	G("_glGetQueryObjecti64v", NULL, "v:uup"),
++	G("_glGetQueryObjectui64v", NULL, "v:uup"),
++	G("_glVertexAttribP1ui", NULL, "v:uuuu"),
++	G("_glVertexAttribP1uiv", NULL, "v:uuup"),
++	G("_glVertexAttribP2ui", NULL, "v:uuuu"),
++	G("_glVertexAttribP2uiv", NULL, "v:uuup"),
++	G("_glVertexAttribP3ui", NULL, "v:uuuu"),
++	G("_glVertexAttribP3uiv", NULL, "v:uuup"),
++	G("_glVertexAttribP4ui", NULL, "v:uuuu"),
++	G("_glVertexAttribP4uiv", NULL, "v:uuup"),
++	G("_glDrawArraysIndirect", NULL, "v:up"),
++	G("_glDrawElementsIndirect", NULL, "v:uup"),
++	G("_glUniform1d", NULL, "v:id"),
++	G("_glUniform2d", NULL, "v:idd"),
++	G("_glUniform3d", NULL, "v:iddd"),
++	G("_glUniform4d", NULL, "v:idddd"),
++	G("_glUniform1dv", NULL, "v:iip"),
++	G("_glUniform2dv", NULL, "v:iip"),
++	G("_glUniform3dv", NULL, "v:iip"),
++	G("_glUniform4dv", NULL, "v:iip"),
++	G("_glUniformMatrix2dv", NULL, "v:iiup"),
++	G("_glUniformMatrix3dv", NULL, "v:iiup"),
++	G("_glUniformMatrix4dv", NULL, "v:iiup"),
++	G("_glUniformMatrix2x3dv", NULL, "v:iiup"),
++	G("_glUniformMatrix2x4dv", NULL, "v:iiup"),
++	G("_glUniformMatrix3x2dv", NULL, "v:iiup"),
++	G("_glUniformMatrix3x4dv", NULL, "v:iiup"),
++	G("_glUniformMatrix4x2dv", NULL, "v:iiup"),
++	G("_glUniformMatrix4x3dv", NULL, "v:iiup"),
++	G("_glGetUniformdv", NULL, "v:uip"),
++	G("_glGetSubroutineUniformLocation", NULL, "i:uup"),
++	G("_glGetSubroutineIndex", NULL, "u:uup"),
++	G("_glGetActiveSubroutineUniformiv", NULL, "v:uuuup"),
++	G("_glGetActiveSubroutineUniformName", NULL, "v:uuuipp"),
++	G("_glGetActiveSubroutineName", NULL, "v:uuuipp"),
++	G("_glUniformSubroutinesuiv", NULL, "v:uip"),
++	G("_glGetUniformSubroutineuiv", NULL, "v:uip"),
++	G("_glGetProgramStageiv", NULL, "v:uuup"),
++	G("_glPatchParameteri", NULL, "v:ui"),
++	G("_glPatchParameterfv", NULL, "v:up"),
++	G("_glBindTransformFeedback", NULL, "v:uu"),
++	G("_glDeleteTransformFeedbacks", NULL, "v:ip"),
++	G("_glGenTransformFeedbacks", NULL, "v:ip"),
++	G("_glIsTransformFeedback", NULL, "b:u"),
++	G("_glPauseTransformFeedback", NULL, "v:"),
++	G("_glResumeTransformFeedback", NULL, "v:"),
++	G("_glDrawTransformFeedback", NULL, "v:uu"),
++	G("_glDrawTransformFeedbackStream", NULL, "v:uuu"),
++	G("_glBeginQueryIndexed", NULL, "v:uuu"),
++	G("_glEndQueryIndexed", NULL, "v:uu"),
++	G("_glGetQueryIndexediv", NULL, "v:uuup"),
++	G("_glReleaseShaderCompiler", NULL, "v:"),
++	G("_glShaderBinary", NULL, "v:ipupi"),
++	G("_glGetShaderPrecisionFormat", NULL, "v:uupp"),
++	G("_glDepthRangef", NULL, "v:ff"),
++	G("_glClearDepthf", NULL, "v:f"),
++	G("_glGetProgramBinary", NULL, "v:uippp"),
++	G("_glProgramBinary", NULL, "v:uupi"),
++	G("_glProgramParameteri", NULL, "v:uui"),
++	G("_glUseProgramStages", NULL, "v:uuu"),
++	G("_glActiveShaderProgram", NULL, "v:uu"),
++	G("_glBindProgramPipeline", NULL, "v:u"),
++	G("_glDeleteProgramPipelines", NULL, "v:ip"),
++	G("_glGenProgramPipelines", NULL, "v:ip"),
++	G("_glIsProgramPipeline", NULL, "b:u"),
++	G("_glGetProgramPipelineiv", NULL, "v:uup"),
++	G("_glProgramUniform1i", NULL, "v:uii"),
++	G("_glProgramUniform1iv", NULL, "v:uiip"),
++	G("_glProgramUniform1f", NULL, "v:uif"),
++	G("_glProgramUniform1fv", NULL, "v:uiip"),
++	G("_glProgramUniform1d", NULL, "v:uid"),
++	G("_glProgramUniform1dv", NULL, "v:uiip"),
++	G("_glProgramUniform1ui", NULL, "v:uiu"),
++	G("_glProgramUniform1uiv", NULL, "v:uiip"),
++	G("_glProgramUniform2i", NULL, "v:uiii"),
++	G("_glProgramUniform2iv", NULL, "v:uiip"),
++	G("_glProgramUniform2f", NULL, "v:uiff"),
++	G("_glProgramUniform2fv", NULL, "v:uiip"),
++	G("_glProgramUniform2d", NULL, "v:uidd"),
++	G("_glProgramUniform2dv", NULL, "v:uiip"),
++	G("_glProgramUniform2ui", NULL, "v:uiuu"),
++	G("_glProgramUniform2uiv", NULL, "v:uiip"),
++	G("_glProgramUniform3i", NULL, "v:uiiii"),
++	G("_glProgramUniform3iv", NULL, "v:uiip"),
++	G("_glProgramUniform3f", NULL, "v:uifff"),
++	G("_glProgramUniform3fv", NULL, "v:uiip"),
++	G("_glProgramUniform3d", NULL, "v:uiddd"),
++	G("_glProgramUniform3dv", NULL, "v:uiip"),
++	G("_glProgramUniform3ui", NULL, "v:uiuuu"),
++	G("_glProgramUniform3uiv", NULL, "v:uiip"),
++	G("_glProgramUniform4i", NULL, "v:uiiiii"),
++	G("_glProgramUniform4iv", NULL, "v:uiip"),
++	G("_glProgramUniform4f", NULL, "v:uiffff"),
++	G("_glProgramUniform4fv", NULL, "v:uiip"),
++	G("_glProgramUniform4d", NULL, "v:uidddd"),
++	G("_glProgramUniform4dv", NULL, "v:uiip"),
++	G("_glProgramUniform4ui", NULL, "v:uiuuuu"),
++	G("_glProgramUniform4uiv", NULL, "v:uiip"),
++	G("_glProgramUniformMatrix2fv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix3fv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix4fv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix2dv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix3dv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix4dv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix2x3fv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix3x2fv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix2x4fv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix4x2fv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix3x4fv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix4x3fv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix2x3dv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix3x2dv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix2x4dv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix4x2dv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix3x4dv", NULL, "v:uiiup"),
++	G("_glProgramUniformMatrix4x3dv", NULL, "v:uiiup"),
++	G("_glValidateProgramPipeline", NULL, "v:u"),
++	G("_glGetProgramPipelineInfoLog", NULL, "v:uipp"),
++	G("_glVertexAttribL1d", NULL, "v:ud"),
++	G("_glVertexAttribL2d", NULL, "v:udd"),
++	G("_glVertexAttribL3d", NULL, "v:uddd"),
++	G("_glVertexAttribL4d", NULL, "v:udddd"),
++	G("_glVertexAttribL1dv", NULL, "v:up"),
++	G("_glVertexAttribL2dv", NULL, "v:up"),
++	G("_glVertexAttribL3dv", NULL, "v:up"),
++	G("_glVertexAttribL4dv", NULL, "v:up"),
++	G("_glVertexAttribLPointer", NULL, "v:uiuip"),
++	G("_glGetVertexAttribLdv", NULL, "v:uup"),
++	G("_glViewportArrayv", NULL, "v:uip"),
++	G("_glViewportIndexedf", NULL, "v:uffff"),
++	G("_glViewportIndexedfv", NULL, "v:up"),
++	G("_glScissorArrayv", NULL, "v:uip"),
++	G("_glScissorIndexed", NULL, "v:uiiii"),
++	G("_glScissorIndexedv", NULL, "v:up"),
++	G("_glDepthRangeArrayv", NULL, "v:uip"),
++	G("_glDepthRangeIndexed", NULL, "v:udd"),
++	G("_glGetFloati_v", NULL, "v:uup"),
++	G("_glGetDoublei_v", NULL, "v:uup"),
++	G("_glBlendEquationiARB", NULL, "v:uu"),
++	G("_glBlendEquationSeparateiARB", NULL, "v:uuu"),
++	G("_glBlendFunciARB", NULL, "v:uuu"),
++	G("_glBlendFuncSeparateiARB", NULL, "v:uuuuu"),
++	G("_glGetInternalformativ", NULL, "v:uuuip"),
++	G("_glMinSampleShadingARB", NULL, "v:f"),
++	G("_glNamedStringARB", NULL, "v:uipip"),
++	G("_glDeleteNamedStringARB", NULL, "v:ip"),
++	G("_glIsNamedStringARB", NULL, "b:ip"),
++	G("_glGetNamedStringARB", NULL, "v:ipipp"),
++	G("_glGetNamedStringivARB", NULL, "v:ipup"),
++	G("_glTexStorage1D", NULL, "v:uiui"),
++	G("_glTexStorage2D", NULL, "v:uiuii"),
++	G("_glTexStorage3D", NULL, "v:uiuiii"),
+ };
+ 
+ void thunks_gl_gen_init(void)
 diff --git a/src/legacy.m b/src/legacy.m
-index 484efa9..1b44f3e 100644
+index 484efa9..c36b53d 100644
 --- a/src/legacy.m
 +++ b/src/legacy.m
 @@ -6,7 +6,9 @@
@@ -1607,7 +2106,31 @@ index 484efa9..1b44f3e 100644
  static int w_CFURLGetFSRef(CFURLRef u, FSRef *ref) { return CFURLGetFSRef(u, ref); }
  static int w_FSRefMakePath(const FSRef *ref, uint8_t *p, uint32_t max) { return FSRefMakePath(ref, p, max); }
  static int w_FSCompareFSRefs(const FSRef *a, const FSRef *b) { return FSCompareFSRefs(a, b); }
-@@ -614,6 +621,18 @@ static void t_dyld_get_image_name(uint32_t *args, struct hres *r)
+@@ -193,6 +200,23 @@ static int w_FSCompareFSRefs(const FSRef *a, const FSRef *b) { return FSCompareF
+ // ---- CoreGraphics images ----------------------------------------------------------------
+ static CGImageRef w_CGBitmapContextCreateImage(CGContextRef c) { return CGBitmapContextCreateImage(c); }
+ static void w_CGImageRelease(CGImageRef i) { CGImageRelease(i); }
++
++static void t_CGImageCreate(uint32_t *args, struct hres *r)
++{
++	CGColorSpaceRef colors = hobj_unwrap(A(5));
++	const float *guest_decode = G2H(A(8));
++	CGFloat *decode = NULL;
++	if (guest_decode && colors) {
++		size_t count = CGColorSpaceGetNumberOfComponents(colors) * 2;
++		decode = malloc(count * sizeof *decode);
++		if (!decode) { RET(0); return; }
++		for (size_t i = 0; i < count; i++) decode[i] = guest_decode[i];
++	}
++	CGImageRef image = CGImageCreate(A(0), A(1), A(2), A(3), A(4), colors, A(6),
++		hobj_unwrap(A(7)), decode, (A(9) & 0xff) != 0, (CGColorRenderingIntent)A(10));
++	free(decode);
++	RET(hobj_wrap(image));
++}
+ static void w_CGContextSetInterpolationQuality(CGContextRef c, int q) { CGContextSetInterpolationQuality(c, q); }
+ // CGDataProviderCreateWithData(info, data, size, release): the data is the
+ // program's own memory; its release callback runs when the provider goes
+@@ -614,6 +638,18 @@ static void t_dyld_get_image_name(uint32_t *args, struct hres *r)
  	RET(names[A(0)]);
  }
  static uint32_t w_dyld_get_image_header(uint32_t i) { return macho_image_header(i); }
@@ -1626,7 +2149,7 @@ index 484efa9..1b44f3e 100644
  static int32_t w_dyld_get_image_vmaddr_slide(uint32_t i) { return macho_image_slide(i); }
  static int w_shm_open(const char *n, int fl, int mode) { return shm_open(n, fl, mode); }
  static int w_shm_unlink(const char *n) { return shm_unlink(n); }
-@@ -682,10 +701,104 @@ static void t_InstallEventHandler(uint32_t *args, struct hres *r)
+@@ -682,10 +718,104 @@ static void t_InstallEventHandler(uint32_t *args, struct hres *r)
  	if (A(5)) U32(A(5)) = hobj_wrap(ref);
  	RET(rc);
  }
@@ -1731,7 +2254,7 @@ index 484efa9..1b44f3e 100644
  static int w_RemoveEventHandler(EventHandlerRef h) { return RemoveEventHandler(h); }
  static int w_CallNextEventHandler(EventHandlerCallRef c, EventRef e) { return CallNextEventHandler(c, e); }
  // (event, name, desiredType, *actualType, bufferSize, *actualSize (ByteCount), data)
-@@ -693,25 +806,183 @@ static void t_GetEventParameter(uint32_t *args, struct hres *r)
+@@ -693,25 +823,183 @@ static void t_GetEventParameter(uint32_t *args, struct hres *r)
  {
  	ByteCount n = 0;
  	EventParamType t = 0;
@@ -1918,7 +2441,7 @@ index 484efa9..1b44f3e 100644
  	G("_GetFrontProcess", w_GetFrontProcess, "i:p"), G("_SameProcess", w_SameProcess, "i:ppp"),
  	G("_ProcessInformationCopyDictionary", w_ProcessInformationCopyDictionary, "o:pu"),
  	R("_GetEventParameter", t_GetEventParameter), G("_SetEventParameter", w_SetEventParameter, "i:ouuup"),
-@@ -755,6 +1026,9 @@ static struct hfn legacy_fns[] = {
+@@ -755,6 +1043,9 @@ static struct hfn legacy_fns[] = {
  	G("__dyld_image_count", w_dyld_image_count, "u:"), R("__dyld_get_image_name", t_dyld_get_image_name),
  	G("__dyld_get_image_header", w_dyld_get_image_header, "u:u"),
  	G("__dyld_get_image_vmaddr_slide", w_dyld_get_image_vmaddr_slide, "i:u"),
@@ -1928,14 +2451,16 @@ index 484efa9..1b44f3e 100644
  	R("_libiconv_set_relocation_prefix", t_libiconv_set_relocation_prefix),
  	G("_shm_open", w_shm_open, "i:pii"), G("_shm_unlink", w_shm_unlink, "i:p"),
  	G("_sigwait", w_sigwait, "i:pp"), G("_sigwait$UNIX2003", w_sigwait, "i:pp"),
-@@ -777,6 +1051,7 @@ static struct hfn legacy_fns[] = {
+@@ -777,7 +1068,9 @@ static struct hfn legacy_fns[] = {
  	G("_CFURLCreateFromFileSystemRepresentation", w_CFURLCreateFromFileSystemRepresentation, "o:ppii"),
  	G("_CFURLGetFSRef", w_CFURLGetFSRef, "b:op"), G("_FSRefMakePath", w_FSRefMakePath, "i:ppu"),
  	G("_FSCompareFSRefs", w_FSCompareFSRefs, "i:pp"),
 +	G("_FindFolder", w_FindFolder, "i:iuupp"),
  	G("_CGBitmapContextCreateImage", w_CGBitmapContextCreateImage, "o:o"), G("_CGImageRelease", w_CGImageRelease, "v:o"),
++	R("_CGImageCreate", t_CGImageCreate),
  	G("_CGContextSetInterpolationQuality", w_CGContextSetInterpolationQuality, "v:oi"),
  	R("_CGDataProviderCreateWithData", t_CGDataProviderCreateWithData),
+ 	R("_CGImageCreateWithJPEGDataProvider", t_CGImageCreateWithJPEGDataProvider),
 diff --git a/src/legacy_crypto.c b/src/legacy_crypto.c
 new file mode 100644
 index 0000000..82445a9
@@ -2174,7 +2699,7 @@ index 8f40938..4c329a9 100644
  	G("_memcpy", memcpy, "p:ppu"),
  	G("_memmove", memmove, "p:ppu"),
 diff --git a/src/libc2.c b/src/libc2.c
-index 057bfcb..4dc071c 100644
+index 057bfcb..5b9047b 100644
 --- a/src/libc2.c
 +++ b/src/libc2.c
 @@ -292,6 +292,10 @@ static int64_t w_wcstoll(const wchar_t *s, uint32_t endp, int base)
@@ -2188,7 +2713,15 @@ index 057bfcb..4dc071c 100644
  static int32_t w_wcstol(const wchar_t *s, uint32_t endp, int base)
  {
  	wchar_t *e;
-@@ -453,6 +457,8 @@ static struct hfn libc2[] = {
+@@ -419,6 +423,7 @@ static struct hfn libc2[] = {
+ 	R("_sscanf", t_sscanf), R("_vsscanf", t_vsscanf), R("_fscanf", t_fscanf),
+ 	R("_stat", t_stat), R("_lstat", t_lstat), R("_fstat", t_fstat),
+ 	R("_stat$INODE64", t_stat64), R("_lstat$INODE64", t_lstat64), R("_fstat$INODE64", t_fstat64),
++	R("_stat64", t_stat64), R("_lstat64", t_lstat64), R("_fstat64", t_fstat64),
+ 	G("_open", w_open, "i:pii"), G("_close", close, "i:i"),
+ 	G("_read", w_read, "i:ipu"), G("_write", w_write, "i:ipu"),
+ 	G("_pread", w_pread, "i:ipul"), G("_pwrite", w_pwrite, "i:ipul"),
+@@ -453,6 +458,8 @@ static struct hfn libc2[] = {
  	G("_strdup", gstrdup, "p:p"),
  	G("_wcstol", w_wcstol, "i:ppi"), G("_wcstoll", w_wcstoll, "l:ppi"),
  	G("_fminf", fminf, "f:ff"), G("_fmaxf", fmaxf, "f:ff"), G("___isnanf", w_isnanf, "i:f"),
@@ -2758,7 +3291,7 @@ index 0000000..4129d89
 +	REGISTER(entries);
 +}
 diff --git a/src/objc.m b/src/objc.m
-index f53ca50..4a0ab36 100644
+index f53ca50..502ae1f 100644
 --- a/src/objc.m
 +++ b/src/objc.m
 @@ -340,7 +340,11 @@ static void ret_h2g(const char *t, const void *v, struct hres *r, g32 sret)
@@ -2774,7 +3307,15 @@ index f53ca50..4a0ab36 100644
  	case '{': {
  		const double *d = v;
  		float f[4];
-@@ -547,6 +551,10 @@ static int ui_on_main(id target, const char *sel)
+@@ -537,6 +541,7 @@ static int ui_on_main(id target, const char *sel)
+ {
+ 	if ([NSThread isMainThread] || object_isClass(target)) return 0;
+ 	if (![target isKindOfClass:[NSView class]] && ![target isKindOfClass:[NSWindow class]]) return 0;
++	if ([target isKindOfClass:[NSWindow class]] && !strncmp(sel, "init", 4)) return 1;
+ 	static const char *const pre[] = { "display", "set", "order", "make", "close", "start", "stop",
+ 					   "increment", "scroll", "lockFocus", "unlockFocus", "center", NULL };
+ 	for (int i = 0; pre[i]; i++)
+@@ -547,6 +552,10 @@ static int ui_on_main(id target, const char *sel)
  static void call_host(id target, Class super_cls, SEL hsel, const char *selname,
  		      const uint32_t *ga, struct hres *r, g32 sret)
  {
@@ -2785,7 +3326,7 @@ index f53ca50..4a0ab36 100644
  	if (!strcmp(selname, "makeCurrentContext") && [target isKindOfClass:[NSOpenGLContext class]]) {
  		[(NSOpenGLContext *)target makeCurrentContext];
  		gl_last_context = CGLGetCurrentContext();
-@@ -871,6 +879,9 @@ static int variadic_objects(id target, const char *sel, const uint32_t *ga, stru
+@@ -871,6 +880,9 @@ static int variadic_objects(id target, const char *sel, const uint32_t *ga, stru
  	return 1;
  }
  
@@ -2795,7 +3336,7 @@ index f53ca50..4a0ab36 100644
  static void msgsend(uint32_t *a, struct hres *r, int kind)
  {
  	g32 sret = 0;
-@@ -957,6 +968,16 @@ static void msgsend(uint32_t *a, struct hres *r, int kind)
+@@ -957,6 +969,16 @@ static void msgsend(uint32_t *a, struct hres *r, int kind)
  	}
  	// no autorelease pool here: returned objects belong to the guest's own pools
  	call_host(target, super_cls, sel_registerName(sel), sel, ga, r, sret);
@@ -2812,7 +3353,7 @@ index f53ca50..4a0ab36 100644
  }
  
  static void t_msgSend(uint32_t *a, struct hres *r) { msgsend(a, r, K_NORMAL); }
-@@ -1020,15 +1041,52 @@ static int arg_h2g(const char *t, NSInvocation *inv, NSUInteger i, uint32_t *g)
+@@ -1020,15 +1042,52 @@ static int arg_h2g(const char *t, NSInvocation *inv, NSUInteger i, uint32_t *g)
  	}
  }
  
@@ -2865,7 +3406,7 @@ index f53ca50..4a0ab36 100644
  	g32 imp = gc ? find_imp(gc, sel, classmethod, NULL) : 0;
  	if (!imp) {
  		Class base = host_base(gc);
-@@ -1048,7 +1106,9 @@ static void forward_to_guest(id self, SEL _cmd, NSInvocation *inv)
+@@ -1048,7 +1107,9 @@ static void forward_to_guest(id self, SEL _cmd, NSInvocation *inv)
  		k += arg_h2g([sig getArgumentTypeAtIndex:i], inv, i, &v[k]);
  	double st0 = 0;
  	int fp = *rt == 'f' || *rt == 'd';
@@ -2875,7 +3416,7 @@ index f53ca50..4a0ab36 100644
  	if (*rt == 'v') return;
  	uint8_t out[64] = {0};
  	switch (*rt) {
-@@ -1408,6 +1468,20 @@ static void t_NSLog(uint32_t *args, struct hres *r)
+@@ -1408,6 +1469,20 @@ static void t_NSLog(uint32_t *args, struct hres *r)
  		free(s);
  	}
  }
@@ -2896,7 +3437,7 @@ index f53ca50..4a0ab36 100644
  // NSRunAlertPanel(title, msgFormat, default, alternate, other, ...): show it, and log it
  static void t_NSRunAlertPanel(uint32_t *args, struct hres *r)
  {
-@@ -1641,12 +1715,83 @@ static void t_dispatch_async(uint32_t *args, struct hres *r)
+@@ -1641,12 +1716,83 @@ static void t_dispatch_async(uint32_t *args, struct hres *r)
  	g32 b = block_copy(A(1));
  	dispatch_async(host_queue(A(0)), ^{ gcall(U32(b + 12), 1, b); block_release(b); });
  }
@@ -2980,11 +3521,13 @@ index f53ca50..4a0ab36 100644
  static void t_dispatch_get_main_queue(uint32_t *args, struct hres *r) { (void)args; RET(main_q); }
  
  // ---- AppKit / Foundation constants ------------------------------------------------
-@@ -1671,12 +1816,14 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
+@@ -1671,12 +1817,16 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
  
  static struct hfn objc_fns[] = {
  	R("_NSApplicationMain", t_NSApplicationMain),
 +	G("_NSApplicationLoad", NSApplicationLoad, "b:"),
++	G("_NSDisableScreenUpdates", NSDisableScreenUpdates, "v:"),
++	G("_NSEnableScreenUpdates", NSEnableScreenUpdates, "v:"),
  	R("_objc_msgSend", t_msgSend), R("_objc_msgSend_stret", t_msgSend_stret),
  	R("_objc_msgSend_fpret", t_msgSend_fpret), R("_objc_msgSendSuper", t_msgSendSuper),
  	R("_objc_msgSendSuper_stret", t_msgSendSuper_stret),
@@ -2995,7 +3538,7 @@ index f53ca50..4a0ab36 100644
  	D("_NSApp", 4, init_nsapp), D("_NSDefaultRunLoopMode", 4, init_runloopmode),
  	D("___CFConstantStringClassReference", 32, init_cfconst),
  	R("_objc_retain", t_objc_retain), R("_objc_release", t_objc_release),
-@@ -1694,6 +1841,14 @@ static struct hfn objc_fns[] = {
+@@ -1694,6 +1844,14 @@ static struct hfn objc_fns[] = {
  	R("__Block_copy", t_Block_copy), R("__Block_release", t_Block_release),
  	D("__dispatch_main_q", 128, init_main_q), R("_dispatch_get_main_queue", t_dispatch_get_main_queue),
  	R("_dispatch_async", t_dispatch_async), R("_dispatch_sync", t_dispatch_sync),
@@ -3421,10 +3964,10 @@ index b9a8110..fabcbeb 100644
  	R("_pthread_mach_thread_np", t_mach_thread_np), R("_pthread_setname_np", t_setname_np),
  	R("_pthread_key_create", t_key_create), R("_pthread_key_delete", t_key_delete),
 diff --git a/src/thunks.c b/src/thunks.c
-index a5bde77..70687cf 100644
+index a5bde77..97a228b 100644
 --- a/src/thunks.c
 +++ b/src/thunks.c
-@@ -319,6 +319,7 @@ void hostcall_dispatch(uint32_t idx, uint32_t *args, struct hres *r)
+@@ -319,9 +319,11 @@ void hostcall_dispatch(uint32_t idx, uint32_t *args, struct hres *r)
  void thunks_init(void)
  {
  	thunks_libc_init();
@@ -3432,7 +3975,11 @@ index a5bde77..70687cf 100644
  	thunks_pthread_init();
  	thunks_cxx_init();
  	thunks_libc2_init();
-@@ -330,12 +331,17 @@ void thunks_init(void)
++	thunks_aio_init();
+ 	thunks_objc_init();
+ 	thunks_apple_init();
+ 	thunks_gl_init();
+@@ -330,12 +332,17 @@ void thunks_init(void)
  	thunks_steam_init();
  	thunks_zlib_init();
  	thunks_audio_init();
@@ -3451,10 +3998,10 @@ index a5bde77..70687cf 100644
  	thunks_qd_init();
  }
 diff --git a/src/thunks.h b/src/thunks.h
-index ad15688..1e40f06 100644
+index ad15688..d4637d5 100644
 --- a/src/thunks.h
 +++ b/src/thunks.h
-@@ -26,6 +26,8 @@ g32 hfn_stub(struct hfn *f);				// a stub for a dynamically made entry
+@@ -26,9 +26,12 @@ g32 hfn_stub(struct hfn *f);				// a stub for a dynamically made entry
  #define REGISTER(list) thunk_register(list, sizeof list / sizeof list[0])
  
  void thunks_libc_init(void);
@@ -3463,7 +4010,11 @@ index ad15688..1e40f06 100644
  void thunks_pthread_init(void);
  void thunks_cxx_init(void);
  void thunks_libc2_init(void);
-@@ -37,12 +39,17 @@ void thunks_ats_init(void);
++void thunks_aio_init(void);
+ void thunks_objc_init(void);
+ void thunks_apple_init(void);
+ void thunks_gl_init(void);
+@@ -37,12 +40,17 @@ void thunks_ats_init(void);
  void thunks_steam_init(void);
  void thunks_zlib_init(void);
  void thunks_audio_init(void);
@@ -3522,3 +4073,44 @@ index 76ef86b..0a8eeca 100644
  	and  $-16, %rsp
  	sub  $32, %rsp			# struct hres
  	movq $0, (%rsp)
+diff --git a/tools/gen_gl.py b/tools/gen_gl.py
+index f42872e..2a0b270 100644
+--- a/tools/gen_gl.py
++++ b/tools/gen_gl.py
+@@ -1,12 +1,15 @@
+ #!/usr/bin/env python3
+-"""Generate src/gl_thunks.c: a host thunk for every legacy OpenGL function in
++"""Generate src/gl_thunks.c: host thunks for legacy and core OpenGL functions in
+ the macOS SDK headers, with i386 argument widths."""
+ import re, subprocess, sys
+ 
+ sdk = subprocess.run(['xcrun', '--show-sdk-path'], capture_output=True, text=True).stdout.strip()
+-hdrs = [f'{sdk}/System/Library/Frameworks/OpenGL.framework/Headers/{h}' for h in ('gl.h', 'glext.h')]
++hdrs = [f'{sdk}/System/Library/Frameworks/OpenGL.framework/Headers/{h}'
++        for h in ('gl.h', 'glext.h', 'gl3.h', 'gl3ext.h')]
+ src = '\n'.join(open(h).read() for h in hdrs)
+ src = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
++src = re.sub(r'(?m)^GLAPI\b', 'extern', src)
++src = re.sub(r'\bAPIENTRY\b', '', src)
+ 
+ U = {'GLenum', 'GLbitfield', 'GLuint', 'GLushort', 'GLubyte', 'GLboolean', 'GLhandleARB', 'GLuint64EXT_unused'}
+ I = {'GLint', 'GLsizei', 'GLshort', 'GLbyte', 'GLintptr', 'GLsizeiptr', 'GLintptrARB', 'GLsizeiptrARB', 'GLclampx', 'GLfixed'}
+@@ -18,7 +21,8 @@ SPECIAL = {'glMapBuffer', 'glMapBufferARB', 'glUnmapBuffer', 'glUnmapBufferARB',
+            'glGetBufferPointerv', 'glGetBufferPointervARB', 'glGetVertexAttribPointerv',
+            'glGetVertexAttribPointervARB', 'glGetString', 'glGetStringi',
+            'glShaderSource', 'glShaderSourceARB', 'glMultiDrawElements', 'glMultiDrawElementsEXT',
+-           'glMultiDrawElementsBaseVertex', 'glTransformFeedbackVaryingsEXT', 'glGetAttachedObjectsARB',
++           'glMultiDrawElementsBaseVertex', 'glTransformFeedbackVaryings', 'glTransformFeedbackVaryingsEXT',
++           'glGetAttachedObjectsARB',
+            'glGetPointervEXT', 'glGetTexParameterPointervAPPLE', 'glGetVertexAttribPointervNV',
+            'glDeleteBuffers', 'glDeleteBuffersARB'}
+ 
+@@ -48,6 +52,8 @@ for m in re.finditer(r'extern\s+([\w\s\*]+?)\s*\b(gl\w+)\s*\(([^)]*)\)\s*(?:OPEN
+     if args and args != 'void':
+         for a in args.split(','):
+             a = re.sub(r'\[\d*\]', '*', a.strip())
++            if a.count('*') > 1:
++                ok = False; break
+             a = re.sub(r'\b\w+$', '', a).strip() if not a.endswith('*') else a
+             c = code(a)
+             if c is None or c == 'v':
