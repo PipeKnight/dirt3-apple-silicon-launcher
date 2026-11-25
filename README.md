@@ -8,9 +8,21 @@ patches for the compatibility runtime, and reproducible findings.
 an offline rally on Finland's Tupasentie stage from the start to the results
 screen and returned to the menu. The game saved a local profile with
 autosaving enabled and loaded it in a new process. The engine creates
-OpenGL and OpenCL contexts and starts audio output units. Some launches
-still fail in the resource check. Audible audio, controllers and other
-macOS versions remain unverified.
+OpenGL and OpenCL contexts and starts audio output units. Audible audio,
+controllers and other macOS versions remain unverified.
+
+## Open the launcher
+
+Mount the disk image and drag **DiRT 3 Launcher.app** into
+**Applications**. Open the launcher and click **Play**. It looks for your
+original Mac installation. Use **Choose Game…** to locate a copy in another
+folder. The original Feral options window opens before the game. **Show
+Logs** reveals the latest run log in Finder.
+
+The launcher requires an Apple silicon Mac, Rosetta, and the Feral Mac
+version 1.0, build 85186.17625.4091. The disk image contains the launcher
+and compatibility runtime. The game supplies its executable, libraries and
+data from your installed copy.
 
 ## Inspect the installed copy
 
@@ -79,9 +91,31 @@ Click **Play**, press Enter at the title screen, and load or create a local
 profile. In **Singleplayer → Single Race**, choose a car and team, then
 select **Race** after the track loads. On the original keyboard mapping,
 Space accelerates, Shift or keypad 2 brakes or reverses, A and D steer, L
-applies the handbrake, and Esc pauses. If the Play button is blank or the
-launcher reports an invalid installation with the verified game build,
-close it and launch a fresh process. A retry reached the game on the test Mac.
+applies the handbrake, and Esc pauses.
 
 See [findings.md](findings.md) for the execution trace, comparable projects and
 the conditions for calling the game playable.
+
+## Package a disk image
+
+After the runtime build above, run `launcher/package.sh "$runtime"
+"$build_dir/llvm-project"` on macOS. The script creates the app, disk image,
+corresponding source archive and SHA-256 checksums under `local/`. macOS
+needs access to its Disk Images service when creating the image.
+
+By default this is a locally signed test build. To prepare a distribution
+build, set `DIRT3_SIGNING_IDENTITY` to a Developer ID Application identity
+from the signing keychain. Set `DIRT3_NOTARY_PROFILE` to the name of a
+stored `notarytool` profile to submit the image and staple the ticket
+before generating the checksums. The Intel helper uses the unsigned
+executable memory entitlement to load the guest Mach-O and run its call
+thunks. The Apple silicon launcher is signed with Hardened Runtime.
+Distribute the image, source archive and checksums together.
+[Apple's distribution instructions](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution)
+
+The release source archive contains the patched `mac32` tree and the
+LLVM checkout paths used by its guest build. Extract it into a directory
+with no spaces and run the host and guest `make` commands above with
+`runtime` set to the extracted `mac32` directory and `LLVM` set to the
+extracted `llvm-project` directory. The launcher sources are under
+`project/launcher`.

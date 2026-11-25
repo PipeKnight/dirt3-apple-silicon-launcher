@@ -20,17 +20,27 @@ index 4c16e9d..aeabf91 100644
  all: mac32 guest app
 diff --git a/patches/dirt3_2015_version.c b/patches/dirt3_2015_version.c
 new file mode 100644
-index 0000000..83dcc88
+index 0000000..101eac2
 --- /dev/null
 +++ b/patches/dirt3_2015_version.c
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,105 @@
 +#include "../src/patches.h"
 +#include <CoreServices/CoreServices.h>
++#include <mach-o/loader.h>
 +#include <string.h>
 +
 +static int version_patch_active;
 +static _Thread_local int serializing_web_display;
 +static g32 parse_json, empty_array;
++static g32 image_text_start;
++static uint32_t image_text_size;
++
++static void in_image_text(uint32_t *args, struct hres *r)
++{
++	RET(A(0) - image_text_start < image_text_size);
++}
++
++static struct hfn in_image_text_thunk = R("DiRT 3 string storage", in_image_text);
 +
 +int dirt3_set_serializing_web_display(int active)
 +{
@@ -66,19 +76,24 @@ index 0000000..83dcc88
 +		0x0f, 0x45, 0xd1, 0x09, 0xd6, 0x09, 0xc6,
 +	};
 +	static const uint8_t parse_call[] = {0xe8, 0x0c, 0xe4, 0xfe, 0xff};
++	static const uint8_t storage_call[] = {0xe8, 0x4f, 0xb4, 0xfc, 0xff};
 +	enum {
 +		packing_offset = 0x781938 - 0xb980,
 +		parse_call_offset = 0x8411cf - 0xb980,
 +		parse_offset = 0x82f5e0 - 0xb980,
++		storage_call_offset = 0x86dccc - 0xb980,
 +	};
 +	g32 text;
 +	uint32_t text_size;
 +	if (!macho_section(image, "__TEXT", "__text", &text, &text_size) ||
-+		text_size < parse_call_offset + sizeof(parse_call))
++		text_size < storage_call_offset + sizeof(storage_call))
 +		return 0;
 +	uint8_t *code = G2H(text + packing_offset);
 +	uint8_t *call = G2H(text + parse_call_offset);
-+	if (memcmp(code, packing, sizeof(packing)) || memcmp(call, parse_call, sizeof(parse_call)))
++	uint8_t *storage = G2H(text + storage_call_offset);
++	g32 segment = macho_main_segment("__TEXT");
++	if (!segment || memcmp(code, packing, sizeof(packing)) ||
++		memcmp(call, parse_call, sizeof(parse_call)) || memcmp(storage, storage_call, sizeof(storage_call)))
 +		return 0;
 +
 +	// Saturate the legacy result at 10.15.0 and jump to its original cache
@@ -93,6 +108,16 @@ index 0000000..83dcc88
 +	empty_array = gstrdup("[]");
 +	int32_t relative = (int32_t)(hfn_stub(&parse_json_thunk) - (text + parse_call_offset + sizeof(parse_call)));
 +	memcpy(call + 1, &relative, sizeof(relative));
++	// The i386 getsegbyname command describes the preferred image address.
++	// The game's string constructor uses that range to borrow permanent
++	// literals. Compare against the mapped range so heap strings are copied
++	// before their source is destroyed. Preserve the system API's header.
++	const struct segment_command *text_segment = G2H(segment);
++	image_text_start = text_segment->vmaddr + (g32)macho_image_slide(0);
++	image_text_size = text_segment->vmsize;
++	relative = (int32_t)(hfn_stub(&in_image_text_thunk) - (text + storage_call_offset + sizeof(storage_call)));
++	memcpy(storage + 1, &relative, sizeof(relative));
++
 +	version_patch_active = 1;
 +	return 1;
 +}
@@ -101,7 +126,7 @@ index 0000000..83dcc88
 +	.library = "DiRT 3 Complete Edition",
 +	.sha256 = "0415a9ecbaccdc25752a327c7b8a0dbd62435a308d0a95652d4a286e6a579014",
 +	.game = "DiRT 3 Complete Edition 1.0 (85186.17625.4091)",
-+	.what = "encode newer macOS releases and preserve missing launcher text",
++	.what = "adapt macOS version, launcher text and i386 image addresses",
 +	.apply = apply,
 +};
 diff --git a/src/aio_bridge.c b/src/aio_bridge.c
@@ -3018,7 +3043,7 @@ index 0000000..82445a9
 +
 +void thunks_legacy_crypto_init(void) { REGISTER(crypto_entries); }
 diff --git a/src/libc.c b/src/libc.c
-index 8f40938..4c329a9 100644
+index 8f40938..781042b 100644
 --- a/src/libc.c
 +++ b/src/libc.c
 @@ -461,7 +461,6 @@ static double floatundidf(uint64_t v) { return (double)v; }
@@ -3054,6 +3079,15 @@ index 8f40938..4c329a9 100644
  	// strings
  	G("_memcpy", memcpy, "p:ppu"),
  	G("_memmove", memmove, "p:ppu"),
+@@ -667,7 +657,7 @@ static struct hfn libc[] = {
+ 	G("_srandom", srandom, "v:u"),
+ 	G("_arc4random", arc4random, "u:"),
+ 	G("_getpagesize", getpagesize, "i:"),
+-	R("_exit", t_exit), R("__exit", t__exit), R("_abort", t_abort),
++	R("_exit", t_exit), R("__exit", t__exit), R("__Exit", t__exit), R("_abort", t_abort),
+ 	R("___stack_chk_fail", t_stack_chk_fail),
+ 	D("___stack_chk_guard", 4, init_stack_guard),
+ 	R("_qsort", t_qsort), R("_bsearch", t_bsearch),
 diff --git a/src/libc2.c b/src/libc2.c
 index 057bfcb..910d173 100644
 --- a/src/libc2.c

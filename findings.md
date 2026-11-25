@@ -210,7 +210,25 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
   Player One again and reached the main menu with autosaving enabled.
 
 Audible audio, controller input and frame pacing still need verification.
-The resource check can still fail on startup.
+
+### Intermittent resource lookup at startup
+
+The failing run selected the same language as the successful run. The game
+converted the language correctly, then its string constructor treated the
+temporary result as a permanent literal. Its storage check compared the
+pointer with the preferred `__TEXT` range in the i386 Mach-O header. mac32
+loads this PIE executable at a different address. A heap allocation could
+fall within the preferred range and go through the literal branch, which
+borrows the buffer. The source object's destruction released the buffer.
+In a failing trace, an embedded NUL in the corrupted language component
+truncated the path to `Resources/` before `Game.strings`. The launcher
+lost localized labels and settings used by the original resource check.
+
+The fingerprinted DiRT 3 patch uses the mapped `__TEXT` range for the
+string storage check. The `getsegbyname` bridge continues to expose the
+original header and the game continues opening and checking its own files.
+The runtime also maps the game's `_Exit` call to immediate termination so
+normal shutdown can finish.
 
 ## Comparable projects
 

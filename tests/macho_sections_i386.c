@@ -27,5 +27,9 @@ int main(void)
     if (!segment || segment[0] != 1 || (unsigned)segment <= (unsigned)header ||
         (unsigned)segment >= (unsigned)header + 28 + mach_header[5]) return 6;
     if (getsegbyname("__absent")) return 7;
+    const unsigned segment_address = segment[6];
+    const unsigned segment_size = segment[7];
+    if ((unsigned)unslid - segment_address >= segment_size) return 8;
+    if ((unsigned)loaded - (segment_address + (unsigned)slide) >= segment_size) return 9;
     return 0;
 }
