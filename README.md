@@ -13,7 +13,7 @@ controllers and other macOS versions remain unverified.
 
 ## Open the launcher
 
-Download the DMG from [GitHub Releases](https://github.com/PipeKnight/dirt3-launcher/releases).
+Download the DMG from [GitHub Releases](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/releases/latest).
 Mount the disk image and drag **DiRT 3 Launcher.app** into
 **Applications**. Open the launcher and click **Play**. It looks for your
 original Mac installation. Use **Choose Game…** to locate a copy in another
@@ -122,3 +122,9 @@ with no spaces and run the host and guest `make` commands above with
 `runtime` set to the extracted `mac32` directory and `LLVM` set to the
 extracted `llvm-project` directory. The launcher sources are under
 `project/launcher`.
+
+## License
+
+The launcher and compatibility changes are available under GPL-3.0-or-later.
+mac32 and its bundled dependencies carry their respective license notices.
+The original game comes from your own installation.
