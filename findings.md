@@ -140,6 +140,13 @@ document the two resistance fields shared by both transports.
 The Steam race also submitted Bluetooth trigger changes and two-channel
 rumble from the game's live input and simulation.
 
+The shipped `forcefeedback/effectsetup.xml` defines controller rumble for
+collisions and a separate effect for wheel damage within a configured range.
+The Mac port caches two infinite sine-effect handles across controller removal
+and reattachment. The bridge now clears their output on removal and binds
+the same handles when a single DualSense is available again. A lifecycle
+test exercised removal, rebinding, restarting and explicit effect release.
+
 ## Startup through AppKit
 
 - The guest zone registry honors default-zone reordering and dispatches the

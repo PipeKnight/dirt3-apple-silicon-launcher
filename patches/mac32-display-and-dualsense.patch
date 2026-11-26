@@ -702,10 +702,10 @@ index 0000000..dd6d979
 +}
 diff --git a/src/dirt3_force_feedback.m b/src/dirt3_force_feedback.m
 new file mode 100644
-index 0000000..338b0a3
+index 0000000..868a64b
 --- /dev/null
 +++ b/src/dirt3_force_feedback.m
-@@ -0,0 +1,515 @@
+@@ -0,0 +1,547 @@
 +// The i386 game sends two motor strengths through the old ForceFeedback API.
 +// Translate only its DualSense gamepad path, keeping the controller's input
 +// connection and any other legacy devices independent of this bridge.
@@ -810,6 +810,23 @@ index 0000000..338b0a3
 +    for (size_t i = 0; handle && i < max_effects; ++i)
 +        if (effects[i].handle == handle) return &effects[i];
 +    return NULL;
++}
++
++static void bind_cached_motors(void)
++{
++    g32 owner = 0;
++    for (size_t i = 0; i < max_devices; ++i) {
++        if (!devices[i].handle) continue;
++        if (owner) return;
++        owner = devices[i].handle;
++    }
++    if (!owner) return;
++    for (size_t i = 0; i < max_effects; ++i) {
++        if (!effects[i].handle || effects[i].owner) continue;
++        effects[i].owner = owner;
++        if (trace_enabled)
++            LOG("DualSense force feedback: rebound motor %u to device %u\n", effects[i].channel, owner);
++    }
 +}
 +
 +static bool is_dualsense_service(io_service_t service)
@@ -1014,6 +1031,7 @@ index 0000000..338b0a3
 +        *out = devices[i].handle;
 +        break;
 +    }
++    if (*out) bind_cached_motors();
 +    os_unfair_lock_unlock(&state_lock);
 +    if (*out) {
 +        if (trace_enabled) LOG("DualSense force feedback: legacy device created\n");
@@ -1028,8 +1046,21 @@ index 0000000..338b0a3
 +    struct device *device = find_device(A(0));
 +    if (device) {
 +        *device = (struct device){0};
-+        for (size_t i = 0; i < max_effects; ++i)
-+            if (effects[i].owner == A(0)) effects[i] = (struct effect){0};
++        for (size_t i = 0; i < max_effects; ++i) {
++            struct effect *effect = &effects[i];
++            if (effect->owner != A(0)) continue;
++            if (effect->duration != FF_INFINITE) {
++                *effect = (struct effect){0};
++                continue;
++            }
++            // DiRT 3 keeps its two infinite rumble effect handles in globals
++            // and reuses them across device removal and arrival callbacks.
++            effect->owner = 0;
++            effect->end = 0;
++            effect->strength = 0;
++        }
++        bind_cached_motors();
++        if (trace_enabled) LOG("DualSense force feedback: released device %u\n", A(0));
 +    }
 +    os_unfair_lock_unlock(&state_lock);
 +    RET(device ? FF_OK : FFERR_NOINTERFACE);
@@ -1093,7 +1124,7 @@ index 0000000..338b0a3
 +    if (!definition || definition->size != sizeof(*definition)) { RET(FFERR_INVALIDPARAM); return; }
 +    os_unfair_lock_lock(&state_lock);
 +    struct effect *effect = find_effect(A(0));
-+    bool valid = effect && (!(flags & FFEP_TYPESPECIFICPARAMS) || parse_periodic(definition, effect));
++    bool valid = effect && effect->owner && (!(flags & FFEP_TYPESPECIFICPARAMS) || parse_periodic(definition, effect));
 +    if (valid) {
 +        if (flags & FFEP_GAIN) effect->gain = normalize(definition->gain);
 +        if (flags & FFEP_DURATION) effect->duration = definition->duration;
@@ -1107,9 +1138,10 @@ index 0000000..338b0a3
 +{
 +    os_unfair_lock_lock(&state_lock);
 +    struct effect *effect = find_effect(A(0));
-+    if (effect) effect->end = playback_end(effect, A(1));
++    bool valid = effect && effect->owner;
++    if (valid) effect->end = playback_end(effect, A(1));
 +    os_unfair_lock_unlock(&state_lock);
-+    RET(effect ? FF_OK : FFERR_NOINTERFACE);
++    RET(valid ? FF_OK : FFERR_NOINTERFACE);
 +}
 +
 +static void t_ff_stop_effect(uint32_t *args, struct hres *r)
