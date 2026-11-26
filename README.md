@@ -36,7 +36,7 @@ Select **Run in a window** in the launcher before pressing **Play** to start in 
 
 If the steering wheel is static in cockpit view with the Low graphics preset, set **Options → Graphics Options → Detail → Distant Vehicles** to **Medium**. This setting also controls driver detail. [Original game discussion](https://steamcommunity.com/app/321040/discussions/1/611702631210247249/)
 
-During play, press **F9** to toggle the performance overlay in the lower-left corner. It shows FPS, frame interval and 1% low over the last five seconds. CPU use is normalized to the estimated minimum number of cores needed by the game process. The `≥` value comes from the busiest one-second CPU sample in the last five seconds. Threads can move between cores, so the actual count may be higher. CPU `ms` is time per frame summed across the process's threads. GPU figures are device-wide. `R` shows renderer utilization and `T` shows tiler utilization where the driver exposes them. The thermal indicator shows the macOS thermal state.
+During play, press **F9** to toggle the performance overlay in the lower-left corner. It shows FPS, frame interval and 1% low over the last five seconds. CPU use is normalized to the estimated minimum number of cores needed by the game process. The `≥` value comes from the busiest one-second CPU sample in the last five seconds. Threads can move between cores, so the actual count may be higher. CPU `ms` is time per frame summed across the process's threads. The GPU percentage is device-wide. GPU `ms` is the time measured for a sampled frame in the game’s presenting OpenGL context. The launcher samples up to one frame per second and reads timer results asynchronously where the driver supports them. The thermal indicator shows the macOS thermal state.
 
 **Skip startup videos** is on by default. Clear the checkbox in the launcher to play the opening videos.
 
@@ -93,6 +93,7 @@ git -C "$runtime" apply "$PWD/patches/mac32-feral-entrypoint.patch" \
   "$PWD/patches/mac32-display-and-dualsense.patch" \
   "$PWD/patches/mac32-steam-cloud.patch"
 git -C "$runtime" apply "$PWD/patches/mac32-modern-gamepads.patch"
+git -C "$runtime" apply "$PWD/patches/mac32-gpu-frame-time.patch"
 LLVM="$llvm" "$runtime/tools/get-llvm.sh"
 
 sdk="$(xcrun --sdk macosx --show-sdk-path)"

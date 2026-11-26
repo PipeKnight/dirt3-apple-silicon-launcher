@@ -1,0 +1,371 @@
+diff --git a/src/apple.m b/src/apple.m
+index 98ca959..a6321a7 100644
+--- a/src/apple.m
++++ b/src/apple.m
+@@ -708,6 +708,7 @@ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
+ #define DKEY(sym) D("_" #sym, 4, init_##sym)
+ 
+ extern CGLError dirt3_flush_drawable(CGLContextObj context);
++extern CGLError dirt3_destroy_cgl_context(CGLContextObj context);
+ 
+ static int w_CGLSetCurrentContext(CGLContextObj c) { if (c) gl_last_context = c; return CGLSetCurrentContext(c); }
+ 
+@@ -927,7 +928,7 @@ static struct hfn apple[] = {
+ 	R("_CGLChoosePixelFormat", t_CGLChoosePixelFormat),
+ 	R("_CGLCreateContext", t_CGLCreateContext),
+ 	R("_CGLQueryRendererInfo", t_CGLQueryRendererInfo),
+-	G("_CGLDestroyContext", CGLDestroyContext, "i:o"),
++	G("_CGLDestroyContext", dirt3_destroy_cgl_context, "i:o"),
+ 	G("_CGLClearDrawable", CGLClearDrawable, "i:o"),
+ 	G("_CGLGetShareGroup", CGLGetShareGroup, "o:o"),
+ 	G("_CGLDestroyPixelFormat", CGLDestroyPixelFormat, "i:o"),
+diff --git a/src/dirt3_overlay.m b/src/dirt3_overlay.m
+index a7d4b29..6e3f590 100644
+--- a/src/dirt3_overlay.m
++++ b/src/dirt3_overlay.m
+@@ -2,6 +2,7 @@
+ #import <Carbon/Carbon.h>
+ #import <IOKit/IOKitLib.h>
+ #import <OpenGL/OpenGL.h>
++#import <OpenGL/gl3.h>
+ #include <math.h>
+ #include <os/lock.h>
+ #include <stdatomic.h>
+@@ -15,20 +16,34 @@ enum { frame_capacity = 2048, cpu_history_capacity = 5 };
+ struct frame_sample { uint64_t end, elapsed; };
+ static const uint64_t history_ns = 5 * NSEC_PER_SEC;
+ static const uint64_t no_present_ns = NSEC_PER_SEC;
++static const uint64_t gpu_sample_interval = NSEC_PER_SEC;
++static const uint64_t gpu_poll_interval = 100 * NSEC_PER_MSEC;
++static const uint64_t gpu_result_max_age = 2 * NSEC_PER_SEC;
+ 
+ static atomic_bool monitor_installed;
+ static atomic_bool recording;
++static atomic_bool gpu_query_active;
+ static os_unfair_lock frame_lock = OS_UNFAIR_LOCK_INIT;
+ static struct {
+ 	CGLContextObj context;
+ 	uint64_t last_present;
+ 	uint64_t presented;
++	uint64_t generation;
++	uint64_t gpu_end, gpu_elapsed;
+ 	size_t next, count;
+ 	struct frame_sample history[frame_capacity];
+ } frames;
+ 
+-// The display code lives on the main thread. Only the small timing ring is
+-// shared with the render thread.
++// Only touch OpenGL queries on a thread with the corresponding context current.
++static os_unfair_lock gpu_query_lock = OS_UNFAIR_LOCK_INIT;
++static struct {
++	CGLContextObj context;
++	GLuint name;
++	bool supported, pending;
++	uint64_t generation, begin, end, next_poll;
++} gpu_query;
++
++// The display code runs on the main thread. Frame and GPU samples use frame_lock.
+ static NSPanel *panel;
+ static NSTextField *text;
+ static NSTimer *refresh_timer;
+@@ -39,7 +54,7 @@ static double cpu_percent, cpu_ms;
+ static unsigned cpu_min_cores;
+ static struct { uint64_t end; unsigned cores; } cpu_history[cpu_history_capacity];
+ static size_t next_cpu_sample;
+-static struct gpu_sample { int device, renderer, tiler; } gpu_usage;
++static int gpu_percent;
+ 
+ static void set_recording(bool on)
+ {
+@@ -47,6 +62,8 @@ static void set_recording(bool on)
+ 	os_unfair_lock_lock(&frame_lock);
+ 	atomic_store_explicit(&recording, on, memory_order_relaxed);
+ 	frames.context = NULL;
++	frames.generation++;
++	frames.gpu_end = 0;
+ 	frames.last_present = 0;
+ 	frames.count = frames.next = 0;
+ 	os_unfair_lock_unlock(&frame_lock);
+@@ -56,11 +73,11 @@ static void set_recording(bool on)
+ 	cpu_percent = cpu_ms = -1;
+ }
+ 
+-static void record_present(CGLContextObj context)
++static uint64_t record_present(CGLContextObj context, uint64_t now)
+ {
++	uint64_t generation = 0;
+ 	os_unfair_lock_lock(&frame_lock);
+ 	if (atomic_load_explicit(&recording, memory_order_relaxed)) {
+-		uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+ 		uint64_t elapsed = now - frames.last_present;
+ 		if (frames.context == context && frames.last_present) {
+ 			if (elapsed && elapsed < history_ns) {
+@@ -72,14 +89,118 @@ static void record_present(CGLContextObj context)
+ 			// Select one drawable to avoid counting additional GL contexts
+ 			// twice. Allow a new context after the game recreates its window.
+ 			frames.context = context;
++			frames.gpu_end = 0;
+ 			frames.count = frames.next = 0;
+ 		}
+ 		if (frames.context == context) {
+ 			frames.last_present = now;
+ 			frames.presented++;
++			generation = frames.generation;
+ 		}
+ 	}
+ 	os_unfair_lock_unlock(&frame_lock);
++	return generation;
++}
++
++static bool supports_gpu_query(void)
++{
++	const char *version = (const char *)glGetString(GL_VERSION);
++	if (!version) return false;
++	if (version[0] < '3') {
++		const char *extensions = (const char *)glGetString(GL_EXTENSIONS);
++		if (!extensions || !strstr(extensions, "GL_EXT_timer_query")) return false;
++	} else {
++		int major = 0, minor = 0;
++		if (sscanf(version, "%d.%d", &major, &minor) != 2 || (major == 3 && minor < 3))
++			return false;
++	}
++	GLint bits = 0;
++	glGetQueryiv(GL_TIME_ELAPSED, GL_QUERY_COUNTER_BITS, &bits);
++	return bits > 0;
++}
++
++static void finish_gpu_query(CGLContextObj context, bool keep)
++{
++	if (!atomic_load_explicit(&gpu_query_active, memory_order_relaxed)) return;
++	os_unfair_lock_lock(&gpu_query_lock);
++	if (gpu_query.context == context && context == CGLGetCurrentContext() &&
++		atomic_load_explicit(&gpu_query_active, memory_order_relaxed)) {
++		glEndQuery(GL_TIME_ELAPSED);
++		atomic_store_explicit(&gpu_query_active, false, memory_order_relaxed);
++		gpu_query.pending = keep;
++		gpu_query.end = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++		gpu_query.next_poll = gpu_query.end + gpu_poll_interval;
++	}
++	os_unfair_lock_unlock(&gpu_query_lock);
++}
++
++void dirt3_cancel_gpu_query(void)
++{
++	if (atomic_load_explicit(&gpu_query_active, memory_order_relaxed))
++		finish_gpu_query(CGLGetCurrentContext(), false);
++}
++
++CGLError dirt3_destroy_cgl_context(CGLContextObj context)
++{
++	os_unfair_lock_lock(&gpu_query_lock);
++	if (gpu_query.context == context) {
++		if (context == CGLGetCurrentContext()) {
++			if (atomic_load_explicit(&gpu_query_active, memory_order_relaxed)) glEndQuery(GL_TIME_ELAPSED);
++			if (gpu_query.name) glDeleteQueries(1, &gpu_query.name);
++		}
++		// OpenGL frees any remaining query object when it destroys the context.
++		memset(&gpu_query, 0, sizeof(gpu_query));
++		atomic_store_explicit(&gpu_query_active, false, memory_order_relaxed);
++	}
++	os_unfair_lock_unlock(&gpu_query_lock);
++	return CGLDestroyContext(context);
++}
++
++static void sample_gpu_frame(CGLContextObj context, uint64_t generation, uint64_t now)
++{
++	os_unfair_lock_lock(&gpu_query_lock);
++	if (gpu_query.context != context) {
++		// An in-flight query belongs to its context even when another is
++		// temporarily current. Finish the timer on its next present.
++		if (atomic_load_explicit(&gpu_query_active, memory_order_relaxed)) goto done;
++		memset(&gpu_query, 0, sizeof(gpu_query));
++		gpu_query.context = context;
++		gpu_query.supported = supports_gpu_query();
++	}
++	if (!gpu_query.supported) goto done;
++	if (gpu_query.pending && now >= gpu_query.next_poll) {
++		GLuint ready = GL_FALSE;
++		glGetQueryObjectuiv(gpu_query.name, GL_QUERY_RESULT_AVAILABLE, &ready);
++		gpu_query.next_poll = now + gpu_poll_interval;
++		if (ready) {
++			GLuint64 elapsed = 0;
++			glGetQueryObjectui64v(gpu_query.name, GL_QUERY_RESULT, &elapsed);
++			gpu_query.pending = false;
++			os_unfair_lock_lock(&frame_lock);
++			if (frames.context == context && frames.generation == gpu_query.generation &&
++				now - gpu_query.end < no_present_ns && elapsed && elapsed < no_present_ns) {
++				frames.gpu_end = gpu_query.end;
++				frames.gpu_elapsed = elapsed;
++			}
++			os_unfair_lock_unlock(&frame_lock);
++		}
++	}
++	if (!gpu_query.pending && now - gpu_query.begin >= gpu_sample_interval &&
++		!atomic_load_explicit(&gpu_query_active, memory_order_relaxed)) {
++		gpu_query.begin = now;
++		GLint current = 0;
++		glGetQueryiv(GL_TIME_ELAPSED, GL_CURRENT_QUERY, &current);
++		if (!current) {
++			if (!gpu_query.name) glGenQueries(1, &gpu_query.name);
++			if (gpu_query.name) {
++				glBeginQuery(GL_TIME_ELAPSED, gpu_query.name);
++				gpu_query.generation = generation;
++				atomic_store_explicit(&gpu_query_active, true, memory_order_relaxed);
++			}
++		}
++	}
++done:
++	os_unfair_lock_unlock(&gpu_query_lock);
+ }
+ 
+ static int compare_slowest_first(const void *a, const void *b)
+@@ -114,28 +235,20 @@ static unsigned minimum_cpu_cores(uint64_t now, double busy_cores)
+ 	return cores;
+ }
+ 
+-static int gpu_counter(CFDictionaryRef stats, CFStringRef key)
+-{
+-	CFTypeRef value = CFDictionaryGetValue(stats, key);
+-	int percent;
+-	if (value && CFGetTypeID(value) == CFNumberGetTypeID() &&
+-		CFNumberGetValue(value, kCFNumberIntType, &percent) && percent >= 0 && percent <= 100)
+-		return percent;
+-	return -1;
+-}
+-
+-static struct gpu_sample gpu_utilization(void)
++static int gpu_utilization(void)
+ {
+-	struct gpu_sample sample = {-1, -1, -1};
+-	if (!gpu) return sample;
++	if (!gpu) return -1;
+ 	CFTypeRef stats = IORegistryEntryCreateCFProperty(gpu, CFSTR("PerformanceStatistics"), NULL, 0);
++	int result = -1;
+ 	if (stats && CFGetTypeID(stats) == CFDictionaryGetTypeID()) {
+-		sample.device = gpu_counter(stats, CFSTR("Device Utilization %"));
+-		sample.renderer = gpu_counter(stats, CFSTR("Renderer Utilization %"));
+-		sample.tiler = gpu_counter(stats, CFSTR("Tiler Utilization %"));
++		CFTypeRef value = CFDictionaryGetValue(stats, CFSTR("Device Utilization %"));
++		int percent;
++		if (value && CFGetTypeID(value) == CFNumberGetTypeID() &&
++			CFNumberGetValue(value, kCFNumberIntType, &percent) && percent >= 0 && percent <= 100)
++			result = percent;
+ 	}
+ 	if (stats) CFRelease(stats);
+-	return sample;
++	return result;
+ }
+ 
+ static NSString *thermal_state(void)
+@@ -182,6 +295,7 @@ static void refresh_overlay(void)
+ 	os_unfair_lock_lock(&frame_lock);
+ 	uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+ 	uint64_t presented = frames.presented;
++	uint64_t gpu_elapsed = now - frames.gpu_end < gpu_result_max_age ? frames.gpu_elapsed : 0;
+ 	if (now - frames.last_present < no_present_ns) {
+ 		for (size_t i = 0; i < frames.count; i++) {
+ 			size_t index = (frames.next + frame_capacity - 1 - i) % frame_capacity;
+@@ -208,7 +322,7 @@ static void refresh_overlay(void)
+ 		last_poll = now;
+ 		last_cpu_time = spent;
+ 		last_cpu_frames = presented;
+-		gpu_usage = gpu_utilization();
++		gpu_percent = gpu_utilization();
+ 	}
+ 
+ 	NSString *rate = @"Collecting frame timings…";
+@@ -226,13 +340,11 @@ static void refresh_overlay(void)
+ 	}
+ 	NSString *cpu = cpu_percent >= 0 && count ? [NSString stringWithFormat:@"CPU %3.0f%% · ≥%u cores · %.1f ms",
+ 		cpu_percent, cpu_min_cores, cpu_ms] : @"CPU          —";
+-	NSMutableString *device = [NSMutableString stringWithString:@"GPU sys "];
+-	if (gpu_usage.device >= 0) [device appendFormat:@"%d%%", gpu_usage.device];
+-	else [device appendString:@"—"];
+-	if (gpu_usage.renderer >= 0) [device appendFormat:@" · R %d%%", gpu_usage.renderer];
+-	if (gpu_usage.tiler >= 0) [device appendFormat:@" · T %d%%", gpu_usage.tiler];
+-	text.stringValue = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\nThermal      %@",
+-		rate, low, cpu, device, thermal_state()];
++	NSString *device = gpu_percent >= 0 ? [NSString stringWithFormat:@"%d%%", gpu_percent] : @"—";
++	NSString *gpu_time = gpu_elapsed && count ? [NSString stringWithFormat:@"%.1f ms",
++		(double)gpu_elapsed / NSEC_PER_MSEC] : @"— ms";
++	text.stringValue = [NSString stringWithFormat:@"%@\n%@\n%@\nGPU sys %@ · %@\nThermal      %@",
++		rate, low, cpu, device, gpu_time, thermal_state()];
+ }
+ 
+ static void hide_overlay(void)
+@@ -308,10 +420,13 @@ static void install_overlay_monitor(void)
+ 
+ CGLError dirt3_flush_drawable(CGLContextObj context)
+ {
++	finish_gpu_query(context, atomic_load_explicit(&recording, memory_order_relaxed));
+ 	CGLError result = CGLFlushDrawable(context);
+ 	if (result != kCGLNoError) return result;
+ 	if (atomic_load_explicit(&recording, memory_order_relaxed)) {
+-		record_present(context);
++		uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++		uint64_t generation = record_present(context, now);
++		if (generation && CGLGetCurrentContext() == context) sample_gpu_frame(context, generation, now);
+ 	} else if (!atomic_load_explicit(&monitor_installed, memory_order_relaxed) &&
+ 		dirt3_version_patch_active() &&
+ 		!atomic_exchange_explicit(&monitor_installed, true, memory_order_relaxed)) {
+diff --git a/src/gl_special.c b/src/gl_special.c
+index d8f5bb5..1bd4042 100644
+--- a/src/gl_special.c
++++ b/src/gl_special.c
+@@ -217,7 +217,23 @@ static void t_glGetBufferPointerv(uint32_t *args, struct hres *r)
+ 	*(g32 *)G2H(A(2)) = m && m->host ? m->shadow : 0;
+ }
+ 
++extern void dirt3_cancel_gpu_query(void);
++
++static void w_glBeginQuery(GLenum target, GLuint name)
++{
++	if (target == GL_TIME_ELAPSED_EXT) dirt3_cancel_gpu_query();
++	glBeginQuery(target, name);
++}
++
++static void w_glBeginQueryARB(GLenum target, GLuint name)
++{
++	if (target == GL_TIME_ELAPSED_EXT) dirt3_cancel_gpu_query();
++	glBeginQueryARB(target, name);
++}
++
+ static struct hfn gls[] = {
++	G("_glBeginQuery", w_glBeginQuery, "v:uu"),
++	G("_glBeginQueryARB", w_glBeginQueryARB, "v:uu"),
+ 	// GLU (still in OpenGL.framework): numbers and pointers to plain arrays
+ 	G("_gluBuild1DMipmaps", gluBuild1DMipmaps, "i:uiiuup"),
+ 	G("_gluBuild2DMipmaps", gluBuild2DMipmaps, "i:uiiiuup"),
+diff --git a/src/gl_thunks.c b/src/gl_thunks.c
+index ced06e1..9ead0d3 100644
+--- a/src/gl_thunks.c
++++ b/src/gl_thunks.c
+@@ -470,7 +470,6 @@ static struct hfn gl[] = {
+ 	G("_glGenQueries", NULL, "v:ip"),
+ 	G("_glDeleteQueries", NULL, "v:ip"),
+ 	G("_glIsQuery", NULL, "b:u"),
+-	G("_glBeginQuery", NULL, "v:uu"),
+ 	G("_glEndQuery", NULL, "v:u"),
+ 	G("_glGetQueryiv", NULL, "v:uup"),
+ 	G("_glGetQueryObjectiv", NULL, "v:uup"),
+@@ -644,7 +643,6 @@ static struct hfn gl[] = {
+ 	G("_glGenQueriesARB", NULL, "v:ip"),
+ 	G("_glDeleteQueriesARB", NULL, "v:ip"),
+ 	G("_glIsQueryARB", NULL, "b:u"),
+-	G("_glBeginQueryARB", NULL, "v:uu"),
+ 	G("_glEndQueryARB", NULL, "v:u"),
+ 	G("_glGetQueryivARB", NULL, "v:uup"),
+ 	G("_glGetQueryObjectivARB", NULL, "v:uup"),
+diff --git a/tools/gen_gl.py b/tools/gen_gl.py
+index 2a0b270..d5f2af1 100644
+--- a/tools/gen_gl.py
++++ b/tools/gen_gl.py
+@@ -24,7 +24,7 @@ SPECIAL = {'glMapBuffer', 'glMapBufferARB', 'glUnmapBuffer', 'glUnmapBufferARB',
+            'glMultiDrawElementsBaseVertex', 'glTransformFeedbackVaryings', 'glTransformFeedbackVaryingsEXT',
+            'glGetAttachedObjectsARB',
+            'glGetPointervEXT', 'glGetTexParameterPointervAPPLE', 'glGetVertexAttribPointervNV',
+-           'glDeleteBuffers', 'glDeleteBuffersARB'}
++           'glDeleteBuffers', 'glDeleteBuffersARB', 'glBeginQuery', 'glBeginQueryARB'}
+ 
+ def code(t, ret=False):
+     t = t.replace('const', '').strip()
