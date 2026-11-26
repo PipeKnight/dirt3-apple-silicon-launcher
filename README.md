@@ -81,6 +81,8 @@ python3 probe.py run --engine "$runtime" --benchmark --timeout 300
 
 The command uses the standalone copy in `/Applications` if present, then checks the default Steam library. Pass `--app "/path/to/DiRT 3 Complete Edition.app"` to choose a specific copy. The benchmark runs Aspen with eight cars and writes an XML report under `~/Library/Application Support/Feral Interactive/DiRT 3 Complete Edition/benchmarks/`. Use the graphics settings recorded in that file when comparing FPS. [Benchmark results](findings.md#frame-pacing-in-the-aspen-benchmark)
 
+See the [performance plan](PERFORMANCE.md) for the Apple M4 results and the tests planned for frame pacing, thread scheduling and alternate renderers.
+
 ## Build from source
 
 Run these commands from the repository root on an Apple silicon Mac with Xcode's command-line tools installed. The release was built with the macOS 26.2 SDK and a macOS 15 deployment target. The temporary build path keeps spaces out of the paths passed to the guest compiler.
