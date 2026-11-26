@@ -1,6 +1,6 @@
 # DiRT 3 Launcher for Apple Silicon
 
-Play **DiRT 3 Complete Edition** on Apple silicon with your existing 32-bit Mac copy. This independent, open-source launcher uses mac32 to run the game files from your installation. [mac32 compatibility runtime](https://github.com/Shagulka/mac32)
+Play **DiRT 3 Complete Edition** on Apple silicon with your existing 32-bit Mac copy. This independent, open-source launcher is a macOS compatibility layer for the original Intel Mac port. It uses mac32 dynamic recompilation to run the 32-bit game files from your installation. [mac32 compatibility runtime](https://github.com/Shagulka/mac32)
 
 Codemasters developed DiRT 3. Feral Interactive developed and published the Mac port. [Original Mac game credits](https://www.feralinteractive.com/en/readmes/dirt3/latest/steam/)
 
@@ -32,7 +32,7 @@ The GitHub download is ad-hoc signed. If macOS says it cannot verify the develop
 
 Change render resolution, VSync, multisampling (MSAA) and other graphics settings in **Options → Graphics Options** in the game. On Retina displays, the launcher includes compatible scaled modes and keeps the original 640 × 480 setting selectable. The game uses the desktop refresh rate. To change it, select a rate in **System Settings → Displays** before launching. [Feral's graphics guide](https://www.feralinteractive.com/en/readmes/dirt3/latest/steam/)
 
-Select **Run in a window** in the launcher before pressing **Play** to start in a regular macOS window. Clear it to start full screen. [Original Mac windowed-mode instructions](https://www.feralinteractive.com/en/faqs/dirt3/latest/steam/)
+Select **Run in a window** in the launcher before pressing **Play** to start in a regular macOS window. Clear it to start full screen. The macOS pointer remains movable while the game is focused. [Original Mac windowed-mode instructions](https://www.feralinteractive.com/en/faqs/dirt3/latest/steam/)
 
 If the steering wheel is static in cockpit view with the Low graphics preset, set **Options → Graphics Options → Detail → Distant Vehicles** to **Medium**. This setting also controls driver detail. [Original game discussion](https://steamcommunity.com/app/321040/discussions/1/611702631210247249/)
 
@@ -40,7 +40,11 @@ During play, press **F9** to toggle the performance overlay in the lower-left co
 
 **Skip startup videos** is on by default. Clear the checkbox in the launcher to play the opening videos.
 
-## DualSense
+## Gamepads
+
+Connect your gamepad over USB or Bluetooth. The launcher can use the macOS **Game Controller** extended profile for one modern gamepad at a time. This path provides sticks, buttons, D-pad and triggers where the controller exposes them. Press **Menu**, **Start** or **Options**, depending on the controller, at the title screen.
+
+### DualSense
 
 Connect a DualSense to your Mac over USB or Bluetooth before clicking **Play**. Press **Options** at the title screen. The launcher registers a controller profile for your installed game and routes the game's two vibration channels to the DualSense handle actuators. The Bluetooth input bridge handles one DualSense at a time.
 
@@ -88,6 +92,7 @@ git -C "$runtime" apply "$PWD/patches/mac32-feral-entrypoint.patch" \
   "$PWD/patches/mac32-startup-memory.patch" \
   "$PWD/patches/mac32-display-and-dualsense.patch" \
   "$PWD/patches/mac32-steam-cloud.patch"
+git -C "$runtime" apply "$PWD/patches/mac32-modern-gamepads.patch"
 LLVM="$llvm" "$runtime/tools/get-llvm.sh"
 
 sdk="$(xcrun --sdk macosx --show-sdk-path)"

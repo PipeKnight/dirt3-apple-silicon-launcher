@@ -24,6 +24,8 @@ GIT_CEILING_DIRECTORIES="$source" git -C "$source/mac32" apply \
     "$project/patches/mac32-startup-memory.patch" \
     "$project/patches/mac32-display-and-dualsense.patch" \
     "$project/patches/mac32-steam-cloud.patch"
+GIT_CEILING_DIRECTORIES="$source" git -C "$source/mac32" apply \
+    "$project/patches/mac32-modern-gamepads.patch"
 while IFS= read -r -d '' file; do
     cmp -s "$file" "$runtime/${file#"$source/mac32/"}" || {
         printf 'Runtime source differs from the release patches: %s\n' "${file#"$source/mac32/"}" >&2
@@ -52,7 +54,10 @@ cp "$project/launcher/Info.plist" "$app/Contents/Info.plist"
 cp "$runtime/Mac32.app/Contents/Info.plist" "$helper/Contents/Info.plist"
 # Keep the app identity used by the compatibility process and remove document
 # associations from the upstream general-purpose launcher.
-/usr/libexec/PlistBuddy -c 'Delete :CFBundleDocumentTypes' "$helper/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Delete :CFBundleDocumentTypes' \
+    -c 'Add :GCSupportedGameControllers array' \
+    -c 'Add :GCSupportedGameControllers:0 dict' \
+    -c 'Add :GCSupportedGameControllers:0:ProfileName string ExtendedGamepad' "$helper/Contents/Info.plist"
 cp "$runtime/mac32" "$helper/Contents/MacOS/mac32"
 for library in libmac32rt libmac32cxx libmac32cxx2 libmac32ios; do
     cp "$runtime/guest/$library.dylib" "$helper/Contents/MacOS/guest/"

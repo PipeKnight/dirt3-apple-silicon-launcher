@@ -1,0 +1,561 @@
+diff --git a/Makefile b/Makefile
+index 24d5453..c998dea 100644
+--- a/Makefile
++++ b/Makefile
+@@ -6,7 +6,7 @@ LDFLAGS = -arch x86_64 -lffi -lcurl -liconv -lz -framework Foundation -framework
+           -framework IOKit -framework GameController -framework CoreHaptics -framework OpenGL -framework OpenCL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
+           -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
+ SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c src/media_bridge.c \
+-      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/dirt3_window_mode.c src/dirt3_bluetooth_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/dirt3_adaptive_triggers.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
++      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/dirt3_gamepad.m src/dirt3_window_mode.c src/dirt3_bluetooth_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/dirt3_adaptive_triggers.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
+ OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
+ 
+ all: mac32 guest app
+diff --git a/src/apple.m b/src/apple.m
+index 61c03da..98ca959 100644
+--- a/src/apple.m
++++ b/src/apple.m
+@@ -69,7 +69,7 @@ static uint32_t w_GetCurrentEventButtonState(void)
+ 	}
+ 	return state;
+ }
+-static int w_CGWarpMouseCursorPosition(float x, float y) { return CGWarpMouseCursorPosition(CGPointMake(x, y)); }
++
+ static int32_t w_CFArrayGetCount(CFArrayRef a) { return (int32_t)CFArrayGetCount(a); }
+ static const void *w_CFArrayGetValueAtIndex(CFArrayRef a, int32_t i) { return CFArrayGetValueAtIndex(a, i); }
+ static int32_t w_CFDataGetLength(CFDataRef d) { return (int32_t)CFDataGetLength(d); }
+@@ -81,16 +81,24 @@ static int w_CGCursorIsVisible(void) { return CGCursorIsVisible() ? 1 : 0; }
+ static int w_CGDisplayIsActive(uint32_t d) { return CGDisplayIsActive(d) ? 1 : 0; }
+ 
+ extern int dirt3_version_patch_active(void);
+-extern bool dirt3_window_mode_keeps_cursor(void);
++CGError dirt3_hide_cursor(CGDirectDisplayID display)
++{
++    return dirt3_version_patch_active() ? kCGErrorSuccess : CGDisplayHideCursor(display);
++}
++
++CGError dirt3_show_cursor(CGDirectDisplayID display)
++{
++    return dirt3_version_patch_active() ? kCGErrorSuccess : CGDisplayShowCursor(display);
++}
++
++static int w_CGWarpMouseCursorPosition(float x, float y)
++{
++    return dirt3_version_patch_active() ? kCGErrorSuccess : CGWarpMouseCursorPosition(CGPointMake(x, y));
++}
+ 
+ static CGError w_CGAssociateMouseAndMouseCursorPosition(boolean_t connected)
+ {
+-    // Mission Control can open without deactivating the game's window.
+-    // Keep macOS pointer movement available during windowed play.
+-    if (!connected && dirt3_version_patch_active() && dirt3_window_mode_keeps_cursor()) {
+-        LOG("DiRT 3 windowed mode: kept the system cursor connected\n");
+-        return kCGErrorSuccess;
+-    }
++    if (!connected && dirt3_version_patch_active()) return kCGErrorSuccess;
+     return CGAssociateMouseAndMouseCursorPosition(connected);
+ }
+ 
+@@ -872,8 +880,8 @@ static struct hfn apple[] = {
+ 	G("_CGDisplayModeGetIODisplayModeID", w_CGDisplayModeGetIODisplayModeID, "u:o"),
+ 	G("_CGDisplayModeRelease", CFRelease, "v:o"),
+ 	G("_CGDisplayModeRetain", CFRetain, "o:o"),
+-	G("_CGDisplayHideCursor", CGDisplayHideCursor, "i:u"),
+-	G("_CGDisplayShowCursor", CGDisplayShowCursor, "i:u"),
++	G("_CGDisplayHideCursor", dirt3_hide_cursor, "i:u"),
++	G("_CGDisplayShowCursor", dirt3_show_cursor, "i:u"),
+ 	G("_CGCursorIsVisible", w_CGCursorIsVisible, "i:"),
+ 	G("_CGWarpMouseCursorPosition", w_CGWarpMouseCursorPosition, "i:ff"),
+ 	G("_CGAssociateMouseAndMouseCursorPosition", w_CGAssociateMouseAndMouseCursorPosition, "i:i"),
+diff --git a/src/apple2.m b/src/apple2.m
+index ac6a186..9d770d8 100644
+--- a/src/apple2.m
++++ b/src/apple2.m
+@@ -12,6 +12,7 @@
+ #include <mach/mach.h>
+ #include <stdatomic.h>
+ #include "thunks.h"
++#include "dirt3_gamepad.h"
+ 
+ #define U32(a) (*(uint32_t *)G2H(a))
+ static float F32(uint32_t w) { float f; memcpy(&f, &w, 4); return f; }
+@@ -204,9 +205,12 @@ static CFStringRef w_CGDisplayModeCopyPixelEncoding(CGDisplayModeRef m)
+ 	(void)m;
+ 	return CFStringCreateCopy(NULL, CFSTR(IO32BitDirectPixels));	// what every mode reported on 32-bit macOS
+ }
++extern int dirt3_version_patch_active(void);
++
+ static void t_CGDisplayMoveCursorToPoint(uint32_t *args, struct hres *r)
+ {
+-	RET(CGDisplayMoveCursorToPoint(A(0), CGPointMake(F32(A(1)), F32(A(2)))));
++	RET(dirt3_version_patch_active() ? kCGErrorSuccess :
++		CGDisplayMoveCursorToPoint(A(0), CGPointMake(F32(A(1)), F32(A(2)))));
+ }
+ static void t_CGDisplayScreenSize(uint32_t *args, struct hres *r)
+ {
+@@ -302,14 +306,17 @@ static void hid_input_callback(void *opaque, IOReturn result, void *sender, IOHI
+ 
+ static void w_IOHIDManagerRegisterDeviceMatchingCallback(IOHIDManagerRef manager, g32 function, g32 context)
+ {
+-	IOHIDManagerRegisterDeviceMatchingCallback(manager, function ? hid_device_callback : NULL,
+-		hid_refcon(function, context));
++	IOHIDDeviceCallback callback = function ? hid_device_callback : NULL;
++	void *refcon = hid_refcon(function, context);
++	IOHIDManagerRegisterDeviceMatchingCallback(manager, callback, refcon);
++	dirt3_gamepad_matching(manager, callback, refcon);
+ }
+ 
+ static void w_IOHIDManagerRegisterDeviceRemovalCallback(IOHIDManagerRef manager, g32 function, g32 context)
+ {
+-	IOHIDManagerRegisterDeviceRemovalCallback(manager, function ? hid_remove_callback : NULL,
+-		hid_refcon(function, context));
++	void *refcon = hid_refcon(function, context);
++	IOHIDManagerRegisterDeviceRemovalCallback(manager, function ? hid_remove_callback : NULL, refcon);
++	dirt3_gamepad_removal(manager, function ? hid_device_callback : NULL, refcon);
+ }
+ 
+ static void w_IOHIDManagerRegisterInputValueCallback(IOHIDManagerRef manager, g32 function, g32 context)
+@@ -317,6 +324,13 @@ static void w_IOHIDManagerRegisterInputValueCallback(IOHIDManagerRef manager, g3
+ 	void *refcon = function ? hid_refcon(function, context) : NULL;
+ 	IOHIDManagerRegisterInputValueCallback(manager, function ? hid_input_callback : NULL, refcon);
+ 	dirt3_bluetooth_register(manager, refcon);
++	dirt3_gamepad_input(manager, function ? hid_input_callback : NULL, refcon);
++}
++
++static IOReturn w_IOHIDManagerClose(IOHIDManagerRef manager, IOOptionBits options)
++{
++	dirt3_gamepad_close(manager);
++	return IOHIDManagerClose(manager, options);
+ }
+ 
+ static void t_nothing(uint32_t *args, struct hres *r) { (void)args; (void)r; }
+@@ -567,17 +581,17 @@ static struct hfn apple2_fns[] = {
+ 	G("_IOHIDManagerRegisterInputValueCallback", w_IOHIDManagerRegisterInputValueCallback, "v:ouu"),
+ 	G("_IOHIDManagerScheduleWithRunLoop", IOHIDManagerScheduleWithRunLoop, "v:ooo"),
+ 	G("_IOHIDManagerUnscheduleFromRunLoop", IOHIDManagerUnscheduleFromRunLoop, "v:ooo"),
+-	G("_IOHIDManagerOpen", IOHIDManagerOpen, "i:ou"), G("_IOHIDManagerClose", IOHIDManagerClose, "i:ou"),
++	G("_IOHIDManagerOpen", IOHIDManagerOpen, "i:ou"), G("_IOHIDManagerClose", w_IOHIDManagerClose, "i:ou"),
+ 	G("_IOHIDManagerCopyDevices", IOHIDManagerCopyDevices, "o:o"),
+-	G("_IOHIDDeviceGetProperty", IOHIDDeviceGetProperty, "o:oo"),
+-	G("_IOHIDDeviceUnscheduleFromRunLoop", IOHIDDeviceUnscheduleFromRunLoop, "v:ooo"),
+-	G("_IOHIDElementGetCookie", IOHIDElementGetCookie, "u:o"),
+-	G("_IOHIDElementGetDevice", IOHIDElementGetDevice, "o:o"),
+-	G("_IOHIDElementGetUsage", IOHIDElementGetUsage, "u:o"),
+-	G("_IOHIDElementGetUsagePage", IOHIDElementGetUsagePage, "u:o"),
+-	G("_IOHIDValueGetElement", IOHIDValueGetElement, "o:o"),
+-	G("_IOHIDValueGetIntegerValue", IOHIDValueGetIntegerValue, "i:o"),
+-	G("_IOHIDValueGetTimeStamp", IOHIDValueGetTimeStamp, "l:o"),
++	G("_IOHIDDeviceGetProperty", dirt3_gamepad_property, "o:oo"),
++	G("_IOHIDDeviceUnscheduleFromRunLoop", dirt3_gamepad_unschedule, "v:ooo"),
++	G("_IOHIDElementGetCookie", dirt3_gamepad_element_cookie, "u:o"),
++	G("_IOHIDElementGetDevice", dirt3_gamepad_element_device, "o:o"),
++	G("_IOHIDElementGetUsage", dirt3_gamepad_element_usage, "u:o"),
++	G("_IOHIDElementGetUsagePage", dirt3_gamepad_element_usage_page, "u:o"),
++	G("_IOHIDValueGetElement", dirt3_gamepad_value_element, "o:o"),
++	G("_IOHIDValueGetIntegerValue", dirt3_gamepad_value_integer, "i:o"),
++	G("_IOHIDValueGetTimeStamp", dirt3_gamepad_value_time, "l:o"),
+ 	R("_IOServiceAddMatchingNotification", t_IOServiceAddMatchingNotification),
+ 	// no notification ports: SDL's HID discovery then stays off (it also
+ 	// destroys a port twice when matching fails)
+diff --git a/src/dirt3_gamepad.h b/src/dirt3_gamepad.h
+new file mode 100644
+index 0000000..ba262ed
+--- /dev/null
++++ b/src/dirt3_gamepad.h
+@@ -0,0 +1,20 @@
++#pragma once
++#import <Foundation/Foundation.h>
++#import <IOKit/hid/IOHIDManager.h>
++
++#define DIRT3_GAMEPAD_VENDOR 0x4d33
++#define DIRT3_GAMEPAD_PRODUCT 1
++
++void dirt3_gamepad_matching(IOHIDManagerRef manager, IOHIDDeviceCallback callback, void *context);
++void dirt3_gamepad_removal(IOHIDManagerRef manager, IOHIDDeviceCallback callback, void *context);
++void dirt3_gamepad_input(IOHIDManagerRef manager, IOHIDValueCallback callback, void *context);
++void dirt3_gamepad_close(IOHIDManagerRef manager);
++CFTypeRef dirt3_gamepad_property(IOHIDDeviceRef device, CFStringRef key);
++void dirt3_gamepad_unschedule(IOHIDDeviceRef device, CFRunLoopRef loop, CFStringRef mode);
++IOHIDDeviceRef dirt3_gamepad_element_device(IOHIDElementRef element);
++IOHIDElementCookie dirt3_gamepad_element_cookie(IOHIDElementRef element);
++uint32_t dirt3_gamepad_element_usage(IOHIDElementRef element);
++uint32_t dirt3_gamepad_element_usage_page(IOHIDElementRef element);
++IOHIDElementRef dirt3_gamepad_value_element(IOHIDValueRef value);
++CFIndex dirt3_gamepad_value_integer(IOHIDValueRef value);
++uint64_t dirt3_gamepad_value_time(IOHIDValueRef value);
+diff --git a/src/dirt3_gamepad.m b/src/dirt3_gamepad.m
+new file mode 100644
+index 0000000..89a9680
+--- /dev/null
++++ b/src/dirt3_gamepad.m
+@@ -0,0 +1,240 @@
++// Expose one modern controller to DiRT 3's original input backend. The
++// synthetic device and HID values exist only inside the guest's callbacks.
++#import <AppKit/AppKit.h>
++#import <GameController/GameController.h>
++#import <mach/mach_time.h>
++#include <math.h>
++#include "dirt3_gamepad.h"
++#include "mac32.h"
++
++extern int dirt3_version_patch_active(void);
++
++enum {
++    button_x, button_a, button_b, button_y, left_shoulder, right_shoulder,
++    back, start, left_thumb, right_thumb,
++    left_x, left_y, right_x, right_y, left_trigger, right_trigger, hat,
++    control_count
++};
++static const uint8_t usages[] = {1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 48, 49, 50, 53, 51, 52, 57};
++
++static struct {
++    IOHIDManagerRef manager;
++    IOHIDDeviceCallback matching, removal;
++    IOHIDValueCallback input;
++    void *matching_context, *removal_context, *input_context;
++    NSTimer *timer;
++    GCController *controller;
++    int previous[control_count];
++    bool initialized;
++} bridge;
++
++// Stable, opaque handles for the guest. Never pass these to host IOKit.
++#define DEVICE ((IOHIDDeviceRef)CFSTR("mac32 DiRT 3 gamepad device"))
++#define VALUE ((IOHIDValueRef)CFSTR("mac32 DiRT 3 gamepad value"))
++static const CFStringRef element_tokens[control_count] = {
++    CFSTR("mac32 pad X"), CFSTR("mac32 pad A"), CFSTR("mac32 pad B"), CFSTR("mac32 pad Y"),
++    CFSTR("mac32 pad LB"), CFSTR("mac32 pad RB"), CFSTR("mac32 pad Back"), CFSTR("mac32 pad Start"),
++    CFSTR("mac32 pad L3"), CFSTR("mac32 pad R3"), CFSTR("mac32 pad LX"), CFSTR("mac32 pad LY"),
++    CFSTR("mac32 pad RX"), CFSTR("mac32 pad RY"), CFSTR("mac32 pad LT"), CFSTR("mac32 pad RT"),
++    CFSTR("mac32 pad D-pad"),
++};
++
++static _Thread_local struct {
++    IOHIDElementRef element;
++    int value;
++    uint64_t time;
++} sample;
++
++static int element_index(IOHIDElementRef element)
++{
++    if (element) {
++        for (int index = 0; index < control_count; ++index)
++            if ((CFTypeRef)element == element_tokens[index]) return index;
++    }
++    return -1;
++}
++
++CFTypeRef dirt3_gamepad_property(IOHIDDeviceRef device, CFStringRef key)
++{
++    if (device != DEVICE) return IOHIDDeviceGetProperty(device, key);
++    static NSDictionary *properties;
++    static dispatch_once_t once;
++    dispatch_once(&once, ^{
++        properties = [@{@kIOHIDVendorIDKey: @(DIRT3_GAMEPAD_VENDOR),
++            @kIOHIDProductIDKey: @(DIRT3_GAMEPAD_PRODUCT), @kIOHIDPrimaryUsagePageKey: @1,
++            @kIOHIDPrimaryUsageKey: @5, @kIOHIDProductKey: @"Modern Gamepad",
++            @kIOHIDTransportKey: @"Virtual"} retain];
++    });
++    return (CFTypeRef)properties[(NSString *)key];
++}
++
++void dirt3_gamepad_unschedule(IOHIDDeviceRef device, CFRunLoopRef loop, CFStringRef mode)
++{
++    if (device != DEVICE) IOHIDDeviceUnscheduleFromRunLoop(device, loop, mode);
++}
++
++IOHIDDeviceRef dirt3_gamepad_element_device(IOHIDElementRef element)
++{
++    return element_index(element) >= 0 ? DEVICE : IOHIDElementGetDevice(element);
++}
++
++IOHIDElementCookie dirt3_gamepad_element_cookie(IOHIDElementRef element)
++{
++    int index = element_index(element);
++    return index >= 0 ? (IOHIDElementCookie)(index + 1) : IOHIDElementGetCookie(element);
++}
++
++uint32_t dirt3_gamepad_element_usage(IOHIDElementRef element)
++{
++    int index = element_index(element);
++    return index >= 0 ? usages[index] : IOHIDElementGetUsage(element);
++}
++
++uint32_t dirt3_gamepad_element_usage_page(IOHIDElementRef element)
++{
++    int index = element_index(element);
++    return index >= 0 ? (index < left_x ? 9 : 1) : IOHIDElementGetUsagePage(element);
++}
++
++IOHIDElementRef dirt3_gamepad_value_element(IOHIDValueRef value)
++{
++    return value == VALUE ? sample.element : IOHIDValueGetElement(value);
++}
++
++CFIndex dirt3_gamepad_value_integer(IOHIDValueRef value)
++{
++    return value == VALUE ? sample.value : IOHIDValueGetIntegerValue(value);
++}
++
++uint64_t dirt3_gamepad_value_time(IOHIDValueRef value)
++{
++    return value == VALUE ? sample.time : IOHIDValueGetTimeStamp(value);
++}
++
++static int stick(float value) { return (int)lroundf((value + 1.f) * 127.5f); }
++static int trigger(float value) { return (int)lroundf(value * 255.f); }
++
++static void read_gamepad(GCExtendedGamepad *pad, int current[control_count])
++{
++    current[left_x] = stick(0);
++    current[left_y] = stick(0);
++    current[right_x] = stick(0);
++    current[right_y] = stick(0);
++    current[hat] = 8;
++    if (!pad) return;
++
++    current[button_a] = pad.buttonA.isPressed;
++    current[button_b] = pad.buttonB.isPressed;
++    current[button_x] = pad.buttonX.isPressed;
++    current[button_y] = pad.buttonY.isPressed;
++    current[left_shoulder] = pad.leftShoulder.isPressed;
++    current[right_shoulder] = pad.rightShoulder.isPressed;
++    current[back] = pad.buttonOptions.isPressed;
++    current[start] = pad.buttonMenu.isPressed;
++    current[left_thumb] = pad.leftThumbstickButton.isPressed;
++    current[right_thumb] = pad.rightThumbstickButton.isPressed;
++    current[left_x] = stick(pad.leftThumbstick.xAxis.value);
++    current[left_y] = stick(-pad.leftThumbstick.yAxis.value);
++    current[right_x] = stick(pad.rightThumbstick.xAxis.value);
++    current[right_y] = stick(-pad.rightThumbstick.yAxis.value);
++    current[left_trigger] = trigger(pad.leftTrigger.value);
++    current[right_trigger] = trigger(pad.rightTrigger.value);
++    static const int hats[3][3] = {{5, 4, 3}, {6, 8, 2}, {7, 0, 1}};
++    int x = pad.dpad.right.isPressed - pad.dpad.left.isPressed;
++    int y = pad.dpad.up.isPressed - pad.dpad.down.isPressed;
++    current[hat] = hats[y + 1][x + 1];
++}
++
++static void deliver_input(GCExtendedGamepad *pad)
++{
++    if (!bridge.input) return;
++    int current[control_count] = {0};
++    read_gamepad(pad, current);
++    uint64_t now = mach_absolute_time();
++    for (int i = 0; i < control_count && bridge.input; ++i) {
++        if (bridge.initialized && current[i] == bridge.previous[i]) continue;
++        sample.element = (IOHIDElementRef)element_tokens[i];
++        sample.value = current[i];
++        sample.time = now;
++        bridge.input(bridge.input_context, kIOReturnSuccess, DEVICE, VALUE);
++    }
++    memcpy(bridge.previous, current, sizeof(current));
++    bridge.initialized = true;
++}
++
++static bool uses_native_dualsense(GCController *controller)
++{
++    // The standard DualSense has its own USB and Bluetooth input, rumble and
++    // adaptive-trigger bridge. Other Sony models can use the common profile.
++    return [controller.extendedGamepad isKindOfClass:[GCDualSenseGamepad class]] &&
++        ![controller.vendorName localizedCaseInsensitiveContainsString:@"Edge"];
++}
++
++static void update_gamepad(void)
++{
++    if (!bridge.matching || !bridge.input) return;
++    NSArray<GCController *> *controllers = GCController.controllers;
++    if (bridge.controller && ![controllers containsObject:bridge.controller]) {
++        deliver_input(nil);
++        if (bridge.removal) bridge.removal(bridge.removal_context, kIOReturnSuccess, bridge.manager, DEVICE);
++        [bridge.controller release];
++        bridge.controller = nil;
++    }
++    if (!bridge.controller) {
++        for (GCController *candidate in controllers) {
++            if (!candidate.extendedGamepad || uses_native_dualsense(candidate)) continue;
++            bridge.controller = [candidate retain];
++            bridge.initialized = false;
++            bridge.matching(bridge.matching_context, kIOReturnSuccess, bridge.manager, DEVICE);
++            LOG("DiRT 3 gamepad: %s through macOS Game Controller\n", candidate.vendorName.UTF8String ?: "Gamepad");
++            break;
++        }
++    }
++    if (bridge.controller) deliver_input(NSApp.isActive ? bridge.controller.extendedGamepad : nil);
++}
++
++// Both Feral's HID manager and AppKit's controller backend run on the main
++// run loop. Keep guest callbacks there and also detect unplug/reconnect.
++static bool use_bridge(IOHIDManagerRef manager)
++{
++    return [NSThread isMainThread] && dirt3_version_patch_active() &&
++        (!bridge.manager || bridge.manager == manager);
++}
++
++void dirt3_gamepad_matching(IOHIDManagerRef manager, IOHIDDeviceCallback callback, void *context)
++{
++    if (!use_bridge(manager)) return;
++    bridge.manager = manager;
++    bridge.matching = callback;
++    bridge.matching_context = context;
++}
++
++void dirt3_gamepad_removal(IOHIDManagerRef manager, IOHIDDeviceCallback callback, void *context)
++{
++    if (!use_bridge(manager)) return;
++    bridge.manager = manager;
++    bridge.removal = callback;
++    bridge.removal_context = context;
++}
++
++void dirt3_gamepad_input(IOHIDManagerRef manager, IOHIDValueCallback callback, void *context)
++{
++    if (!use_bridge(manager)) return;
++    bridge.manager = manager;
++    bridge.input = callback;
++    bridge.input_context = context;
++    if (!bridge.timer && callback) {
++        bridge.timer = [NSTimer timerWithTimeInterval:1.0 / 120.0 repeats:YES block:^(NSTimer *timer) {
++            update_gamepad();
++        }];
++        [[NSRunLoop mainRunLoop] addTimer:bridge.timer forMode:NSRunLoopCommonModes];
++    }
++}
++
++void dirt3_gamepad_close(IOHIDManagerRef manager)
++{
++    if (bridge.manager != manager) return;
++    [bridge.timer invalidate];
++    [bridge.controller release];
++    memset(&bridge, 0, sizeof bridge);
++}
+diff --git a/src/dirt3_input.m b/src/dirt3_input.m
+index 7149d5b..1ba51b2 100644
+--- a/src/dirt3_input.m
++++ b/src/dirt3_input.m
+@@ -1,5 +1,6 @@
+ #import <Foundation/Foundation.h>
+ #include "thunks.h"
++#include "dirt3_gamepad.h"
+ 
+ extern void *guest_main_cfbundle(void);
+ 
+@@ -7,9 +8,9 @@ static NSURL *input_workspace;
+ static const int sony_vendor_id = 0x054c;
+ static const int dualsense_product_id = 0x0ce6;
+ 
+-static BOOL is_sony_profile(NSDictionary *profile, int product_id)
++static BOOL matches_profile(NSDictionary *profile, int vendor_id, int product_id)
+ {
+-	return [profile[@"VendorID"] isEqual:@(sony_vendor_id)] &&
++	return [profile[@"VendorID"] isEqual:@(vendor_id)] &&
+ 		[profile[@"ProductID"] isEqual:@(product_id)];
+ }
+ 
+@@ -48,21 +49,24 @@ static BOOL stage_input_directory(NSURL *original, NSURL *staged, NSFileManager
+ 	return YES;
+ }
+ 
+-static NSURL *copy_input_directory_with_dualsense(NSURL *original)
++static NSURL *copy_input_directory_with_gamepads(NSURL *original)
+ {
+ 	NSFileManager *files = [NSFileManager defaultManager];
+ 	NSMutableDictionary *profile = [NSMutableDictionary dictionaryWithContentsOfURL:
+ 		[original URLByAppendingPathComponent:@"AnalogTriggers/PS4Dualshock.plist"]];
+-	if (!is_sony_profile(profile, 0x05c4))
++	if (!matches_profile(profile, sony_vendor_id, 0x05c4))
+ 		return nil;
+ 
+-	// Keep a caller's own controller profiles authoritative, regardless of filename.
++	// Keep user-supplied profiles authoritative regardless of filename.
++	BOOL add_dualsense = YES, add_gamepad = YES;
+ 	for (NSURL *entry in [files enumeratorAtURL:original includingPropertiesForKeys:nil
+ 		options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil]) {
+-		if ([entry.pathExtension isEqualToString:@"plist"] &&
+-			is_sony_profile([NSDictionary dictionaryWithContentsOfURL:entry], dualsense_product_id))
+-			return nil;
++		if (![entry.pathExtension isEqualToString:@"plist"]) continue;
++		NSDictionary *existing = [NSDictionary dictionaryWithContentsOfURL:entry];
++		if (matches_profile(existing, sony_vendor_id, dualsense_product_id)) add_dualsense = NO;
++		if (matches_profile(existing, DIRT3_GAMEPAD_VENDOR, DIRT3_GAMEPAD_PRODUCT)) add_gamepad = NO;
+ 	}
++	if (!add_dualsense && !add_gamepad) return nil;
+ 
+ 	NSString *template = [NSTemporaryDirectory() stringByAppendingPathComponent:@"mac32-dirt3-input.XXXXXX"];
+ 	char *path = strdup(template.fileSystemRepresentation);
+@@ -78,19 +82,26 @@ static NSURL *copy_input_directory_with_dualsense(NSURL *original)
+ 	// The game enumerates the controller directory by path. Stage only that
+ 	// resource instead of changing the installed bundle or copying the game.
+ 	NSURL *staged = [workspace URLByAppendingPathComponent:@"InputDevices" isDirectory:YES];
++	profile[@"ButtonBack"] = @"9:9";
+ 	profile[@"ProductID"] = @(dualsense_product_id);
+ 	profile[@"CGPDisplayNameOvr"] = @"DualSense";
+-	profile[@"ButtonBack"] = @"9:9";
+-	NSURL *destination = [staged URLByAppendingPathComponent:@"AnalogTriggers/DualSense.plist"];
+-	if (!stage_input_directory(original, staged, files) ||
+-		![profile writeToURL:destination atomically:YES] ||
+-		atexit(remove_input_workspace) != 0) {
++	BOOL copied = stage_input_directory(original, staged, files);
++	if (copied && add_dualsense)
++		copied = [profile writeToURL:[staged URLByAppendingPathComponent:@"AnalogTriggers/DualSense.plist"] atomically:YES];
++	if (copied && add_gamepad) {
++		profile[@"VendorID"] = @(DIRT3_GAMEPAD_VENDOR);
++		profile[@"ProductID"] = @(DIRT3_GAMEPAD_PRODUCT);
++		profile[@"CGPDisplayNameOvr"] = @"Modern Gamepad";
++		copied = [profile writeToURL:[staged URLByAppendingPathComponent:@"AnalogTriggers/ModernGamepad.plist"] atomically:YES];
++	}
++	if (!copied || atexit(remove_input_workspace) != 0) {
+ 		[files removeItemAtURL:workspace error:NULL];
+ 		return nil;
+ 	}
+ 
+ 	input_workspace = [workspace retain];
+-	LOG("DiRT 3: added the DualSense controller profile\n");
++	if (add_dualsense) LOG("DiRT 3: added the DualSense controller profile\n");
++	if (add_gamepad) LOG("DiRT 3: added the modern gamepad profile\n");
+ 	return [staged retain];
+ }
+ 
+@@ -111,7 +122,7 @@ CFURLRef w_CFBundleCopyResourceURL(CFBundleRef bundle, CFStringRef name, CFStrin
+ 	static NSURL *staged;
+ 	dispatch_once(&once, ^{
+ 		@autoreleasepool {
+-			staged = copy_input_directory_with_dualsense((__bridge NSURL *)original);
++			staged = copy_input_directory_with_gamepads((__bridge NSURL *)original);
+ 		}
+ 	});
+ 	if (!staged)
+diff --git a/src/dirt3_window_mode.c b/src/dirt3_window_mode.c
+index a7a60c7..4cdd412 100644
+--- a/src/dirt3_window_mode.c
++++ b/src/dirt3_window_mode.c
+@@ -17,11 +17,6 @@ void dirt3_window_mode_init(void)
+     if (!strcmp(mode, "fullscreen")) fullscreen = '1';
+ }
+ 
+-bool dirt3_window_mode_keeps_cursor(void)
+-{
+-    return fullscreen == '0';
+-}
+-
+ static bool is_preferences(const char *path)
+ {
+     static const char suffix[] = "/Feral Interactive/DiRT 3 Complete Edition/Preferences Data";
+diff --git a/src/libc3.c b/src/libc3.c
+index f21ae70..8afcad4 100644
+--- a/src/libc3.c
++++ b/src/libc3.c
+@@ -467,8 +467,11 @@ static void t_MPCreateCriticalRegion(uint32_t *args, struct hres *r)
+ static void t_MPDeleteCriticalRegion(uint32_t *args, struct hres *r) { pthread_mutex_destroy(hobj_unwrap(A(0))); RET(0); }
+ static void t_MPEnterCriticalRegion(uint32_t *args, struct hres *r) { pthread_mutex_lock(hobj_unwrap(A(0))); RET(0); }
+ static void t_MPExitCriticalRegion(uint32_t *args, struct hres *r) { pthread_mutex_unlock(hobj_unwrap(A(0))); RET(0); }
+-static void t_HideCursor(uint32_t *args, struct hres *r) { (void)args; (void)r; CGDisplayHideCursor(0); }
+-static void t_ShowCursor(uint32_t *args, struct hres *r) { (void)args; (void)r; CGDisplayShowCursor(0); }
++extern CGError dirt3_hide_cursor(CGDirectDisplayID display);
++extern CGError dirt3_show_cursor(CGDirectDisplayID display);
++
++static void t_HideCursor(uint32_t *args, struct hres *r) { (void)args; (void)r; dirt3_hide_cursor(0); }
++static void t_ShowCursor(uint32_t *args, struct hres *r) { (void)args; (void)r; dirt3_show_cursor(0); }
+ static void t_cfm_fail(uint32_t *args, struct hres *r) { (void)args; RET(-2804); }	// cfragNoLibraryErr
+ static void t_snd_fail(uint32_t *args, struct hres *r) { (void)args; RET(-201); }	// notEnoughHardwareErr
+ // Time Manager (Bink's timer). TMTask is 2-byte packed: qLink@0 qType@4
