@@ -70,6 +70,15 @@ The Steam depot installs the i386 Feral app (92701.18470.3) next to
   Changing an instruction in the version check made the runtime stop before
   guest initializers. The original executables are used in place.
 
+
+On the M4 with macOS 15.7.7, the packaged launcher found the default
+Steam installation and opened the game with Steam signed in. A temporary
+Player One profile reached Singleplayer → Time Trial. The Finland
+Tupasentie stage loaded after cancelling the ghost download, and the car
+accelerated to 52 mph with the keyboard before pausing. Autosave was
+disabled for this run. A separate built-in benchmark run stalled without
+writing results, so this play test provides no Steam FPS measurement.
+
 ## Startup through AppKit
 
 - The guest zone registry honors default-zone reordering and dispatches the
