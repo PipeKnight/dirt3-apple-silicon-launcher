@@ -44,7 +44,9 @@ During play, press **F9** to toggle the performance overlay in the lower-left co
 
 Connect a DualSense to your Mac over USB or Bluetooth before clicking **Play**. Press **Options** at the title screen. The launcher registers a controller profile for your installed game and routes the game's two vibration channels to the DualSense handle actuators. The Bluetooth input bridge handles one DualSense at a time.
 
-Enable **DualSense adaptive triggers** in the launcher to feel progressive braking resistance on L2 and a brief pulse on R2 when shifting between forward gears. This option uses the default D-Box setting in `hardware_settings_config.xml` and keeps the motion data inside the game process.
+Enable **DualSense adaptive triggers** in the launcher for progressive resistance on L2, with brief reductions when the front wheels show signs of locking under hard braking. R2 pulses briefly when shifting between forward gears and becomes firmer as the engine takes damage. This option uses the default D-Box setting in `hardware_settings_config.xml` and keeps the motion data inside the game process.
+
+During a terminal-damage slow-motion sequence, the handle actuators sustain a vibration that fades from the initial impact. It follows the game's vibration setting, including **Off**.
 
 ## Troubleshooting
 

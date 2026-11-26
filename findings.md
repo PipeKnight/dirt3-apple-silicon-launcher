@@ -163,6 +163,32 @@ while moving. Replay of synthetic motion packets verified upshifts,
 downshifts, a brief neutral transition, and no pulse on steady throttle,
 after a pause, or when selecting reverse.
 
+The motion serializer's caller selects the local driver's vehicle in both
+builds. It reads both virtual pedals and the current gear from that same
+vehicle. The engine-audio code reads engine damage as a normalized float
+at vehicle offset `0xb99c`. The runtime samples that value while the
+serializer runs. At the minor-damage indicator, resistance starts at
+minimum strength in the last two zones of R2 travel. Further damage
+expands the affected travel, and severe damage increases peak strength.
+
+Under hard braking, L2 pulses by one level when the front wheels
+slow substantially relative to the car and the car is decelerating.
+Its base resistance follows brake input with a 55 ms smoothing time
+constant. These inputs estimate braking slip. The motion packet has
+no ABS activation flag.
+
+The terminal-damage slowdown in the first diagnostic crash ran for about
+6.0 seconds at roughly one tenth of normal game time. The shipped game
+graphs use a flashback transition's slow-motion flags for the three
+terminal-damage transitions. The hook follows those states and their
+return to normal speed. The synthetic rumble uses the normalized Effects
+slider from the game's motor mixer and applies it only after the mixer
+sends a command to the DualSense proxy.
+
+In the Steam Bluetooth playtest, the player confirmed the new crash
+effect. The game Effects slider was 0.80. The hook logged an active
+period of 6.04 seconds and the handle feedback decayed over that window.
+
 ## Startup through AppKit
 
 - The guest zone registry honors default-zone reordering and dispatches the

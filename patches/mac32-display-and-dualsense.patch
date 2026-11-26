@@ -15,6 +15,191 @@ index aeabf91..24d5453 100644
  OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
  
  all: mac32 guest app
+diff --git a/patches/dirt3_2015_version.c b/patches/dirt3_2015_version.c
+index 6459de3..fce4e13 100644
+--- a/patches/dirt3_2015_version.c
++++ b/patches/dirt3_2015_version.c
+@@ -1,12 +1,16 @@
+ #include "../src/patches.h"
+ #include <CoreServices/CoreServices.h>
+ #include <mach-o/loader.h>
++#include <stdbool.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+ static int version_patch_active;
+ static _Thread_local int serializing_web_display;
+ static g32 parse_json, empty_array;
++static g32 serialize_motion;
++static g32 flash_enter, flash_exit, flash_tick;
++static g32 mix_rumble;
+ static g32 image_text_start;
+ static uint32_t image_text_size;
+ 
+@@ -33,6 +37,74 @@ static void parse_launcher_json(uint32_t *args, struct hres *r)
+ }
+ 
+ static struct hfn parse_json_thunk = R("DiRT 3 launcher JSON", parse_launcher_json);
++extern float dirt3_set_motion_engine_damage(float damage);
++
++static void serialize_motion_with_damage(uint32_t *args, struct hres *r)
++{
++	// The second argument is the same player vehicle the serializer uses
++	// for pedal and gear signals. The audio code reads engine damage here.
++	g32 vehicle = A(1);
++	float damage = 0;
++	if (vehicle >= LOW_START && vehicle <= LOW_END - 0xb99c - sizeof damage)
++		memcpy(&damage, G2H(vehicle + 0xb99c), sizeof damage);
++	float previous = dirt3_set_motion_engine_damage(damage);
++	RET(gcall(serialize_motion, 8, A(0), A(1), A(2), A(3), A(4), A(5), A(6), A(7)));
++	dirt3_set_motion_engine_damage(previous);
++}
++
++static struct hfn motion_thunk = R("DiRT 3 player motion with engine condition", serialize_motion_with_damage);
++extern void dirt3_terminal_slow_motion(bool active);
++extern float dirt3_set_game_rumble_gain(float gain);
++
++static void mix_rumble_with_gain(uint32_t *args, struct hres *r)
++{
++	// Scope the game's normalized Effects setting to its motor calls. Only
++	// the DualSense ForceFeedback proxy consumes it for the terminal effect.
++	float gain = -1;
++	memcpy(&gain, (const uint8_t *)G2H(A(0)) + 0x90, sizeof gain);
++	float previous = dirt3_set_game_rumble_gain(gain);
++	RET(gcall(mix_rumble, 2, A(0), A(1)));
++	dirt3_set_game_rumble_gain(previous);
++}
++
++static struct hfn rumble_mixer_thunk = R("DiRT 3 rumble mixer gain", mix_rumble_with_gain);
++
++static int terminal_flash(g32 state)
++{
++	// In both shipped state graphs, only the terminal crash transitions
++	// enable slowMo or rampSlowMo on StateFlashbackTransition.
++	const uint8_t *bytes = G2H(state);
++	return bytes[0xae] || bytes[0xaf];
++}
++
++static void terminal_flash_enter(uint32_t *args, struct hres *r)
++{
++	RET(gcall(flash_enter, 2, A(0), A(1)));
++	if (terminal_flash(A(0))) dirt3_terminal_slow_motion(true);
++}
++
++static void terminal_flash_exit(uint32_t *args, struct hres *r)
++{
++	int terminal = terminal_flash(A(0));
++	RET(gcall(flash_exit, 1, A(0)));
++	if (terminal) dirt3_terminal_slow_motion(false);
++}
++
++static void terminal_flash_tick(uint32_t *args, struct hres *r)
++{
++	RET(gcall(flash_tick, 3, A(0), A(1), A(2)));
++	if (terminal_flash(A(0))) {
++		const uint8_t *state = G2H(A(0));
++		float elapsed;
++		memcpy(&elapsed, state + 0x34, sizeof elapsed);
++		// The ramp restores normal speed when 0.1 + (2 * elapsed)^2 >= 1.
++		dirt3_terminal_slow_motion(!state[0xaf] || elapsed < 0.47434165f);
++	}
++}
++
++static struct hfn terminal_enter_thunk = R("DiRT 3 terminal slow-motion entry", terminal_flash_enter);
++static struct hfn terminal_exit_thunk = R("DiRT 3 terminal slow-motion exit", terminal_flash_exit);
++static struct hfn terminal_tick_thunk = R("DiRT 3 terminal slow-motion tick", terminal_flash_tick);
+ int dirt3_version_patch_active(void) { return version_patch_active; }
+ extern int macho_section(struct image *, const char *, const char *, g32 *, uint32_t *);
+ 
+@@ -46,7 +118,8 @@ struct signature {
+ 
+ struct profile {
+ 	const char *name;
+-	struct signature version, version_string, options, videos, json_call, json_parser, storage;
++	struct signature version, version_string, options, videos, json_call, json_parser, storage, motion, rumble;
++	struct { g32 table, enter, exit, tick; } flash;
+ };
+ 
+ // Match the complete instructions at each edit site and surrounding context.
+@@ -69,6 +142,12 @@ static const struct profile profiles[] = {
+ 			"\x55\x89\xe5\x83\xec\x18\xc7\x45\xfc\0\0\0\0\xc7\x45\xf8\0\0\0\0\x8b\x45\x08"),
+ 		.storage = SIG(0x839120, 0xb980,
+ 			"\x55\x89\xe5\x53\x57\x56\x83\xec\x0c\xe8\0\0\0\0\x5e\x8a\x86\x0a\x10\x2e\x01\x84\xc0\x75\x2e"),
++		.motion = SIG(0x4836be, 0xb980,
++			"\x8d\x4d\x88\x89\x4c\x24\x08\x8b\x8d\x64\xff\xff\xff\x89\x4c\x24\x04\x89\x04\x24\xe8\x69\x21\x89\x00"),
++		.flash = {0x1915678, 0x21bee0, 0x21c3a0, 0x21ca70},
++		.rumble = SIG(0xfbf037, 0xb980,
++			"\xf3\x0f\x10\x45\xc4\xf3\x0f\x11\x44\x24\x04\x89\x34\x24"
++			"\xe8\x96\x39\xbe\xff\x83\xc3\x0c\x83\xc7\xf4\x75\xbe\x8b\x45\xc0"),
+ 	},
+ 	{
+ 		.name = "Steam 1.0.3 (92701.18470.3)",
+@@ -90,6 +169,12 @@ static const struct profile profiles[] = {
+ 			"\x55\x89\xe5\x83\xec\x18\x8b\x45\x08\xc7\x45\xfc\0\0\0\0\xc7\x45\xf8\0\0\0\0"),
+ 		.storage = SIG(0x85c0f0, 0xba50,
+ 			"\x55\x89\xe5\x57\x56\x83\xec\x10\xe8\0\0\0\0\x5e\x8a\x86\x23\x77\x33\x01\x84\xc0\x75\x2e"),
++		.motion = SIG(0x49c9ef, 0xba50,
++			"\x8d\x4d\x88\x89\x4c\x24\x08\x8b\x8d\x64\xff\xff\xff\x89\x4c\x24\x04\x89\x04\x24\xe8\x98\xf8\x8b\x00"),
++		.flash = {0x198e898, 0x2245a0, 0x224a60, 0x225160},
++		.rumble = SIG(0x1015487, 0xba50,
++			"\xf3\x0f\x10\x45\xc0\xf3\x0f\x11\x44\x24\x04\x89\x34\x24"
++			"\xe8\x46\xfc\xbb\xff\x83\xc3\x0c\x83\xc7\xf4\x75\xbe\x8b\x45\xbc"),
+ 	},
+ };
+ 
+@@ -114,6 +199,29 @@ static void retarget_rel32(g32 call, struct hfn *thunk)
+ 
+ extern struct image *macho_dlopen(const char *path);
+ 
++static void patch_terminal_flash(struct image *image, const struct profile *profile)
++{
++	g32 constants;
++	uint32_t size;
++	if (!macho_section(image, "__DATA", "__const", &constants, &size)) return;
++	g32 slide = (g32)macho_image_slide(0);
++	g32 table = profile->flash.table + slide;
++	const unsigned enter = 0x10 / sizeof(g32), exit = 0x2c / sizeof(g32), tick = 0x38 / sizeof(g32);
++	const size_t checked_bytes = (tick + 1) * sizeof(g32);
++	if (table < constants || size < checked_bytes || table - constants > size - checked_bytes) return;
++	g32 *functions = G2H(table);
++	if (functions[enter] != profile->flash.enter + slide ||
++		functions[exit] != profile->flash.exit + slide ||
++		functions[tick] != profile->flash.tick + slide) return;
++	flash_enter = functions[enter];
++	flash_exit = functions[exit];
++	flash_tick = functions[tick];
++	functions[enter] = hfn_stub(&terminal_enter_thunk);
++	functions[exit] = hfn_stub(&terminal_exit_thunk);
++	functions[tick] = hfn_stub(&terminal_tick_thunk);
++	LOG("DiRT 3 terminal slow-motion transitions available\n");
++}
++
+ static int apply(struct image *image)
+ {
+ 	g32 text;
+@@ -172,6 +280,22 @@ static int apply(struct image *image)
+ 		memcpy(G2H(video_base + 14), &displacement, sizeof displacement);
+ 		fprintf(stderr, "[mac32] DiRT 3 startup video skip requested\n");
+ 	}
++	if (enabled("MAC32_DIRT3_ADAPTIVE_TRIGGERS") &&
++		profile->motion.length && matches(text, text_size, profile->motion)) {
++		g32 call = text + profile->motion.offset + 20;
++		int32_t relative;
++		memcpy(&relative, G2H(call + 1), sizeof relative);
++		serialize_motion = call + 5 + relative;
++		retarget_rel32(call, &motion_thunk);
++	}
++	if (profile->rumble.length && matches(text, text_size, profile->rumble)) {
++		g32 call = text + profile->rumble.offset + 14;
++		int32_t relative;
++		memcpy(&relative, G2H(call + 1), sizeof relative);
++		mix_rumble = call + 5 + relative;
++		retarget_rel32(call, &rumble_mixer_thunk);
++		patch_terminal_flash(image, profile);
++	}
+ 
+ 	// Keep absent WebView display text valid JSON and only borrow permanent
+ 	// string literals from the mapped __TEXT range.
 diff --git a/src/apple.m b/src/apple.m
 index e27be43..61c03da 100644
 --- a/src/apple.m
@@ -318,10 +503,10 @@ index 3121c2f..29bb503 100644
  	G("_CFBundleCopyResourceURLsOfType", CFBundleCopyResourceURLsOfType, "o:ooo"),
 diff --git a/src/dirt3_adaptive_triggers.m b/src/dirt3_adaptive_triggers.m
 new file mode 100644
-index 0000000..1f14052
+index 0000000..40a5a8d
 --- /dev/null
 +++ b/src/dirt3_adaptive_triggers.m
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,353 @@
 +// DiRT 3's extended motion report supplies the two virtual pedal signals.
 +// Route the built-in D-Box defaults to a private address inside this process.
 +#import <AppKit/AppKit.h>
@@ -356,15 +541,31 @@ index 0000000..1f14052
 +static float stage_time;
 +static double last_advance;
 +static unsigned brake_level;
++static float brake_force;
++static double brake_slip_since;
 +static int forward_gear;
 +static double forward_gear_at, shift_until;
++static _Thread_local float player_engine_damage;
++
++struct trigger_effect {
++    uint8_t level;
++    uint8_t start_zone;
++};
++static struct trigger_effect engine_effect;
 +
 +static IOHIDDeviceRef hid_pad;
 +static double hid_retry_at;
 +static bool bluetooth;
 +static uint8_t bluetooth_sequence;
-+static unsigned applied[2];
++static struct trigger_effect applied[2];
 +static bool trace;
++
++float dirt3_set_motion_engine_damage(float damage)
++{
++    float previous = player_engine_damage;
++    player_engine_damage = damage >= 0 && damage <= 1 ? damage : 0;
++    return previous;
++}
 +
 +void dirt3_adaptive_triggers_init(void)
 +{
@@ -455,15 +656,16 @@ index 0000000..1f14052
 +    return device;
 +}
 +
-+static void encode_trigger(uint8_t *effect, unsigned level)
++static void encode_trigger(uint8_t *effect, struct trigger_effect setting)
 +{
++    unsigned level = setting.level;
 +    effect[0] = level ? 0x21 : 0x05; // zoned resistance or off
 +    if (!level) return;
 +
 +    uint16_t mask = 0;
 +    uint32_t strengths = 0;
-+    for (unsigned zone = 4; zone <= 9; ++zone) {
-+        unsigned force = 1 + (level - 1) * (zone - 4) / 5;
++    for (unsigned zone = setting.start_zone; zone <= 9; ++zone) {
++        unsigned force = 1 + (level - 1) * (zone - setting.start_zone) / (9 - setting.start_zone);
 +        mask |= 1u << zone;
 +        strengths |= (force - 1) << (3 * zone);
 +    }
@@ -473,14 +675,14 @@ index 0000000..1f14052
 +        effect[3 + byte] = (uint8_t)(strengths >> (8 * byte));
 +}
 +
-+static bool send_triggers(unsigned left, unsigned right)
++static bool send_triggers(const struct trigger_effect effects[2])
 +{
 +    // Both framing formats share the effect banks. Only the two trigger
 +    // validity flags are set, leaving rumble, audio and LEDs alone.
 +    uint8_t report[78] = {0}, *payload = report + (bluetooth ? 3 : 1);
 +    payload[0] = 0x0c;
-+    encode_trigger(payload + 10, right);
-+    encode_trigger(payload + 21, left);
++    encode_trigger(payload + 10, effects[1]);
++    encode_trigger(payload + 21, effects[0]);
 +    size_t length = 48;
 +    report[0] = 0x02;
 +    if (bluetooth) {
@@ -496,7 +698,7 @@ index 0000000..1f14052
 +    IOReturn result = IOHIDDeviceSetReport(hid_pad, kIOHIDReportTypeOutput, report[0], report, length);
 +    const char *link = bluetooth ? "Bluetooth" : "USB";
 +    if (trace && result == kIOReturnSuccess)
-+        LOG("DiRT 3 adaptive triggers: L2=%u R2=%u (%s)\n", left, right, link);
++        LOG("DiRT 3 adaptive triggers: L2=%u R2=%u (%s)\n", effects[0].level, effects[1].level, link);
 +    else if (result != kIOReturnSuccess)
 +        LOG("DiRT 3 adaptive triggers: %s report failed (%#x)\n", link, result);
 +    return result == kIOReturnSuccess;
@@ -505,33 +707,43 @@ index 0000000..1f14052
 +static void close_triggers(void)
 +{
 +    if (!hid_pad) return;
-+    if (applied[0] || applied[1]) send_triggers(0, 0);
++    struct trigger_effect off[2] = {0};
++    if (applied[0].level || applied[1].level) send_triggers(off);
 +    IOHIDDeviceClose(hid_pad, kIOHIDOptionsTypeNone);
 +    CFRelease(hid_pad);
 +    hid_pad = NULL;
-+    applied[0] = applied[1] = 0;
++    memset(applied, 0, sizeof(applied));
 +}
 +
 +static void update_triggers(void)
 +{
-+    unsigned next[2] = {0, 0};
++    struct trigger_effect next[2] = {0};
 +    double time = seconds();
 +    os_unfair_lock_lock(&motion_lock);
 +    if (time - last_advance < 0.25) {
-+        next[0] = brake_level;
-+        next[1] = time < shift_until ? 2 : 0;
++        if (brake_level) {
++            next[0] = (struct trigger_effect){.level = brake_level, .start_zone = 4};
++            if (brake_level > 1 && brake_slip_since &&
++                fmod(time - brake_slip_since, 0.16) >= 0.09)
++                next[0].level--;
++        }
++        next[1] = engine_effect;
++        if (time < shift_until) {
++            next[1].level = next[1].level ? next[1].level + 1 : 2;
++            next[1].start_zone = 4;
++        }
 +    }
 +    os_unfair_lock_unlock(&motion_lock);
 +    if (!NSApp.isActive) {
 +        close_triggers();
 +        return;
 +    }
-+    if (!hid_pad && (next[0] || next[1]) && time >= hid_retry_at) {
++    if (!hid_pad && (next[0].level || next[1].level) && time >= hid_retry_at) {
 +        hid_pad = open_dualsense();
 +        hid_retry_at = time + 1;
 +    }
-+    if (!hid_pad || (next[0] == applied[0] && next[1] == applied[1])) return;
-+    if (send_triggers(next[0], next[1])) memcpy(applied, next, sizeof(applied));
++    if (!hid_pad || !memcmp(next, applied, sizeof(applied))) return;
++    if (send_triggers(next)) memcpy(applied, next, sizeof(applied));
 +    else close_triggers();
 +}
 +
@@ -573,16 +785,19 @@ index 0000000..1f14052
 +    if (size != sizeof(data)) return true;
 +    memcpy(data, bytes, sizeof(data));
 +    float stage = data[0], speed = data[7], wheel_left = data[27], wheel_right = data[28];
-+    float brake = data[31], gear = data[33], rpm_tens = data[37];
++    float brake = data[31], gear = data[33], longitudinal_g = data[35];
 +    if (!isfinite(stage) || stage < 0 || !isfinite(speed) || speed < 0 ||
 +        !isfinite(wheel_left) || !isfinite(wheel_right) ||
-+        !(brake >= 0 && brake <= 1 && rpm_tens >= 0 && rpm_tens < 2200)) return true;
++        !(brake >= 0 && brake <= 1)) return true;
 +
 +    os_unfair_lock_lock(&motion_lock);
++    float step = fmaxf(0, fminf(stage - stage_time, 0.08f));
 +    if (stage > stage_time || stage_time - stage > 1.0f) {
 +        double now = seconds();
 +        if (now - last_advance >= 0.25 || stage < stage_time) {
 +            brake_level = 0;
++            brake_force = 0;
++            brake_slip_since = 0;
 +            forward_gear = 0;
 +            shift_until = 0;
 +        }
@@ -602,13 +817,40 @@ index 0000000..1f14052
 +        last_advance = now;
 +    }
 +    stage_time = stage;
-+    if (stage > 0 && rpm_tens > 40) {
++    // Use the actual engine damage, leaving a nearly undamaged throttle light.
++    struct trigger_effect previous_engine = engine_effect;
++    engine_effect = (struct trigger_effect){0};
++    if (stage > 0 && player_engine_damage >= 0.15f) {
++        // At low damage, expose only the last two zones at minimum force.
++        // Grow the affected travel before increasing peak motor force.
++        unsigned reach = (unsigned)roundf(4.f * (player_engine_damage - 0.15f) / 0.85f);
++        engine_effect = (struct trigger_effect){
++            .level = 1 + (player_engine_damage >= 0.50f) + (player_engine_damage >= 0.75f),
++            .start_zone = 8 - reach,
++        };
++    }
++    if (trace && memcmp(&engine_effect, &previous_engine, sizeof(engine_effect)))
++        LOG("DiRT 3 adaptive triggers: engine damage %.3f, throttle force %u from zone %u\n",
++            player_engine_damage, engine_effect.level, engine_effect.start_zone);
++    if (stage > 0) {
 +        float wheels = (fabsf(wheel_left) + fabsf(wheel_right)) * 0.5f;
 +        float braking = speed > 3 ? clamp_unit((brake - 0.20f) / 0.80f) : 0;
 +        float slip = speed > 3 ? clamp_unit((speed - wheels) / speed) : 0;
-+        brake_level = resistance_level(braking * (2.0f + slip), brake_level);
++        float target_force = braking * (2.0f + slip);
++        if (target_force == 0) brake_force = 0;
++        else brake_force += (target_force - brake_force) * -expm1f(-step / 0.055f);
++        brake_level = resistance_level(brake_force, brake_level);
++        // The motion stream has wheel speeds and acceleration. Use both to
++        // estimate braking slip without assuming the game's ABS is active.
++        bool slipping = speed > 5 && brake >= 0.55f &&
++            longitudinal_g <= -0.20f && longitudinal_g > -3.0f &&
++            slip >= (brake_slip_since ? 0.09f : 0.16f);
++        if (!slipping) brake_slip_since = 0;
++        else if (!brake_slip_since) brake_slip_since = last_advance;
 +    } else {
 +        brake_level = 0;
++        brake_force = 0;
++        brake_slip_since = 0;
 +    }
 +    os_unfair_lock_unlock(&motion_lock);
 +    if (trace) {
@@ -739,10 +981,10 @@ index 0000000..dd6d979
 +}
 diff --git a/src/dirt3_force_feedback.m b/src/dirt3_force_feedback.m
 new file mode 100644
-index 0000000..868a64b
+index 0000000..71618bb
 --- /dev/null
 +++ b/src/dirt3_force_feedback.m
-@@ -0,0 +1,547 @@
+@@ -0,0 +1,596 @@
 +// The i386 game sends two motor strengths through the old ForceFeedback API.
 +// Translate only its DualSense gamepad path, keeping the controller's input
 +// connection and any other legacy devices independent of this bridge.
@@ -765,10 +1007,13 @@ index 0000000..868a64b
 +static os_unfair_lock state_lock = OS_UNFAIR_LOCK_INIT;
 +static g32 next_handle = 1;
 +static bool trace_enabled, trace_only;
++static _Thread_local float game_rumble_gain = -1;
++static double terminal_since, terminal_until;
 +
 +struct device {
 +    g32 handle;
 +    float gain, escape[2];
++    float game_rumble_gain;
 +    double escape_end;
 +};
 +
@@ -830,6 +1075,31 @@ index 0000000..868a64b
 +    return (double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
 +}
 +
++float dirt3_set_game_rumble_gain(float gain)
++{
++    float previous = game_rumble_gain;
++    game_rumble_gain = gain >= 0 && gain <= 1 ? gain : -1;
++    return previous;
++}
++
++void dirt3_terminal_slow_motion(bool active)
++{
++    double time = now();
++    os_unfair_lock_lock(&state_lock);
++    if (active) {
++        if (time >= terminal_until) {
++            terminal_since = time;
++            if (trace_enabled) LOG("DualSense terminal slow motion: started\n");
++        }
++        // Only the live slow-motion state renews the effect.
++        terminal_until = time + 0.25;
++    } else if (terminal_until > time) {
++        // Adjacent slow-motion states can exit and enter within one frame.
++        terminal_until = fmin(terminal_until, time + 0.045);
++    }
++    os_unfair_lock_unlock(&state_lock);
++}
++
 +static float normalize(uint32_t value)
 +{
 +    return fminf(value, FF_FFNOMINALMAX) / FF_FFNOMINALMAX;
@@ -847,6 +1117,13 @@ index 0000000..868a64b
 +    for (size_t i = 0; handle && i < max_effects; ++i)
 +        if (effects[i].handle == handle) return &effects[i];
 +    return NULL;
++}
++
++static void capture_game_rumble_gain(struct device *device)
++{
++    if (!device || game_rumble_gain < 0 || device->game_rumble_gain == game_rumble_gain) return;
++    device->game_rumble_gain = game_rumble_gain;
++    if (trace_enabled) LOG("DualSense force feedback: game effects gain %.2f\n", game_rumble_gain);
 +}
 +
 +static void bind_cached_motors(void)
@@ -966,12 +1243,14 @@ index 0000000..868a64b
 +    @autoreleasepool {
 +        double time = now();
 +        float strength[2] = {0, 0};
++        float terminal_gain = 0;
 +        bool has_device = false;
 +        os_unfair_lock_lock(&state_lock);
 +        for (size_t i = 0; i < max_devices; ++i) {
 +            struct device *device = &devices[i];
 +            if (!device->handle) continue;
 +            has_device = true;
++            terminal_gain = fmaxf(terminal_gain, device->game_rumble_gain * device->gain);
 +            if (device->escape_end > time)
 +                for (size_t channel = 0; channel < 2; ++channel)
 +                    strength[channel] = fmaxf(strength[channel], device->escape[channel] * device->gain);
@@ -981,6 +1260,16 @@ index 0000000..868a64b
 +            struct device *device = effect->end > time ? find_device(effect->owner) : NULL;
 +            if (device)
 +                strength[effect->channel] = fmaxf(strength[effect->channel], effect->strength * effect->gain * device->gain);
++        }
++        if (has_device && time < terminal_until) {
++            float elapsed = (float)fmax(0, time - terminal_since);
++            float shake = (0.21f + 0.61f * expf(-2.7f * elapsed)) * terminal_gain;
++            strength[0] = fmaxf(strength[0], shake);
++            strength[1] = fmaxf(strength[1], shake * 0.88f);
++        } else if (terminal_since && time >= terminal_until) {
++            if (trace_enabled) LOG("DualSense terminal slow motion: ended after %.2f s\n",
++                terminal_until - terminal_since);
++            terminal_since = 0;
 +        }
 +        os_unfair_lock_unlock(&state_lock);
 +        if (!has_device) {
@@ -1163,6 +1452,7 @@ index 0000000..868a64b
 +    struct effect *effect = find_effect(A(0));
 +    bool valid = effect && effect->owner && (!(flags & FFEP_TYPESPECIFICPARAMS) || parse_periodic(definition, effect));
 +    if (valid) {
++        capture_game_rumble_gain(find_device(effect->owner));
 +        if (flags & FFEP_GAIN) effect->gain = normalize(definition->gain);
 +        if (flags & FFEP_DURATION) effect->duration = definition->duration;
 +        if (flags & FFEP_START) effect->end = playback_end(effect, 1);
@@ -1258,6 +1548,7 @@ index 0000000..868a64b
 +    os_unfair_lock_lock(&state_lock);
 +    struct device *device = find_device(A(0));
 +    if (device && motors_update) {
++        capture_game_rumble_gain(device);
 +        device->escape[0] = input[0] / 255.0f;
 +        device->escape[1] = input[1] / 255.0f;
 +        device->escape_end = now() + output_watchdog;
