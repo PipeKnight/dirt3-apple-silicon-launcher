@@ -20,7 +20,7 @@ index 98ca959..a6321a7 100644
  	G("_CGLGetShareGroup", CGLGetShareGroup, "o:o"),
  	G("_CGLDestroyPixelFormat", CGLDestroyPixelFormat, "i:o"),
 diff --git a/src/dirt3_overlay.m b/src/dirt3_overlay.m
-index a7d4b29..6e3f590 100644
+index 2c7dac4..7c761ea 100644
 --- a/src/dirt3_overlay.m
 +++ b/src/dirt3_overlay.m
 @@ -2,6 +2,7 @@
@@ -69,7 +69,7 @@ index a7d4b29..6e3f590 100644
  static NSTextField *text;
  static NSTimer *refresh_timer;
 @@ -39,7 +54,7 @@ static double cpu_percent, cpu_ms;
- static unsigned cpu_min_cores;
+ static unsigned cpu_cores;
  static struct { uint64_t end; unsigned cores; } cpu_history[cpu_history_capacity];
  static size_t next_cpu_sample;
 -static struct gpu_sample { int device, renderer, tiler; } gpu_usage;
@@ -219,7 +219,7 @@ index a7d4b29..6e3f590 100644
  }
  
  static int compare_slowest_first(const void *a, const void *b)
-@@ -114,28 +235,20 @@ static unsigned minimum_cpu_cores(uint64_t now, double busy_cores)
+@@ -111,28 +232,20 @@ static unsigned estimate_cpu_cores(uint64_t now, double busy_cores)
  	return cores;
  }
  
@@ -257,7 +257,7 @@ index a7d4b29..6e3f590 100644
  }
  
  static NSString *thermal_state(void)
-@@ -182,6 +295,7 @@ static void refresh_overlay(void)
+@@ -179,6 +292,7 @@ static void refresh_overlay(void)
  	os_unfair_lock_lock(&frame_lock);
  	uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
  	uint64_t presented = frames.presented;
@@ -265,7 +265,7 @@ index a7d4b29..6e3f590 100644
  	if (now - frames.last_present < no_present_ns) {
  		for (size_t i = 0; i < frames.count; i++) {
  			size_t index = (frames.next + frame_capacity - 1 - i) % frame_capacity;
-@@ -208,7 +322,7 @@ static void refresh_overlay(void)
+@@ -205,7 +319,7 @@ static void refresh_overlay(void)
  		last_poll = now;
  		last_cpu_time = spent;
  		last_cpu_frames = presented;
@@ -274,10 +274,10 @@ index a7d4b29..6e3f590 100644
  	}
  
  	NSString *rate = @"Collecting frame timings…";
-@@ -226,13 +340,11 @@ static void refresh_overlay(void)
+@@ -223,13 +337,11 @@ static void refresh_overlay(void)
  	}
- 	NSString *cpu = cpu_percent >= 0 && count ? [NSString stringWithFormat:@"CPU %3.0f%% · ≥%u cores · %.1f ms",
- 		cpu_percent, cpu_min_cores, cpu_ms] : @"CPU          —";
+ 	NSString *cpu = cpu_percent >= 0 && count ? [NSString stringWithFormat:@"CPU %3.0f%% · %u cores · %.1f ms",
+ 		cpu_percent, cpu_cores, cpu_ms] : @"CPU          —";
 -	NSMutableString *device = [NSMutableString stringWithString:@"GPU sys "];
 -	if (gpu_usage.device >= 0) [device appendFormat:@"%d%%", gpu_usage.device];
 -	else [device appendString:@"—"];
@@ -293,7 +293,7 @@ index a7d4b29..6e3f590 100644
  }
  
  static void hide_overlay(void)
-@@ -308,10 +420,13 @@ static void install_overlay_monitor(void)
+@@ -305,10 +417,13 @@ static void install_overlay_monitor(void)
  
  CGLError dirt3_flush_drawable(CGLContextObj context)
  {

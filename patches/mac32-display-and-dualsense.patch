@@ -1748,10 +1748,10 @@ index 0000000..7149d5b
 +}
 diff --git a/src/dirt3_overlay.m b/src/dirt3_overlay.m
 new file mode 100644
-index 0000000..a7d4b29
+index 0000000..2c7dac4
 --- /dev/null
 +++ b/src/dirt3_overlay.m
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,318 @@
 +#import <AppKit/AppKit.h>
 +#import <Carbon/Carbon.h>
 +#import <IOKit/IOKitLib.h>
@@ -1790,7 +1790,7 @@ index 0000000..a7d4b29
 +static io_service_t gpu;
 +static uint64_t last_poll, last_cpu_time, last_cpu_frames;
 +static double cpu_percent, cpu_ms;
-+static unsigned cpu_min_cores;
++static unsigned cpu_cores;
 +static struct { uint64_t end; unsigned cores; } cpu_history[cpu_history_capacity];
 +static size_t next_cpu_sample;
 +static struct gpu_sample { int device, renderer, tiler; } gpu_usage;
@@ -1850,14 +1850,11 @@ index 0000000..a7d4b29
 +		(uint64_t)(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) * NSEC_PER_USEC;
 +}
 +
-+static unsigned minimum_cpu_cores(uint64_t now, double busy_cores)
++static unsigned estimate_cpu_cores(uint64_t now, double busy_cores)
 +{
-+	// A second of CPU time per second of wall time is one fully busy core.
-+	// This only bounds the number of cores: the scheduler can move threads
-+	// between cores. Retain the busiest sample for the frame history window.
-+	// Ignore tiny overshoots at integer boundaries from sampling CPU and wall
-+	// time separately (10 ms CPU time per second of wall time).
-+	unsigned cores = MAX(1.0, ceil(busy_cores - 0.01));
++	// Cover the observed core-equivalent load in steps of two. Keep the
++	// highest estimate in the history window so the divisor stays stable.
++	unsigned cores = 2 * (unsigned)MAX(1.0, ceil(busy_cores / 2.0));
 +	cpu_history[next_cpu_sample].end = now;
 +	cpu_history[next_cpu_sample].cores = cores;
 +	next_cpu_sample = (next_cpu_sample + 1) % cpu_history_capacity;
@@ -1953,8 +1950,8 @@ index 0000000..a7d4b29
 +			elapsed <= history_ns && count && presented > last_cpu_frames) {
 +			uint64_t delta = spent - last_cpu_time;
 +			double busy_cores = (double)delta / elapsed;
-+			cpu_min_cores = minimum_cpu_cores(now, busy_cores);
-+			cpu_percent = MIN(100.0, 100.0 * busy_cores / cpu_min_cores);
++			cpu_cores = estimate_cpu_cores(now, busy_cores);
++			cpu_percent = MIN(100.0, 100.0 * busy_cores / cpu_cores);
 +			cpu_ms = (double)delta / (presented - last_cpu_frames) / NSEC_PER_MSEC;
 +		} else {
 +			cpu_percent = cpu_ms = -1;
@@ -1978,8 +1975,8 @@ index 0000000..a7d4b29
 +		for (size_t i = 0; i < slow_count; i++) slow_time += times[i];
 +		low = [NSString stringWithFormat:@"1%% low    %5.1f FPS", (double)NSEC_PER_SEC * slow_count / slow_time];
 +	}
-+	NSString *cpu = cpu_percent >= 0 && count ? [NSString stringWithFormat:@"CPU %3.0f%% · ≥%u cores · %.1f ms",
-+		cpu_percent, cpu_min_cores, cpu_ms] : @"CPU          —";
++	NSString *cpu = cpu_percent >= 0 && count ? [NSString stringWithFormat:@"CPU %3.0f%% · %u cores · %.1f ms",
++		cpu_percent, cpu_cores, cpu_ms] : @"CPU          —";
 +	NSMutableString *device = [NSMutableString stringWithString:@"GPU sys "];
 +	if (gpu_usage.device >= 0) [device appendFormat:@"%d%%", gpu_usage.device];
 +	else [device appendString:@"—"];
