@@ -62,6 +62,9 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         title.font = .systemFont(ofSize: 25, weight: .semibold)
         let subtitle = NSTextField(labelWithString: "Play your installed Mac copy on Apple silicon.")
         subtitle.textColor = .secondaryLabelColor
+        let triggerTip = NSTextField(labelWithString: "For more noticeable effects, set Damage to Full and ABS to Off in-game.")
+        triggerTip.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        triggerTip.textColor = .secondaryLabelColor
         path.lineBreakMode = .byTruncatingMiddle
         path.isSelectable = true
         status.textColor = .secondaryLabelColor
@@ -77,20 +80,22 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         windowed.toolTip = "Start in a regular macOS window. Clear this option for full screen."
         adaptiveTriggers.target = self
         adaptiveTriggers.action = #selector(saveAdaptiveTriggerPreference)
-        adaptiveTriggers.toolTip = "Enable resistance on the DualSense L2 and R2 triggers. Handle vibration follows the game's settings."
+        adaptiveTriggers.toolTip = "L2 pulses when the front wheels approach lockup under hard braking. R2 pulses on shifts and stiffens with engine damage. Handle vibration follows the game's settings."
         UserDefaults.standard.register(defaults: ["skipStartupVideos": true])
         skipVideos.state = UserDefaults.standard.bool(forKey: "skipStartupVideos") ? .on : .off
         windowed.state = UserDefaults.standard.bool(forKey: "runInWindow") ? .on : .off
         adaptiveTriggers.state = UserDefaults.standard.bool(forKey: "adaptiveTriggers") ? .on : .off
         play.keyEquivalent = "\r"
-        logs.isEnabled = false
+        lastLog = latestSessionLog()
+        logs.isEnabled = lastLog != nil
         let actions = NSStackView(views: [logs, NSView(), choose, play])
         actions.orientation = .horizontal
         actions.spacing = 8
-        let fields = NSStackView(views: [title, subtitle, path, skipVideos, windowed, adaptiveTriggers, status, actions])
+        let fields = NSStackView(views: [title, subtitle, path, skipVideos, windowed, adaptiveTriggers, triggerTip, status, actions])
         fields.orientation = .vertical
         fields.alignment = .leading
         fields.spacing = 12
+        fields.setCustomSpacing(4, after: adaptiveTriggers)
         fields.translatesAutoresizingMaskIntoConstraints = false
         let content = NSView()
         content.addSubview(fields)
@@ -174,7 +179,31 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(windowed.state == .on, forKey: "runInWindow")
     }
 
+    private func logsDirectory() throws -> URL {
+        try FileManager.default.url(for: .libraryDirectory, in: .userDomainMask,
+                                    appropriateFor: nil, create: false)
+            .appendingPathComponent("Logs/DiRT 3 Launcher", isDirectory: true)
+    }
+
+    private func latestSessionLog() -> URL? {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .contentModificationDateKey]
+        guard let files = try? FileManager.default.contentsOfDirectory(at: logsDirectory(),
+                                                                      includingPropertiesForKeys: Array(keys),
+                                                                      options: [.skipsHiddenFiles]) else { return nil }
+        return files.compactMap { file -> (url: URL, modified: Date)? in
+            guard file.pathExtension == "log",
+                  let values = try? file.resourceValues(forKeys: keys),
+                  values.isRegularFile == true,
+                  let modified = values.contentModificationDate else { return nil }
+            return (file, modified)
+        }.max { $0.modified < $1.modified }?.url
+    }
+
     @objc private func showLogs() {
+        if lastLog.map({ FileManager.default.isReadableFile(atPath: $0.path) }) != true {
+            lastLog = latestSessionLog()
+            logs.isEnabled = lastLog != nil
+        }
         if let lastLog { NSWorkspace.shared.activateFileViewerSelecting([lastLog]) }
     }
 
@@ -192,9 +221,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
             }
             let runtime = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/Mac32.app/Contents/MacOS/mac32")
             guard FileManager.default.isExecutableFile(atPath: runtime.path) else { throw LaunchError.missingRuntime }
-            let directory = try FileManager.default.url(for: .libraryDirectory, in: .userDomainMask,
-                                                        appropriateFor: nil, create: false)
-                .appendingPathComponent("Logs/DiRT 3 Launcher", isDirectory: true)
+            let directory = try logsDirectory()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let log = directory.appendingPathComponent("\(UUID().uuidString).log")
             guard FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {

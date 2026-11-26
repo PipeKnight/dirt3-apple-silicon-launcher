@@ -46,13 +46,15 @@ Connect a DualSense to your Mac over USB or Bluetooth before clicking **Play**. 
 
 Select **Enable Adaptive Triggers** in the launcher for progressive resistance on DualSense L2, with brief releases when the front wheels show signs of locking under hard braking. R2 pulses briefly when shifting between forward gears and becomes firmer as the engine takes damage. This option uses the default D-Box setting in `hardware_settings_config.xml` and keeps the motion data inside the game process.
 
+Set **Damage** to **Full** and **ABS** to **Off** in the game to make these effects easier to feel. Hover over the launcher checkbox for a description of both triggers.
+
 During a terminal-damage slow-motion sequence, the handle actuators sustain a vibration that fades from the initial impact. It follows the game's vibration setting, including **Off**.
 
 ## Troubleshooting
 
 If the launcher reports that no compatibility profile matched, check the build of your Mac copy. Profile selection checks the instructions the runtime needs to patch. Executables with different SHA-256 hashes can use the same profile when those instructions match.
 
-After a launch attempt, **Show Logs** reveals the session log in Finder. When [reporting an issue](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/issues), include your Mac model, macOS version, game edition and build number. Share relevant log lines after removing account identifiers and personal paths.
+**Show Logs** reveals the latest launcher session log in Finder, even after reopening the launcher. When [reporting an issue](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/issues), include your Mac model, macOS version, game edition and build number. Share relevant log lines after removing account identifiers and personal paths.
 
 To inspect a local game bundle from this repository, use Python 3 and the Xcode command-line tools.
 
