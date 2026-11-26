@@ -36,13 +36,13 @@ Select **Run in a window** in the launcher before pressing **Play** to start in 
 
 If the steering wheel is static in cockpit view with the Low graphics preset, set **Options → Graphics Options → Detail → Distant Vehicles** to **Medium**. This setting also controls driver detail. [Original game discussion](https://steamcommunity.com/app/321040/discussions/1/611702631210247249/)
 
-During play, press **F9** to toggle the performance overlay in the lower-left corner. It shows FPS, frame interval and 1% low over the last five seconds. CPU use is normalized to the busiest CPU sample in the last five seconds, rounded up to the next even core count with a minimum of two. The displayed count estimates CPU capacity from the game process’s CPU time. CPU `ms` is time per frame summed across the process's threads. The GPU percentage is device-wide. GPU `ms` is the time measured for a sampled frame in the game’s presenting OpenGL context. The launcher samples up to one frame per second and reads timer results asynchronously where the driver supports them. The thermal indicator shows the macOS thermal state.
+During play, press **F9** to toggle the performance overlay in the lower-left corner. It shows FPS, frame interval and 1% low over the last five seconds. The displayed CPU core count estimates capacity from the busiest CPU sample in the last five seconds. It rounds up to an even count with a minimum of two. The CPU percentage uses that count as its denominator. CPU `ms` is time per frame summed across the process's threads. The GPU percentage is device-wide. GPU `ms` is the time measured for a sampled frame in the game’s presenting OpenGL context. The launcher samples up to one frame per second and reads timer results asynchronously where the driver supports them. The thermal indicator shows the macOS thermal state.
 
 **Skip startup videos** is on by default. Clear the checkbox in the launcher to play the opening videos.
 
 ## Gamepads
 
-Connect your gamepad over USB or Bluetooth. The launcher can use the macOS **Game Controller** extended profile for one modern gamepad at a time. This path provides sticks, buttons, D-pad and triggers where the controller exposes them. Press **Menu**, **Start** or **Options**, depending on the controller, at the title screen.
+Connect your gamepad over USB or Bluetooth. The launcher can use the macOS **Game Controller** extended profile for one modern gamepad at a time. This path provides sticks, buttons, D-pad and triggers where the controller exposes them. Press **Menu**, **Start** or **Options**, depending on the controller, at the title screen. A USB Google Stadia Controller was tested in the Steam edition, including the title screen, menu navigation and driving.
 
 ### DualSense
 
