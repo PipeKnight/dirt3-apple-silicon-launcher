@@ -36,7 +36,7 @@ Select **Run in a window** in the launcher before pressing **Play** to start in 
 
 If the steering wheel is static in cockpit view with the Low graphics preset, set **Options → Graphics Options → Detail → Distant Vehicles** to **Medium**. This setting also controls driver detail. [Original game discussion](https://steamcommunity.com/app/321040/discussions/1/611702631210247249/)
 
-During play, press **F9** to toggle the performance overlay. It shows FPS, frame interval and 1% low over the last five seconds. CPU use is for the game process, with 100% equivalent to one core. CPU time per frame sums the work across its threads. GPU utilization covers the whole GPU and appears when macOS exposes it. The thermal indicator shows the macOS thermal state.
+During play, press **F9** to toggle the performance overlay in the lower-left corner. It shows FPS, frame interval and 1% low over the last five seconds. CPU use is the game process's share of the active cores' combined capacity. CPU time per frame sums the work across its threads. GPU utilization covers the whole GPU and appears when macOS exposes it. The thermal indicator shows the macOS thermal state.
 
 **Skip startup videos** is on by default. Clear the checkbox in the launcher to play the opening videos.
 

@@ -1350,10 +1350,10 @@ index 0000000..7149d5b
 +}
 diff --git a/src/dirt3_overlay.m b/src/dirt3_overlay.m
 new file mode 100644
-index 0000000..281c3e0
+index 0000000..b581770
 --- /dev/null
 +++ b/src/dirt3_overlay.m
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,275 @@
 +#import <AppKit/AppKit.h>
 +#import <Carbon/Carbon.h>
 +#import <IOKit/IOKitLib.h>
@@ -1486,7 +1486,7 @@ index 0000000..281c3e0
 +	set_recording(true);
 +	NSRect bounds = [game convertRectToScreen:game.contentLayoutRect];
 +	NSRect frame = panel.frame;
-+	NSPoint origin = NSMakePoint(NSMinX(bounds) + 12, NSMaxY(bounds) - NSHeight(frame) - 12);
++	NSPoint origin = NSMakePoint(NSMinX(bounds) + 12, NSMinY(bounds) + 12);
 +	if (!NSEqualPoints(frame.origin, origin)) [panel setFrameOrigin:origin];
 +	if (panel.parentWindow != game) {
 +		[panel.parentWindow removeChildWindow:panel];
@@ -1514,7 +1514,9 @@ index 0000000..281c3e0
 +		uint64_t spent = cpu_time_ns();
 +		if (last_poll && spent && last_cpu_time && spent >= last_cpu_time && presented > last_cpu_frames) {
 +			uint64_t delta = spent - last_cpu_time;
-+			cpu_percent = 100.0 * delta / (now - last_poll);
++			NSUInteger active_cores = MAX(NSProcessInfo.processInfo.activeProcessorCount, 1);
++			double capacity = (double)(now - last_poll) * active_cores;
++			cpu_percent = MIN(100.0, 100.0 * delta / capacity);
 +			cpu_ms = (double)delta / (presented - last_cpu_frames) / NSEC_PER_MSEC;
 +		} else {
 +			cpu_percent = cpu_ms = -1;
