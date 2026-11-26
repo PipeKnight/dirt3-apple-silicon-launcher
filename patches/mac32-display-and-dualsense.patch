@@ -1748,10 +1748,10 @@ index 0000000..7149d5b
 +}
 diff --git a/src/dirt3_overlay.m b/src/dirt3_overlay.m
 new file mode 100644
-index 0000000..b581770
+index 0000000..516b4f6
 --- /dev/null
 +++ b/src/dirt3_overlay.m
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,284 @@
 +#import <AppKit/AppKit.h>
 +#import <Carbon/Carbon.h>
 +#import <IOKit/IOKitLib.h>
@@ -1872,12 +1872,19 @@ index 0000000..b581770
 +	return @"—";
 +}
 +
++static void suspend_overlay(void)
++{
++	[panel.parentWindow removeChildWindow:panel];
++	[panel orderOut:nil];
++	set_recording(false);
++}
++
 +static void refresh_overlay(void)
 +{
 +	NSWindow *game = NSApp.keyWindow ?: NSApp.mainWindow;
-+	if (!NSApp.active || !game.visible || game.miniaturized || !game.contentView) {
-+		[panel orderOut:nil];
-+		set_recording(false);
++	if (!NSApp.active || NSApp.modalWindow || game.isSheet || game.attachedSheet ||
++		!game.visible || game.miniaturized || !game.contentView) {
++		suspend_overlay();
 +		return;
 +	}
 +
@@ -1947,11 +1954,9 @@ index 0000000..b581770
 +
 +static void hide_overlay(void)
 +{
-+	set_recording(false);
 +	[refresh_timer invalidate];
 +	refresh_timer = nil;
-+	[panel.parentWindow removeChildWindow:panel];
-+	[panel orderOut:nil];
++	suspend_overlay();
 +	if (gpu) IOObjectRelease(gpu);
 +	gpu = IO_OBJECT_NULL;
 +}
@@ -2005,6 +2010,10 @@ index 0000000..b581770
 +			if (event.type == NSEventTypeKeyDown && !event.isARepeat) toggle_overlay();
 +			return nil;
 +		}] retain];
++	[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResignKeyNotification
++		object:nil queue:nil usingBlock:^(NSNotification *notification) {
++			if (notification.object == panel.parentWindow) suspend_overlay();
++		}];
 +	[[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification
 +		object:NSApp queue:nil usingBlock:^(NSNotification *notification) {
 +			if (key_monitor) [NSEvent removeMonitor:key_monitor];
