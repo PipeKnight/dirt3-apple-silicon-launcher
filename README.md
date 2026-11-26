@@ -36,9 +36,9 @@ During play, press **F9** to toggle the performance overlay. It shows FPS, frame
 
 **Skip startup videos** is on by default. Clear the checkbox in the launcher to play the opening videos.
 
-## DualSense over USB
+## DualSense
 
-Connect a DualSense directly to your Mac before clicking **Play**. Press **Options** at the title screen. The launcher registers a controller profile for your installed game and routes the game's two vibration channels to the DualSense handle actuators.
+Connect a DualSense to your Mac over USB or Bluetooth before clicking **Play**. Press **Options** at the title screen. The launcher registers a controller profile for your installed game and routes the game's two vibration channels to the DualSense handle actuators. The Bluetooth input bridge handles one DualSense at a time.
 
 Enable **DualSense adaptive triggers** in the launcher for variable resistance on L2 and R2. It uses the game's pedal position, wheel speed and engine RPM. This option uses the default D-Box setting in `hardware_settings_config.xml` and keeps the motion data inside the game process.
 

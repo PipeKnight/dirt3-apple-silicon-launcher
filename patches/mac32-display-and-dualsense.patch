@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index aeabf91..12f5910 100644
+index aeabf91..2191ca1 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -3,10 +3,10 @@ CC = clang
@@ -11,7 +11,7 @@ index aeabf91..12f5910 100644
            -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
  SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c src/media_bridge.c \
 -      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
-+      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/dirt3_adaptive_triggers.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
++      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/dirt3_bluetooth_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/dirt3_adaptive_triggers.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
  OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
  
  all: mac32 guest app
@@ -210,7 +210,7 @@ index e27be43..f5fbadf 100644
 +void thunks_dirt3_force_feedback_init(void);
 +void thunks_apple_init(void) { REGISTER(apple); thunks_dirt3_force_feedback_init(); }
 diff --git a/src/apple2.m b/src/apple2.m
-index b862a30..3268a98 100644
+index b862a30..ac6a186 100644
 --- a/src/apple2.m
 +++ b/src/apple2.m
 @@ -198,8 +198,7 @@ static void init_rlcommon(g32 a) { U32(a) = hobj_wrap((void *)kCFRunLoopCommonMo
@@ -223,7 +223,52 @@ index b862a30..3268a98 100644
  static CFStringRef w_CGDisplayModeCopyPixelEncoding(CGDisplayModeRef m)
  {
  	(void)m;
-@@ -534,7 +533,6 @@ static struct hfn apple2_fns[] = {
+@@ -265,8 +264,7 @@ static void t_CVDisplayLinkGetNominalOutputVideoRefreshPeriod(uint32_t *args, st
+ static void w_CVDisplayLinkRelease(CVDisplayLinkRef l) { CVDisplayLinkRelease(l); }
+ 
+ // ---- IOKit -----------------------------------------------------------------------------
+-// HID: a real manager that never reports devices, so SDL sees no game
+-// controllers (their callbacks are not bridged yet) and asks for no permission.
++// Forward device and value callbacks using the original guest calling convention.
+ static void w_IOHIDManagerSetDeviceMatchingMultiple(IOHIDManagerRef m, CFArrayRef a) { IOHIDManagerSetDeviceMatchingMultiple(m, a); }
+ 
+ // IOKit stores the registration's refcon as an opaque word. On the host
+@@ -288,6 +286,15 @@ static void hid_device_callback(void *opaque, IOReturn result, void *sender, IOH
+ 	call_hid_callback(opaque, result, sender, device);
+ }
+ 
++extern void dirt3_bluetooth_register(IOHIDManagerRef manager, void *refcon);
++extern void dirt3_bluetooth_remove(IOHIDDeviceRef device);
++
++static void hid_remove_callback(void *opaque, IOReturn result, void *sender, IOHIDDeviceRef device)
++{
++	dirt3_bluetooth_remove(device);
++	hid_device_callback(opaque, result, sender, device);
++}
++
+ static void hid_input_callback(void *opaque, IOReturn result, void *sender, IOHIDValueRef value)
+ {
+ 	call_hid_callback(opaque, result, sender, value);
+@@ -301,14 +308,15 @@ static void w_IOHIDManagerRegisterDeviceMatchingCallback(IOHIDManagerRef manager
+ 
+ static void w_IOHIDManagerRegisterDeviceRemovalCallback(IOHIDManagerRef manager, g32 function, g32 context)
+ {
+-	IOHIDManagerRegisterDeviceRemovalCallback(manager, function ? hid_device_callback : NULL,
++	IOHIDManagerRegisterDeviceRemovalCallback(manager, function ? hid_remove_callback : NULL,
+ 		hid_refcon(function, context));
+ }
+ 
+ static void w_IOHIDManagerRegisterInputValueCallback(IOHIDManagerRef manager, g32 function, g32 context)
+ {
+-	IOHIDManagerRegisterInputValueCallback(manager, function ? hid_input_callback : NULL,
+-		hid_refcon(function, context));
++	void *refcon = function ? hid_refcon(function, context) : NULL;
++	IOHIDManagerRegisterInputValueCallback(manager, function ? hid_input_callback : NULL, refcon);
++	dirt3_bluetooth_register(manager, refcon);
+ }
+ 
+ static void t_nothing(uint32_t *args, struct hres *r) { (void)args; (void)r; }
+@@ -534,7 +542,6 @@ static struct hfn apple2_fns[] = {
  	G("_CGDisplayIsMain", w_CGDisplayIsMain, "i:u"), G("_CGDisplayMirrorsDisplay", CGDisplayMirrorsDisplay, "u:u"),
  	G("_CGDisplayModeCopyPixelEncoding", w_CGDisplayModeCopyPixelEncoding, "o:o"),
  	G("_CGDisplayModeGetIOFlags", w_CGDisplayModeGetIOFlags, "u:o"),
@@ -255,10 +300,10 @@ index 3121c2f..29bb503 100644
  	G("_CFBundleCopyResourceURLsOfType", CFBundleCopyResourceURLsOfType, "o:ooo"),
 diff --git a/src/dirt3_adaptive_triggers.m b/src/dirt3_adaptive_triggers.m
 new file mode 100644
-index 0000000..487bd06
+index 0000000..b4df179
 --- /dev/null
 +++ b/src/dirt3_adaptive_triggers.m
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,263 @@
 +// DiRT 3's extended motion report supplies the two virtual pedal signals.
 +// Route the built-in D-Box defaults to a private address inside this process.
 +#import <AppKit/AppKit.h>
@@ -272,6 +317,7 @@ index 0000000..487bd06
 +#include <string.h>
 +#include <time.h>
 +#include <unistd.h>
++#include <zlib.h>
 +#include "mac32.h"
 +
 +#define LOCAL_IP "127.1.2.3"
@@ -293,8 +339,10 @@ index 0000000..487bd06
 +static double last_advance;
 +static unsigned levels[2];
 +
-+static IOHIDDeviceRef usb_pad;
-+static double usb_retry_at;
++static IOHIDDeviceRef hid_pad;
++static double hid_retry_at;
++static bool bluetooth;
++static uint8_t bluetooth_sequence;
 +static unsigned applied[2];
 +static bool trace;
 +
@@ -355,14 +403,13 @@ index 0000000..487bd06
 +    return fmaxf(0, fminf(1, value));
 +}
 +
-+static IOHIDDeviceRef open_wired_dualsense(void)
++static IOHIDDeviceRef open_dualsense(void)
 +{
 +    IOHIDManagerRef manager = IOHIDManagerCreate(NULL, kIOHIDOptionsTypeNone);
 +    if (!manager) return NULL;
 +    NSDictionary *matching = @{
 +        @kIOHIDVendorIDKey: @0x054c, @kIOHIDProductIDKey: @0x0ce6,
 +        @kIOHIDPrimaryUsagePageKey: @1, @kIOHIDPrimaryUsageKey: @5,
-+        @kIOHIDTransportKey: @"USB",
 +    };
 +    IOHIDManagerSetDeviceMatching(manager, (CFDictionaryRef)matching);
 +    CFSetRef devices = IOHIDManagerCopyDevices(manager);
@@ -373,10 +420,15 @@ index 0000000..487bd06
 +        int length = 0;
 +        if (size && CFGetTypeID(size) == CFNumberGetTypeID())
 +            CFNumberGetValue(size, kCFNumberIntType, &length);
-+        if (length == 48 && IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone) == kIOReturnSuccess)
++        CFTypeRef transport = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDTransportKey));
++        bool wired = transport && CFEqual(transport, CFSTR("USB")) && length == 48;
++        bool wireless = transport && CFEqual(transport, CFSTR("Bluetooth")) && length >= 78;
++        if ((wired || wireless) && IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {
++            bluetooth = wireless;
 +            CFRetain(device);
-+        else
++        } else {
 +            device = NULL;
++        }
 +    }
 +    if (devices) CFRelease(devices);
 +    CFRelease(manager);
@@ -403,27 +455,40 @@ index 0000000..487bd06
 +
 +static bool send_triggers(unsigned left, unsigned right)
 +{
-+    // Sony's wired 48-byte report. The two valid bits select only the
-+    // trigger banks. Rumble, audio and LEDs belong to their existing paths.
-+    uint8_t report[48] = {0x02, 0x0c};
-+    encode_trigger(report + 11, right);
-+    encode_trigger(report + 22, left);
-+    IOReturn result = IOHIDDeviceSetReport(usb_pad, kIOHIDReportTypeOutput,
-+        report[0], report, sizeof(report));
++    // Both framing formats share the effect banks. Only the two trigger
++    // validity flags are set, leaving rumble, audio and LEDs alone.
++    uint8_t report[78] = {0}, *payload = report + (bluetooth ? 3 : 1);
++    payload[0] = 0x0c;
++    encode_trigger(payload + 10, right);
++    encode_trigger(payload + 21, left);
++    size_t length = 48;
++    report[0] = 0x02;
++    if (bluetooth) {
++        report[0] = 0x31;
++        report[1] = (bluetooth_sequence++ & 0xf) << 4;
++        report[2] = 0x10;
++        const uint8_t seed = 0xa2;
++        uint32_t checksum = (uint32_t)crc32(crc32(0, &seed, 1), report, 74);
++        for (unsigned byte = 0; byte < 4; ++byte)
++            report[74 + byte] = (uint8_t)(checksum >> (8 * byte));
++        length = sizeof(report);
++    }
++    IOReturn result = IOHIDDeviceSetReport(hid_pad, kIOHIDReportTypeOutput, report[0], report, length);
++    const char *link = bluetooth ? "Bluetooth" : "USB";
 +    if (trace && result == kIOReturnSuccess)
-+        LOG("DiRT 3 adaptive triggers: L2=%u R2=%u (USB)\n", left, right);
++        LOG("DiRT 3 adaptive triggers: L2=%u R2=%u (%s)\n", left, right, link);
 +    else if (result != kIOReturnSuccess)
-+        LOG("DiRT 3 adaptive triggers: USB report failed (%#x)\n", result);
++        LOG("DiRT 3 adaptive triggers: %s report failed (%#x)\n", link, result);
 +    return result == kIOReturnSuccess;
 +}
 +
 +static void close_triggers(void)
 +{
-+    if (!usb_pad) return;
++    if (!hid_pad) return;
 +    if (applied[0] || applied[1]) send_triggers(0, 0);
-+    IOHIDDeviceClose(usb_pad, kIOHIDOptionsTypeNone);
-+    CFRelease(usb_pad);
-+    usb_pad = NULL;
++    IOHIDDeviceClose(hid_pad, kIOHIDOptionsTypeNone);
++    CFRelease(hid_pad);
++    hid_pad = NULL;
 +    applied[0] = applied[1] = 0;
 +}
 +
@@ -438,11 +503,11 @@ index 0000000..487bd06
 +        close_triggers();
 +        return;
 +    }
-+    if (!usb_pad && time >= usb_retry_at) {
-+        usb_pad = open_wired_dualsense();
-+        usb_retry_at = time + 1;
++    if (!hid_pad && time >= hid_retry_at) {
++        hid_pad = open_dualsense();
++        hid_retry_at = time + 1;
 +    }
-+    if (!usb_pad || (next[0] == applied[0] && next[1] == applied[1])) return;
++    if (!hid_pad || (next[0] == applied[0] && next[1] == applied[1])) return;
 +    if (send_triggers(next[0], next[1])) memcpy(applied, next, sizeof(applied));
 +    else close_triggers();
 +}
@@ -501,6 +566,125 @@ index 0000000..487bd06
 +    }
 +    start_updates();
 +    return true;
++}
+diff --git a/src/dirt3_bluetooth_input.m b/src/dirt3_bluetooth_input.m
+new file mode 100644
+index 0000000..dd6d979
+--- /dev/null
++++ b/src/dirt3_bluetooth_input.m
+@@ -0,0 +1,113 @@
++// The Bluetooth DualSense streams extended report 0x31, but its standard
++// IOHID button elements belong to the descriptor's short report 0x01.
++// Feed DiRT 3's existing element callback from the extended report.
++#import <IOKit/hid/IOHIDLib.h>
++#import <IOKit/hid/IOHIDKeys.h>
++#include <mach/mach_time.h>
++#include "thunks.h"
++
++extern int dirt3_version_patch_active(void);
++
++enum { buttons = 14, axes = 6, controls = buttons + axes + 1 };
++static const uint8_t axis_usage[axes] = {48, 49, 50, 53, 51, 52};
++
++struct bluetooth_input {
++    IOHIDDeviceRef device;
++    CFArrayRef elements;
++    IOHIDElementRef control[controls];
++    int previous[controls];
++    bool initialized;
++};
++
++// IOHIDManager serializes report, matching and removal callbacks on the
++// same run loop as the game's normal input-value callbacks.
++static struct bluetooth_input input;
++
++static void clear(void)
++{
++    if (input.elements) CFRelease(input.elements);
++    if (input.device) CFRelease(input.device);
++    input = (struct bluetooth_input){0};
++}
++
++void dirt3_bluetooth_remove(IOHIDDeviceRef device)
++{
++    if (input.device == device) clear();
++}
++
++static bool is_bluetooth_dualsense(IOHIDDeviceRef device)
++{
++    CFTypeRef vendor = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDVendorIDKey));
++    CFTypeRef product = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductIDKey));
++    CFTypeRef transport = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDTransportKey));
++    int vendor_id = 0, product_id = 0;
++    return vendor && CFGetTypeID(vendor) == CFNumberGetTypeID() &&
++        CFNumberGetValue(vendor, kCFNumberIntType, &vendor_id) && vendor_id == 0x054c &&
++        product && CFGetTypeID(product) == CFNumberGetTypeID() &&
++        CFNumberGetValue(product, kCFNumberIntType, &product_id) && product_id == 0x0ce6 &&
++        transport && CFEqual(transport, CFSTR("Bluetooth"));
++}
++
++static bool bind_elements(IOHIDDeviceRef device)
++{
++    if (!is_bluetooth_dualsense(device)) return false;
++    clear();
++    input.device = (IOHIDDeviceRef)CFRetain(device);
++    input.elements = IOHIDDeviceCopyMatchingElements(device, NULL, kIOHIDOptionsTypeNone);
++    if (!input.elements) {
++        clear();
++        return false;
++    }
++    for (CFIndex i = 0, count = CFArrayGetCount(input.elements); i < count; i++) {
++        IOHIDElementRef element = (IOHIDElementRef)CFArrayGetValueAtIndex(input.elements, i);
++        if (IOHIDElementGetReportID(element) != 1) continue;
++        uint32_t page = IOHIDElementGetUsagePage(element), usage = IOHIDElementGetUsage(element);
++        if (page == 9 && usage >= 1 && usage <= buttons) {
++            input.control[usage - 1] = element;
++        } else if (page == 1) {
++            if (usage == 57) input.control[buttons + axes] = element;
++            for (size_t axis = 0; axis < axes; axis++)
++                if (usage == axis_usage[axis]) input.control[buttons + axis] = element;
++        }
++    }
++    LOG("DiRT 3: translating extended DualSense Bluetooth reports\n");
++    return true;
++}
++
++static void report(void *opaque, IOReturn result, void *sender, IOHIDReportType type,
++                   uint32_t report_id, uint8_t *bytes, CFIndex size)
++{
++    if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput ||
++        report_id != 0x31 || size != 78 || !sender || bytes[0] != report_id ||
++        CFGetTypeID(sender) != IOHIDDeviceGetTypeID()) return;
++
++    IOHIDDeviceRef device = (IOHIDDeviceRef)sender;
++    if (input.device && input.device != device) return;
++    if (!input.device && !bind_elements(device)) return;
++
++    // 0x31 carries the six axes followed by a counter and the button groups.
++    uint16_t mask = (uint16_t)(bytes[9] >> 4) |
++                    ((uint16_t)bytes[10] << 4) | ((uint16_t)(bytes[11] & 3) << 12);
++    int current[controls];
++    for (size_t index = 0; index < buttons; index++) current[index] = (mask >> index) & 1;
++    for (size_t axis = 0; axis < axes; axis++) current[buttons + axis] = bytes[2 + axis];
++    current[buttons + axes] = (bytes[9] & 15) <= 8 ? bytes[9] & 15 : 8;
++
++    uint64_t refcon = (uintptr_t)opaque, time = mach_absolute_time();
++    for (size_t index = 0; index < controls; index++) {
++        if (!input.control[index] || (input.initialized && current[index] == input.previous[index])) continue;
++        IOHIDValueRef value = IOHIDValueCreateWithIntegerValue(NULL, input.control[index], time, current[index]);
++        if (!value) continue;
++        gcall((g32)(refcon >> 32), 4, (g32)refcon, (uint32_t)result, hobj_wrap(sender),
++              hobj_wrap((void *)value));
++        CFRelease(value);
++    }
++    memcpy(input.previous, current, sizeof(current));
++    input.initialized = true;
++}
++
++void dirt3_bluetooth_register(IOHIDManagerRef manager, void *refcon)
++{
++    if (!dirt3_version_patch_active()) return;
++    IOHIDManagerRegisterInputReportCallback(manager, refcon ? report : NULL, refcon);
 +}
 diff --git a/src/dirt3_force_feedback.m b/src/dirt3_force_feedback.m
 new file mode 100644

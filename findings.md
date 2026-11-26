@@ -125,6 +125,21 @@ Both triggers produced resistance in an isolated physical USB test.
 In the interactive Steam run, the player confirmed both kinds of feedback.
 The runtime sent a zero-resistance report on pausing the Time Trial.
 
+On Bluetooth the controller sent extended reports with ID `0x31`, while
+its button and axis elements described the short report `0x01`. The legacy
+IOHID value callback received no button updates from the extended report.
+The bridge now decodes those reports and uses the existing elements to
+deliver button, D-pad, stick and pedal values to the game. The diagnostic
+round-trip verified representative inputs with the connected DualSense's
+descriptor. The player confirmed that Options opened the title menu over
+Bluetooth. The controller also produced resistance on both triggers in
+the separate Bluetooth output test. The Bluetooth framing is described in
+the [Linux PlayStation driver](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-playstation.c),
+and the [InputNext report notes](https://github.com/osyka-yuri/InputNext/blob/main/docs/dualsense-usb.md)
+document the two resistance fields shared by both transports.
+The Steam race also submitted Bluetooth trigger changes and two-channel
+rumble from the game's live input and simulation.
+
 ## Startup through AppKit
 
 - The guest zone registry honors default-zone reordering and dispatches the
