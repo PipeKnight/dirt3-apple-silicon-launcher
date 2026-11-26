@@ -32,6 +32,10 @@ The GitHub download is ad-hoc signed. If macOS says it cannot verify the develop
 
 Change render resolution, VSync, multisampling (MSAA) and other graphics settings in **Options → Graphics Options** in the game. On Retina displays, the launcher includes compatible scaled modes and keeps the original 640 × 480 setting selectable. The game uses the desktop refresh rate. To change it, select a rate in **System Settings → Displays** before launching. [Feral's graphics guide](https://www.feralinteractive.com/en/readmes/dirt3/latest/steam/)
 
+Select **Run in a window** in the launcher before pressing **Play** to start in a regular macOS window. Clear it to start full screen. [Original Mac windowed-mode instructions](https://www.feralinteractive.com/en/faqs/dirt3/latest/steam/)
+
+If the steering wheel is static in cockpit view with the Low graphics preset, set **Options → Graphics Options → Detail → Distant Vehicles** to **Medium**. This setting also controls driver detail. [Original game discussion](https://steamcommunity.com/app/321040/discussions/1/611702631210247249/)
+
 During play, press **F9** to toggle the performance overlay. It shows FPS, frame interval and 1% low over the last five seconds. CPU use is for the game process, with 100% equivalent to one core. CPU time per frame sums the work across its threads. GPU utilization covers the whole GPU and appears when macOS exposes it. The thermal indicator shows the macOS thermal state.
 
 **Skip startup videos** is on by default. Clear the checkbox in the launcher to play the opening videos.
@@ -40,7 +44,7 @@ During play, press **F9** to toggle the performance overlay. It shows FPS, frame
 
 Connect a DualSense to your Mac over USB or Bluetooth before clicking **Play**. Press **Options** at the title screen. The launcher registers a controller profile for your installed game and routes the game's two vibration channels to the DualSense handle actuators. The Bluetooth input bridge handles one DualSense at a time.
 
-Enable **DualSense adaptive triggers** in the launcher for variable resistance on L2 and R2. It uses the game's pedal position, wheel speed and engine RPM. This option uses the default D-Box setting in `hardware_settings_config.xml` and keeps the motion data inside the game process.
+Enable **DualSense adaptive triggers** in the launcher for variable resistance on L2 and R2. Resistance builds deep in the trigger travel during braking or under throttle load and drops away when you release the pedal. This option uses the default D-Box setting in `hardware_settings_config.xml` and keeps the motion data inside the game process.
 
 ## Troubleshooting
 

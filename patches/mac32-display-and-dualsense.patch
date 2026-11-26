@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index aeabf91..2191ca1 100644
+index aeabf91..24d5453 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -3,10 +3,10 @@ CC = clang
@@ -11,7 +11,7 @@ index aeabf91..2191ca1 100644
            -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
  SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c src/media_bridge.c \
 -      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
-+      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/dirt3_bluetooth_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/dirt3_adaptive_triggers.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
++      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/dirt3_window_mode.c src/dirt3_bluetooth_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/dirt3_adaptive_triggers.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
  OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
  
  all: mac32 guest app
@@ -300,10 +300,10 @@ index 3121c2f..29bb503 100644
  	G("_CFBundleCopyResourceURLsOfType", CFBundleCopyResourceURLsOfType, "o:ooo"),
 diff --git a/src/dirt3_adaptive_triggers.m b/src/dirt3_adaptive_triggers.m
 new file mode 100644
-index 0000000..b4df179
+index 0000000..92d36e9
 --- /dev/null
 +++ b/src/dirt3_adaptive_triggers.m
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,265 @@
 +// DiRT 3's extended motion report supplies the two virtual pedal signals.
 +// Route the built-in D-Box defaults to a private address inside this process.
 +#import <AppKit/AppKit.h>
@@ -442,8 +442,8 @@ index 0000000..b4df179
 +
 +    uint16_t mask = 0;
 +    uint32_t strengths = 0;
-+    for (unsigned zone = 2; zone <= 9; ++zone) {
-+        unsigned force = 1 + (level - 1) * (zone - 2) / 7;
++    for (unsigned zone = 4; zone <= 9; ++zone) {
++        unsigned force = 1 + (level - 1) * (zone - 4) / 5;
 +        mask |= 1u << zone;
 +        strengths |= (force - 1) << (3 * zone);
 +    }
@@ -499,11 +499,11 @@ index 0000000..b4df179
 +    os_unfair_lock_lock(&motion_lock);
 +    if (time - last_advance < 0.25) memcpy(next, levels, sizeof(next));
 +    os_unfair_lock_unlock(&motion_lock);
-+    if (!NSApp.isActive || (!next[0] && !next[1])) {
++    if (!NSApp.isActive) {
 +        close_triggers();
 +        return;
 +    }
-+    if (!hid_pad && time >= hid_retry_at) {
++    if (!hid_pad && (next[0] || next[1]) && time >= hid_retry_at) {
 +        hid_pad = open_dualsense();
 +        hid_retry_at = time + 1;
 +    }
@@ -553,9 +553,11 @@ index 0000000..b4df179
 +    stage_time = stage;
 +    if (stage > 0 && rpm_tens > 40) {
 +        float wheels = (fabsf(wheel_left) + fabsf(wheel_right)) * 0.5f;
++        float braking = speed > 3 ? clamp_unit((brake - 0.20f) / 0.80f) : 0;
 +        float slip = speed > 3 ? clamp_unit((speed - wheels) / speed) : 0;
-+        levels[0] = (unsigned)roundf(2.0f + brake * (2.5f + 1.5f * slip));
-+        levels[1] = (unsigned)roundf(1.5f + 2.5f * throttle * clamp_unit(rpm_tens / 800));
++        float load = clamp_unit((throttle - 0.35f) / 0.65f) * clamp_unit((rpm_tens - 200) / 650);
++        levels[0] = (unsigned)roundf(braking * (2.0f + slip));
++        levels[1] = (unsigned)roundf(2.0f * load);
 +    } else {
 +        levels[0] = levels[1] = 0;
 +    }
@@ -1613,31 +1615,124 @@ index 0000000..281c3e0
 +	}
 +	return result;
 +}
+diff --git a/src/dirt3_window_mode.c b/src/dirt3_window_mode.c
+new file mode 100644
+index 0000000..4cdd412
+--- /dev/null
++++ b/src/dirt3_window_mode.c
+@@ -0,0 +1,69 @@
++// Apply the launcher's window choice to Feral's existing registry setting.
++#include "mac32.h"
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <stdbool.h>
++#include <string.h>
++#include <unistd.h>
++
++static char fullscreen;
++
++void dirt3_window_mode_init(void)
++{
++    const char *mode = getenv("MAC32_DIRT3_WINDOW_MODE");
++    if (!mode) return;
++    if (!strcmp(mode, "windowed")) fullscreen = '0';
++    if (!strcmp(mode, "fullscreen")) fullscreen = '1';
++}
++
++static bool is_preferences(const char *path)
++{
++    static const char suffix[] = "/Feral Interactive/DiRT 3 Complete Edition/Preferences Data";
++    size_t length = strlen(path);
++    return length >= sizeof(suffix) - 1 && !memcmp(path + length - (sizeof(suffix) - 1), suffix, sizeof(suffix));
++}
++
++void dirt3_window_mode_read(int fd, void *bytes, int32_t size)
++{
++    static const char key[] = "<value name=\"FullScreen\" type=\"integer\">";
++    static const char end[] = "</value>";
++    if (!fullscreen || size < (int32_t)(sizeof(key) + sizeof(end) - 1)) return;
++    char *value = memmem(bytes, (size_t)size, key, sizeof(key) - 1);
++    if (!value) return;
++    value += sizeof(key) - 1;
++    if ((size_t)(value - (char *)bytes) + sizeof(end) > (size_t)size ||
++        (*value != '0' && *value != '1') || memcmp(value + 1, end, sizeof(end) - 1)) return;
++    char path[PATH_MAX];
++    if (fcntl(fd, F_GETPATH, path) < 0 || !is_preferences(path)) return;
++    *value = fullscreen;
++    LOG("DiRT 3 display mode: %s\n", fullscreen == '0' ? "windowed" : "fullscreen");
++}
++
++int dirt3_window_mode_missing_preferences(const char *path, int flags)
++{
++    // The game merges these settings into its built-in defaults. A temporary
++    // stream supplies the one preference on the first windowed launch.
++    if (fullscreen != '0' || !path || flags != O_RDONLY || !is_preferences(path)) {
++        errno = ENOENT;
++        return -1;
++    }
++    FILE *preferences = tmpfile();
++    if (!preferences) return -1;
++    static const char xml[] =
++        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++        "<registry><key name=\"HKEY_CURRENT_USER\"><key name=\"Software\">"
++        "<key name=\"Feral Interactive\"><key name=\"DiRT 3 Complete Edition\">"
++        "<key name=\"Setup\"><value name=\"FullScreen\" type=\"integer\">0</value>"
++        "</key></key></key></key></key></registry>\n";
++    int fd = -1;
++    if (fwrite(xml, 1, sizeof(xml) - 1, preferences) == sizeof(xml) - 1 &&
++        fflush(preferences) == 0 && fseek(preferences, 0, SEEK_SET) == 0)
++        fd = fcntl(fileno(preferences), F_DUPFD_CLOEXEC, 0);
++    fclose(preferences);
++    if (fd >= 0)
++        LOG("DiRT 3 display mode: windowed on first launch\n");
++    else
++        errno = ENOENT;
++    return fd;
++}
 diff --git a/src/libc2.c b/src/libc2.c
-index 910d173..91561dc 100644
+index 910d173..20d1582 100644
 --- a/src/libc2.c
 +++ b/src/libc2.c
-@@ -199,8 +199,18 @@ static int w_statfs(const char *path, struct guest_statfs *out)
+@@ -197,11 +197,34 @@ static int w_statfs(const char *path, struct guest_statfs *out)
+ 
+ // lseek: off_t is 64-bit on i386 Darwin too
  static int64_t w_lseek(int fd, int64_t off, int wh) { return lseek(fd, off, wh); }
- static int32_t w_read(int fd, void *b, uint32_t n) { return (int32_t)read(fd, b, n); }
+-static int32_t w_read(int fd, void *b, uint32_t n) { return (int32_t)read(fd, b, n); }
++extern void dirt3_window_mode_read(int fd, void *bytes, int32_t size);
++extern int dirt3_window_mode_missing_preferences(const char *path, int flags);
++static int32_t w_read(int fd, void *b, uint32_t n)
++{
++	int32_t count = (int32_t)read(fd, b, n);
++	dirt3_window_mode_read(fd, b, count);
++	return count;
++}
  static int32_t w_write(int fd, const void *b, uint32_t n) { return (int32_t)write(fd, b, n); }
 -static int32_t w_pread(int fd, void *b, uint32_t n, int64_t off) { return (int32_t)pread(fd, b, n, off); }
 -static int32_t w_pwrite(int fd, const void *b, uint32_t n, int64_t off) { return (int32_t)pwrite(fd, b, n, off); }
+-static int w_open(const char *p, int fl, int mode) { return open(p, fl, mode); }
 +extern void dirt3_adaptive_triggers_config_read(int fd, void *bytes, int32_t size);
 +extern int32_t dirt3_adaptive_triggers_config_write(int fd, const void *bytes, uint32_t size, off_t offset);
 +static int32_t w_pread(int fd, void *b, uint32_t n, int64_t off)
 +{
 +	int32_t count = (int32_t)pread(fd, b, n, off);
 +	dirt3_adaptive_triggers_config_read(fd, b, count);
++	dirt3_window_mode_read(fd, b, count);
 +	return count;
 +}
 +static int32_t w_pwrite(int fd, const void *b, uint32_t n, int64_t off)
 +{
 +	return dirt3_adaptive_triggers_config_write(fd, b, n, off);
 +}
- static int w_open(const char *p, int fl, int mode) { return open(p, fl, mode); }
++static int w_open(const char *p, int fl, int mode)
++{
++	int fd = open(p, fl, mode);
++	if (fd < 0 && errno == ENOENT) return dirt3_window_mode_missing_preferences(p, fl);
++	return fd;
++}
  static int w_ftruncate(int fd, int64_t len) { return ftruncate(fd, len); }
  
+ static void t_getcwd(uint32_t *args, struct hres *r)
 diff --git a/src/libc3.c b/src/libc3.c
 index 75826af..f21ae70 100644
 --- a/src/libc3.c
@@ -1657,16 +1752,18 @@ index 75826af..f21ae70 100644
  { return (int32_t)recvfrom(fd, b, n, fl, a, al); }
  static int is_timeval_opt(int level, int opt) { return level == SOL_SOCKET && (opt == SO_RCVTIMEO || opt == SO_SNDTIMEO); }
 diff --git a/src/main.c b/src/main.c
-index 7d7f5fe..39bfa87 100644
+index 7d7f5fe..91fe9b1 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -294,6 +294,10 @@ int main(int argc, char **argv)
+@@ -294,6 +294,12 @@ int main(int argc, char **argv)
  		fprintf(stderr, "[mac32] Unsupported DiRT 3 build: no compatibility profile matched the executable.\n");
  		return EX_CONFIG;
  	}
 +	if (dirt3) {
 +		extern void dirt3_adaptive_triggers_init(void);
++		extern void dirt3_window_mode_init(void);
 +		dirt3_adaptive_triggers_init();
++		dirt3_window_mode_init();
 +	}
  	low_exe_placed(0);	// a position-independent program: nothing is fixed below EXE_ZONE
  	g32 entry = macho_entry(img), mainfn = macho_main(img);
