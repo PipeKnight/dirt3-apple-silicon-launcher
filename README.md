@@ -7,9 +7,10 @@ patches for the compatibility runtime, and reproducible findings.
 **Status.** On an Apple M4 with macOS 15.7.7, the original Feral release ran
 an offline rally on Finland's Tupasentie stage from the start to the results
 screen and returned to the menu. The game saved a local profile with
-autosaving enabled and loaded it in a new process. The engine creates
-OpenGL and OpenCL contexts and starts audio output units. Audible audio,
-controllers and other macOS versions remain unverified.
+autosaving enabled and loaded it in a new process. On the same Mac, the
+Steam edition loaded the Tupasentie stage in Singleplayer → Time Trial
+and responded to keyboard driving controls. Controllers and other macOS
+versions remain unverified.
 
 ## Open the launcher
 
@@ -20,6 +21,11 @@ original Mac installation. Use **Choose Game…** to locate a copy in another
 folder. **Play** starts the game directly. **Skip startup videos** is enabled
 by default. Clear the checkbox to play the original opening videos.
 **Show Logs** reveals the latest run log in Finder.
+
+Change resolution, multisampling (MSAA), shadows and other graphics
+settings in the game's **Options → Graphics Options** menu. The game
+uses its saved graphics settings, or chooses its own defaults on a
+fresh installation.
 
 The GitHub build has an ad-hoc signature and macOS may block it on first
 open. After trying to open it, look for **Open Anyway** under **System

@@ -28,7 +28,8 @@ while IFS= read -r -d '' file; do
     }
 done < <(find "$source/mac32" -type f -print0)
 cp -R "$project/launcher" "$project/patches" "$project/tests" "$source/project/"
-cp "$project/README.md" "$project/LICENSE" "$project/probe.py" "$project/Play DiRT 3.command" "$source/project/"
+cp "$project/README.md" "$project/findings.md" "$project/LICENSE" "$project/probe.py" \
+    "$project/Play DiRT 3.command" "$source/project/"
 if [[ "$(git -C "$llvm" rev-parse HEAD)" != "$(git -C "$llvm" rev-parse llvmorg-17.0.6^{commit})" ||
       -n "$(git -C "$llvm" status --porcelain)" ]]; then
     printf 'Use a clean llvmorg-17.0.6 checkout from the mac32 build instructions.\n' >&2
