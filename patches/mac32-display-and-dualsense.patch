@@ -1748,14 +1748,15 @@ index 0000000..7149d5b
 +}
 diff --git a/src/dirt3_overlay.m b/src/dirt3_overlay.m
 new file mode 100644
-index 0000000..516b4f6
+index 0000000..a7d4b29
 --- /dev/null
 +++ b/src/dirt3_overlay.m
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,321 @@
 +#import <AppKit/AppKit.h>
 +#import <Carbon/Carbon.h>
 +#import <IOKit/IOKitLib.h>
 +#import <OpenGL/OpenGL.h>
++#include <math.h>
 +#include <os/lock.h>
 +#include <stdatomic.h>
 +#include <sys/resource.h>
@@ -1764,7 +1765,7 @@ index 0000000..516b4f6
 +
 +extern int dirt3_version_patch_active(void);
 +
-+enum { frame_capacity = 2048 };
++enum { frame_capacity = 2048, cpu_history_capacity = 5 };
 +struct frame_sample { uint64_t end, elapsed; };
 +static const uint64_t history_ns = 5 * NSEC_PER_SEC;
 +static const uint64_t no_present_ns = NSEC_PER_SEC;
@@ -1789,7 +1790,10 @@ index 0000000..516b4f6
 +static io_service_t gpu;
 +static uint64_t last_poll, last_cpu_time, last_cpu_frames;
 +static double cpu_percent, cpu_ms;
-+static int gpu_percent;
++static unsigned cpu_min_cores;
++static struct { uint64_t end; unsigned cores; } cpu_history[cpu_history_capacity];
++static size_t next_cpu_sample;
++static struct gpu_sample { int device, renderer, tiler; } gpu_usage;
 +
 +static void set_recording(bool on)
 +{
@@ -1801,6 +1805,8 @@ index 0000000..516b4f6
 +	frames.count = frames.next = 0;
 +	os_unfair_lock_unlock(&frame_lock);
 +	last_poll = 0;
++	memset(cpu_history, 0, sizeof(cpu_history));
++	next_cpu_sample = 0;
 +	cpu_percent = cpu_ms = -1;
 +}
 +
@@ -1844,21 +1850,46 @@ index 0000000..516b4f6
 +		(uint64_t)(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) * NSEC_PER_USEC;
 +}
 +
-+static int gpu_utilization(void)
++static unsigned minimum_cpu_cores(uint64_t now, double busy_cores)
 +{
-+	if (!gpu) return -1;
++	// A second of CPU time per second of wall time is one fully busy core.
++	// This only bounds the number of cores: the scheduler can move threads
++	// between cores. Retain the busiest sample for the frame history window.
++	// Ignore tiny overshoots at integer boundaries from sampling CPU and wall
++	// time separately (10 ms CPU time per second of wall time).
++	unsigned cores = MAX(1.0, ceil(busy_cores - 0.01));
++	cpu_history[next_cpu_sample].end = now;
++	cpu_history[next_cpu_sample].cores = cores;
++	next_cpu_sample = (next_cpu_sample + 1) % cpu_history_capacity;
++	for (size_t i = 0; i < cpu_history_capacity; i++) {
++		if (now - cpu_history[i].end < history_ns)
++			cores = MAX(cores, cpu_history[i].cores);
++	}
++	return cores;
++}
++
++static int gpu_counter(CFDictionaryRef stats, CFStringRef key)
++{
++	CFTypeRef value = CFDictionaryGetValue(stats, key);
++	int percent;
++	if (value && CFGetTypeID(value) == CFNumberGetTypeID() &&
++		CFNumberGetValue(value, kCFNumberIntType, &percent) && percent >= 0 && percent <= 100)
++		return percent;
++	return -1;
++}
++
++static struct gpu_sample gpu_utilization(void)
++{
++	struct gpu_sample sample = {-1, -1, -1};
++	if (!gpu) return sample;
 +	CFTypeRef stats = IORegistryEntryCreateCFProperty(gpu, CFSTR("PerformanceStatistics"), NULL, 0);
-+	int result = -1;
 +	if (stats && CFGetTypeID(stats) == CFDictionaryGetTypeID()) {
-+		CFTypeRef value = CFDictionaryGetValue(stats, CFSTR("Device Utilization %"));
-+		if (value && CFGetTypeID(value) == CFNumberGetTypeID()) {
-+			int percent;
-+			if (CFNumberGetValue(value, kCFNumberIntType, &percent) && percent >= 0 && percent <= 100)
-+				result = percent;
-+		}
++		sample.device = gpu_counter(stats, CFSTR("Device Utilization %"));
++		sample.renderer = gpu_counter(stats, CFSTR("Renderer Utilization %"));
++		sample.tiler = gpu_counter(stats, CFSTR("Tiler Utilization %"));
 +	}
 +	if (stats) CFRelease(stats);
-+	return result;
++	return sample;
 +}
 +
 +static NSString *thermal_state(void)
@@ -1917,11 +1948,13 @@ index 0000000..516b4f6
 +
 +	if (!last_poll || now - last_poll >= NSEC_PER_SEC) {
 +		uint64_t spent = cpu_time_ns();
-+		if (last_poll && spent && last_cpu_time && spent >= last_cpu_time && presented > last_cpu_frames) {
++		uint64_t elapsed = now - last_poll;
++		if (last_poll && spent && last_cpu_time && spent >= last_cpu_time &&
++			elapsed <= history_ns && count && presented > last_cpu_frames) {
 +			uint64_t delta = spent - last_cpu_time;
-+			NSUInteger active_cores = MAX(NSProcessInfo.processInfo.activeProcessorCount, 1);
-+			double capacity = (double)(now - last_poll) * active_cores;
-+			cpu_percent = MIN(100.0, 100.0 * delta / capacity);
++			double busy_cores = (double)delta / elapsed;
++			cpu_min_cores = minimum_cpu_cores(now, busy_cores);
++			cpu_percent = MIN(100.0, 100.0 * busy_cores / cpu_min_cores);
 +			cpu_ms = (double)delta / (presented - last_cpu_frames) / NSEC_PER_MSEC;
 +		} else {
 +			cpu_percent = cpu_ms = -1;
@@ -1929,7 +1962,7 @@ index 0000000..516b4f6
 +		last_poll = now;
 +		last_cpu_time = spent;
 +		last_cpu_frames = presented;
-+		gpu_percent = gpu_utilization();
++		gpu_usage = gpu_utilization();
 +	}
 +
 +	NSString *rate = @"Collecting frame timings…";
@@ -1945,10 +1978,14 @@ index 0000000..516b4f6
 +		for (size_t i = 0; i < slow_count; i++) slow_time += times[i];
 +		low = [NSString stringWithFormat:@"1%% low    %5.1f FPS", (double)NSEC_PER_SEC * slow_count / slow_time];
 +	}
-+	NSString *cpu = cpu_percent >= 0 && count ? [NSString stringWithFormat:@"CPU game   %5.0f%% · %.1f ms/frame",
-+		cpu_percent, cpu_ms] : @"CPU game     —";
-+	NSString *device = gpu_percent >= 0 ? [NSString stringWithFormat:@"%d%%", gpu_percent] : @"—";
-+	text.stringValue = [NSString stringWithFormat:@"%@\n%@\n%@\nGPU system   %@\nThermal      %@",
++	NSString *cpu = cpu_percent >= 0 && count ? [NSString stringWithFormat:@"CPU %3.0f%% · ≥%u cores · %.1f ms",
++		cpu_percent, cpu_min_cores, cpu_ms] : @"CPU          —";
++	NSMutableString *device = [NSMutableString stringWithString:@"GPU sys "];
++	if (gpu_usage.device >= 0) [device appendFormat:@"%d%%", gpu_usage.device];
++	else [device appendString:@"—"];
++	if (gpu_usage.renderer >= 0) [device appendFormat:@" · R %d%%", gpu_usage.renderer];
++	if (gpu_usage.tiler >= 0) [device appendFormat:@" · T %d%%", gpu_usage.tiler];
++	text.stringValue = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\nThermal      %@",
 +		rate, low, cpu, device, thermal_state()];
 +}
 +
