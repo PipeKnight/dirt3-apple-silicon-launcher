@@ -40,6 +40,8 @@ During play, press **F9** to toggle the performance overlay. It shows FPS, frame
 
 Connect a DualSense directly to your Mac before clicking **Play**. Press **Options** at the title screen. The launcher registers a controller profile for your installed game and routes the game's two vibration channels to the DualSense handle actuators.
 
+Enable **DualSense adaptive triggers** in the launcher for variable resistance on L2 and R2. It uses the game's pedal position, wheel speed and engine RPM. This option uses the default D-Box setting in `hardware_settings_config.xml` and keeps the motion data inside the game process.
+
 ## Troubleshooting
 
 If the launcher reports that no compatibility profile matched, check the build of your Mac copy. Profile selection checks the instructions the runtime needs to patch. Executables with different SHA-256 hashes can use the same profile when those instructions match.

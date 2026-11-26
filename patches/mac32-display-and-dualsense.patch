@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index aeabf91..ca8ab39 100644
+index aeabf91..12f5910 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -3,10 +3,10 @@ CC = clang
@@ -11,7 +11,7 @@ index aeabf91..ca8ab39 100644
            -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
  SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c src/media_bridge.c \
 -      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
-+      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
++      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/dirt3_adaptive_triggers.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
  OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
  
  all: mac32 guest app
@@ -253,6 +253,255 @@ index 3121c2f..29bb503 100644
  	G("_CFBundleCopyResourceURLForLocalization", CFBundleCopyResourceURLForLocalization, "o:ooooo"),
  	G("_CFBundleCopyResourceURLInDirectory", CFBundleCopyResourceURLInDirectory, "o:oooo"),
  	G("_CFBundleCopyResourceURLsOfType", CFBundleCopyResourceURLsOfType, "o:ooo"),
+diff --git a/src/dirt3_adaptive_triggers.m b/src/dirt3_adaptive_triggers.m
+new file mode 100644
+index 0000000..487bd06
+--- /dev/null
++++ b/src/dirt3_adaptive_triggers.m
+@@ -0,0 +1,243 @@
++// DiRT 3's extended motion report supplies the two virtual pedal signals.
++// Route the built-in D-Box defaults to a private address inside this process.
++#import <AppKit/AppKit.h>
++#import <IOKit/hid/IOHIDLib.h>
++#import <IOKit/hid/IOHIDKeys.h>
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <math.h>
++#include <os/lock.h>
++#include <stdatomic.h>
++#include <string.h>
++#include <time.h>
++#include <unistd.h>
++#include "mac32.h"
++
++#define LOCAL_IP "127.1.2.3"
++#define LOCAL_PORT 9
++#define MOTION_PREFIX "<motion enabled=\"true\" ip=\""
++#define MOTION_DEFAULT MOTION_PREFIX "dbox\" port=\"20777\" delay=\"1\" extradata=\"0\" />"
++#define MOTION_LOCAL MOTION_PREFIX LOCAL_IP "\" port=\"9\" delay=\"1\" extradata=\"3\""
++
++static const char default_motion[] = MOTION_DEFAULT;
++static const char local_motion[] = MOTION_LOCAL "/>";
++static const char saved_motion[] = MOTION_LOCAL " />";
++
++_Static_assert(sizeof(default_motion) == sizeof(local_motion), "the game reads the original file size");
++
++static bool enabled;
++static atomic_bool routed;
++static os_unfair_lock motion_lock = OS_UNFAIR_LOCK_INIT;
++static float stage_time;
++static double last_advance;
++static unsigned levels[2];
++
++static IOHIDDeviceRef usb_pad;
++static double usb_retry_at;
++static unsigned applied[2];
++static bool trace;
++
++void dirt3_adaptive_triggers_init(void)
++{
++    const char *option = getenv("MAC32_DIRT3_ADAPTIVE_TRIGGERS");
++    enabled = option && !strcmp(option, "1");
++    trace = getenv("MAC32_TRACE_DUALSENSE_FF") != NULL;
++}
++
++static bool is_hardware_config(int fd)
++{
++    char path[PATH_MAX];
++    if (fcntl(fd, F_GETPATH, path) < 0) return false;
++    const char *base = strrchr(path, '/');
++    return base && !strcmp(base + 1, "hardware_settings_config.xml");
++}
++
++void dirt3_adaptive_triggers_config_read(int fd, void *bytes, int32_t size)
++{
++    if (!enabled || size < (int32_t)sizeof(default_motion) - 1) return;
++    char *tag = memmem(bytes, (size_t)size, default_motion, sizeof(default_motion) - 1);
++    if (!tag || !is_hardware_config(fd)) return;
++    memcpy(tag, local_motion, sizeof(local_motion) - 1);
++    if (!atomic_exchange(&routed, true)) LOG("DiRT 3: enabled in-process motion for adaptive triggers\n");
++}
++
++int32_t dirt3_adaptive_triggers_config_write(int fd, const void *bytes, uint32_t size, off_t offset)
++{
++    if (atomic_load(&routed) && size >= sizeof(local_motion) - 1 && size <= 128 * 1024) {
++        const char *tag = memmem(bytes, size, saved_motion, sizeof(saved_motion) - 1);
++        size_t padding = tag ? sizeof(saved_motion) - sizeof(default_motion) : 0;
++        if (!tag) tag = memmem(bytes, size, local_motion, sizeof(local_motion) - 1);
++        if (tag && is_hardware_config(fd)) {
++            // The game writes the full XML. Restore its D-Box setting before
++            // writing and keep the serialized byte count for its file API.
++            char *restored = malloc(size);
++            if (!restored) { errno = ENOMEM; return -1; }
++            memcpy(restored, bytes, size);
++            char *destination = restored + (tag - (const char *)bytes);
++            memcpy(destination, default_motion, sizeof(default_motion) - 1);
++            memset(destination + sizeof(default_motion) - 1, ' ', padding);
++            int32_t result = (int32_t)pwrite(fd, restored, size, offset);
++            free(restored);
++            return result;
++        }
++    }
++    return (int32_t)pwrite(fd, bytes, size, offset);
++}
++
++static double seconds(void)
++{
++    return (double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
++}
++
++static float clamp_unit(float value)
++{
++    return fmaxf(0, fminf(1, value));
++}
++
++static IOHIDDeviceRef open_wired_dualsense(void)
++{
++    IOHIDManagerRef manager = IOHIDManagerCreate(NULL, kIOHIDOptionsTypeNone);
++    if (!manager) return NULL;
++    NSDictionary *matching = @{
++        @kIOHIDVendorIDKey: @0x054c, @kIOHIDProductIDKey: @0x0ce6,
++        @kIOHIDPrimaryUsagePageKey: @1, @kIOHIDPrimaryUsageKey: @5,
++        @kIOHIDTransportKey: @"USB",
++    };
++    IOHIDManagerSetDeviceMatching(manager, (CFDictionaryRef)matching);
++    CFSetRef devices = IOHIDManagerCopyDevices(manager);
++    IOHIDDeviceRef device = NULL;
++    if (devices && CFSetGetCount(devices) == 1) {
++        CFSetGetValues(devices, (const void **)&device);
++        CFTypeRef size = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDMaxOutputReportSizeKey));
++        int length = 0;
++        if (size && CFGetTypeID(size) == CFNumberGetTypeID())
++            CFNumberGetValue(size, kCFNumberIntType, &length);
++        if (length == 48 && IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone) == kIOReturnSuccess)
++            CFRetain(device);
++        else
++            device = NULL;
++    }
++    if (devices) CFRelease(devices);
++    CFRelease(manager);
++    return device;
++}
++
++static void encode_trigger(uint8_t *effect, unsigned level)
++{
++    effect[0] = level ? 0x21 : 0x05; // zoned resistance or off
++    if (!level) return;
++
++    uint16_t mask = 0;
++    uint32_t strengths = 0;
++    for (unsigned zone = 2; zone <= 9; ++zone) {
++        unsigned force = 1 + (level - 1) * (zone - 2) / 7;
++        mask |= 1u << zone;
++        strengths |= (force - 1) << (3 * zone);
++    }
++    effect[1] = (uint8_t)mask;
++    effect[2] = (uint8_t)(mask >> 8);
++    for (unsigned byte = 0; byte < 4; ++byte)
++        effect[3 + byte] = (uint8_t)(strengths >> (8 * byte));
++}
++
++static bool send_triggers(unsigned left, unsigned right)
++{
++    // Sony's wired 48-byte report. The two valid bits select only the
++    // trigger banks. Rumble, audio and LEDs belong to their existing paths.
++    uint8_t report[48] = {0x02, 0x0c};
++    encode_trigger(report + 11, right);
++    encode_trigger(report + 22, left);
++    IOReturn result = IOHIDDeviceSetReport(usb_pad, kIOHIDReportTypeOutput,
++        report[0], report, sizeof(report));
++    if (trace && result == kIOReturnSuccess)
++        LOG("DiRT 3 adaptive triggers: L2=%u R2=%u (USB)\n", left, right);
++    else if (result != kIOReturnSuccess)
++        LOG("DiRT 3 adaptive triggers: USB report failed (%#x)\n", result);
++    return result == kIOReturnSuccess;
++}
++
++static void close_triggers(void)
++{
++    if (!usb_pad) return;
++    if (applied[0] || applied[1]) send_triggers(0, 0);
++    IOHIDDeviceClose(usb_pad, kIOHIDOptionsTypeNone);
++    CFRelease(usb_pad);
++    usb_pad = NULL;
++    applied[0] = applied[1] = 0;
++}
++
++static void update_triggers(void)
++{
++    unsigned next[2] = {0, 0};
++    double time = seconds();
++    os_unfair_lock_lock(&motion_lock);
++    if (time - last_advance < 0.25) memcpy(next, levels, sizeof(next));
++    os_unfair_lock_unlock(&motion_lock);
++    if (!NSApp.isActive || (!next[0] && !next[1])) {
++        close_triggers();
++        return;
++    }
++    if (!usb_pad && time >= usb_retry_at) {
++        usb_pad = open_wired_dualsense();
++        usb_retry_at = time + 1;
++    }
++    if (!usb_pad || (next[0] == applied[0] && next[1] == applied[1])) return;
++    if (send_triggers(next[0], next[1])) memcpy(applied, next, sizeof(applied));
++    else close_triggers();
++}
++
++static void start_updates(void)
++{
++    static dispatch_once_t once;
++    dispatch_once(&once, ^{
++        dispatch_async(dispatch_get_main_queue(), ^{
++            NSNotificationCenter *notifications = NSNotificationCenter.defaultCenter;
++            [notifications addObserverForName:NSApplicationWillTerminateNotification object:NSApp
++                queue:nil usingBlock:^(NSNotification *note) { close_triggers(); }];
++            dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
++            dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, NSEC_PER_SEC / 30, NSEC_PER_MSEC * 3);
++            dispatch_source_set_event_handler(timer, ^{
++                @autoreleasepool { update_triggers(); }
++            });
++            dispatch_activate(timer);
++        });
++    });
++}
++
++bool dirt3_adaptive_triggers_send(const void *bytes, uint32_t size, const struct sockaddr *address, uint32_t address_size)
++{
++    if (!atomic_load(&routed) || !address || address_size < sizeof(struct sockaddr_in) ||
++        address->sa_family != AF_INET) return false;
++    const struct sockaddr_in *target = (const struct sockaddr_in *)address;
++    if (target->sin_port != htons(LOCAL_PORT) || target->sin_addr.s_addr != inet_addr(LOCAL_IP)) return false;
++
++    // Extra data mode 3 contains 38 little-endian floats on both Mac builds.
++    float data[38];
++    if (size != sizeof(data)) return true;
++    memcpy(data, bytes, sizeof(data));
++    float stage = data[0], speed = data[7], wheel_left = data[27], wheel_right = data[28];
++    float throttle = data[29], brake = data[31], rpm_tens = data[37];
++    if (!isfinite(stage) || stage < 0 || !isfinite(speed) || speed < 0 ||
++        !isfinite(wheel_left) || !isfinite(wheel_right) ||
++        !(throttle >= 0 && throttle <= 1 && brake >= 0 && brake <= 1 &&
++          rpm_tens >= 0 && rpm_tens < 2200)) return true;
++
++    os_unfair_lock_lock(&motion_lock);
++    if (stage > stage_time || stage_time - stage > 1.0f) last_advance = seconds();
++    stage_time = stage;
++    if (stage > 0 && rpm_tens > 40) {
++        float wheels = (fabsf(wheel_left) + fabsf(wheel_right)) * 0.5f;
++        float slip = speed > 3 ? clamp_unit((speed - wheels) / speed) : 0;
++        levels[0] = (unsigned)roundf(2.0f + brake * (2.5f + 1.5f * slip));
++        levels[1] = (unsigned)roundf(1.5f + 2.5f * throttle * clamp_unit(rpm_tens / 800));
++    } else {
++        levels[0] = levels[1] = 0;
++    }
++    os_unfair_lock_unlock(&motion_lock);
++    if (trace) {
++        static atomic_flag logged = ATOMIC_FLAG_INIT;
++        if (!atomic_flag_test_and_set(&logged)) LOG("DiRT 3: received extended motion for adaptive triggers\n");
++    }
++    start_updates();
++    return true;
++}
 diff --git a/src/dirt3_force_feedback.m b/src/dirt3_force_feedback.m
 new file mode 100644
 index 0000000..338b0a3
@@ -1180,3 +1429,61 @@ index 0000000..281c3e0
 +	}
 +	return result;
 +}
+diff --git a/src/libc2.c b/src/libc2.c
+index 910d173..91561dc 100644
+--- a/src/libc2.c
++++ b/src/libc2.c
+@@ -199,8 +199,18 @@ static int w_statfs(const char *path, struct guest_statfs *out)
+ static int64_t w_lseek(int fd, int64_t off, int wh) { return lseek(fd, off, wh); }
+ static int32_t w_read(int fd, void *b, uint32_t n) { return (int32_t)read(fd, b, n); }
+ static int32_t w_write(int fd, const void *b, uint32_t n) { return (int32_t)write(fd, b, n); }
+-static int32_t w_pread(int fd, void *b, uint32_t n, int64_t off) { return (int32_t)pread(fd, b, n, off); }
+-static int32_t w_pwrite(int fd, const void *b, uint32_t n, int64_t off) { return (int32_t)pwrite(fd, b, n, off); }
++extern void dirt3_adaptive_triggers_config_read(int fd, void *bytes, int32_t size);
++extern int32_t dirt3_adaptive_triggers_config_write(int fd, const void *bytes, uint32_t size, off_t offset);
++static int32_t w_pread(int fd, void *b, uint32_t n, int64_t off)
++{
++	int32_t count = (int32_t)pread(fd, b, n, off);
++	dirt3_adaptive_triggers_config_read(fd, b, count);
++	return count;
++}
++static int32_t w_pwrite(int fd, const void *b, uint32_t n, int64_t off)
++{
++	return dirt3_adaptive_triggers_config_write(fd, b, n, off);
++}
+ static int w_open(const char *p, int fl, int mode) { return open(p, fl, mode); }
+ static int w_ftruncate(int fd, int64_t len) { return ftruncate(fd, len); }
+ 
+diff --git a/src/libc3.c b/src/libc3.c
+index 75826af..f21ae70 100644
+--- a/src/libc3.c
++++ b/src/libc3.c
+@@ -30,8 +30,12 @@ static uint32_t w_htonl(uint32_t v) { return htonl(v); }
+ static uint32_t w_ntohl(uint32_t v) { return ntohl(v); }
+ static int32_t w_send(int fd, const void *b, uint32_t n, int fl) { return (int32_t)send(fd, b, n, fl); }
+ static int32_t w_recv(int fd, void *b, uint32_t n, int fl) { return (int32_t)recv(fd, b, n, fl); }
++extern bool dirt3_adaptive_triggers_send(const void *bytes, uint32_t size, const struct sockaddr *address, uint32_t address_size);
+ static int32_t w_sendto(int fd, const void *b, uint32_t n, int fl, const struct sockaddr *a, uint32_t al)
+-{ return (int32_t)sendto(fd, b, n, fl, a, al); }
++{
++	if (dirt3_adaptive_triggers_send(b, n, a, al)) return (int32_t)n;
++	return (int32_t)sendto(fd, b, n, fl, a, al);
++}
+ static int32_t w_recvfrom(int fd, void *b, uint32_t n, int fl, struct sockaddr *a, socklen_t *al)
+ { return (int32_t)recvfrom(fd, b, n, fl, a, al); }
+ static int is_timeval_opt(int level, int opt) { return level == SOL_SOCKET && (opt == SO_RCVTIMEO || opt == SO_SNDTIMEO); }
+diff --git a/src/main.c b/src/main.c
+index 7d7f5fe..39bfa87 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -294,6 +294,10 @@ int main(int argc, char **argv)
+ 		fprintf(stderr, "[mac32] Unsupported DiRT 3 build: no compatibility profile matched the executable.\n");
+ 		return EX_CONFIG;
+ 	}
++	if (dirt3) {
++		extern void dirt3_adaptive_triggers_init(void);
++		dirt3_adaptive_triggers_init();
++	}
+ 	low_exe_placed(0);	// a position-independent program: nothing is fixed below EXE_ZONE
+ 	g32 entry = macho_entry(img), mainfn = macho_main(img);
+ 	if (!entry && !mainfn) die("%s has no entry point", argv[i]);

@@ -109,6 +109,22 @@ overlay. Its game CPU measurement includes all game process threads.
 The optional GPU utilization comes from the system I/O Registry and covers
 the whole GPU.
 
+### DualSense output
+
+DiRT 3 uses legacy Force Feedback for two vibration channels. Core Haptics
+basic pattern players opened both USB handle actuators. The advanced player
+failed to initialize on the test Mac. A separate physical USB test confirmed
+the basic player's vibration pulse.
+
+The standalone Mac benchmark emitted 3,613 valid extended motion packets
+in a diagnostic run. In the Steam Time Trial, the optional adaptive trigger
+path consumed the same format and submitted independent resistance changes
+for L2 and R2. The USB report changes only the trigger settings. The default
+D-Box setting was present on disk after the game's configuration writes.
+Both triggers produced resistance in an isolated physical USB test.
+In the interactive Steam run, the player confirmed both kinds of feedback.
+The runtime sent a zero-resistance report on pausing the Time Trial.
+
 ## Startup through AppKit
 
 - The guest zone registry honors default-zone reordering and dispatches the

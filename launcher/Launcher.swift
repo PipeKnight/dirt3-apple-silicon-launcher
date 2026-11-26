@@ -40,7 +40,7 @@ private func isSteamGame(_ game: URL) -> Bool {
 @MainActor
 private final class Launcher: NSObject, NSApplicationDelegate {
     private let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 500, height: 245),
+        contentRect: NSRect(x: 0, y: 0, width: 500, height: 275),
         styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false
     )
     private let path = NSTextField(labelWithString: "")
@@ -49,6 +49,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
     private let choose = NSButton(title: "Choose Game…", target: nil, action: nil)
     private let logs = NSButton(title: "Show Logs", target: nil, action: nil)
     private let skipVideos = NSButton(checkboxWithTitle: "Skip startup videos", target: nil, action: nil)
+    private let adaptiveTriggers = NSButton(checkboxWithTitle: "DualSense adaptive triggers", target: nil, action: nil)
     private var game: URL?
     private var process: Process?
     private var lastLog: URL?
@@ -70,14 +71,18 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         configure(logs, #selector(showLogs))
         skipVideos.target = self
         skipVideos.action = #selector(saveStartupVideoPreference)
+        adaptiveTriggers.target = self
+        adaptiveTriggers.action = #selector(saveAdaptiveTriggerPreference)
+        adaptiveTriggers.toolTip = "Use the game's pedal and vehicle telemetry to add resistance to L2 and R2."
         UserDefaults.standard.register(defaults: ["skipStartupVideos": true])
         skipVideos.state = UserDefaults.standard.bool(forKey: "skipStartupVideos") ? .on : .off
+        adaptiveTriggers.state = UserDefaults.standard.bool(forKey: "adaptiveTriggers") ? .on : .off
         play.keyEquivalent = "\r"
         logs.isEnabled = false
         let actions = NSStackView(views: [logs, NSView(), choose, play])
         actions.orientation = .horizontal
         actions.spacing = 8
-        let fields = NSStackView(views: [title, subtitle, path, skipVideos, status, actions])
+        let fields = NSStackView(views: [title, subtitle, path, skipVideos, adaptiveTriggers, status, actions])
         fields.orientation = .vertical
         fields.alignment = .leading
         fields.spacing = 12
@@ -156,6 +161,10 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(skipVideos.state == .on, forKey: "skipStartupVideos")
     }
 
+    @objc private func saveAdaptiveTriggerPreference() {
+        UserDefaults.standard.set(adaptiveTriggers.state == .on, forKey: "adaptiveTriggers")
+    }
+
     @objc private func showLogs() {
         if let lastLog { NSWorkspace.shared.activateFileViewerSelecting([lastLog]) }
     }
@@ -193,6 +202,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
             var environment = ProcessInfo.processInfo.environment
             environment["MAC32_DIRT3_DIRECT"] = "1"
             environment["MAC32_DIRT3_SKIP_STARTUP_VIDEOS"] = skipVideos.state == .on ? "1" : "0"
+            environment["MAC32_DIRT3_ADAPTIVE_TRIGGERS"] = adaptiveTriggers.state == .on ? "1" : "0"
             child.environment = environment
             child.currentDirectoryURL = game.deletingLastPathComponent()
             child.standardOutput = output
@@ -207,6 +217,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
             play.isEnabled = false
             choose.isEnabled = false
             skipVideos.isEnabled = false
+            adaptiveTriggers.isEnabled = false
             status.stringValue = "DiRT 3 is running."
         } catch {
             let failure = error as NSError
@@ -224,6 +235,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         play.isEnabled = true
         choose.isEnabled = true
         skipVideos.isEnabled = true
+        adaptiveTriggers.isEnabled = true
         if signaled {
             status.stringValue = "DiRT 3 stopped on signal \(code). See the session log."
         } else if code == 78 {
