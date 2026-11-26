@@ -42,7 +42,11 @@ During play, press **F9** to toggle the performance overlay in the lower-left co
 
 ## Gamepads
 
-Connect your gamepad over USB or Bluetooth. The launcher can use the macOS **Game Controller** extended profile for one modern gamepad at a time. This path provides sticks, buttons, D-pad and triggers where the controller exposes them. Press **Menu**, **Start** or **Options**, depending on the controller, at the title screen. A USB Google Stadia Controller was tested in the Steam edition, including the title screen, menu navigation and driving.
+Connect your gamepad over USB or Bluetooth. The launcher can use the macOS **Game Controller** extended profile for one modern gamepad at a time. This path provides sticks, buttons, D-pad and triggers where the controller exposes them. Press **Menu**, **Start** or **Options**, depending on the controller, at the title screen. For Xbox and 8BitDo controllers, check the supported models and connection modes. [Apple's Xbox compatibility list](https://support.apple.com/en-us/111101) · [8BitDo's Apple compatibility list](https://www.8bitdo.com/apple/)
+
+### Google Stadia Controller
+
+The launcher routes the game's two vibration channels to the Stadia Controller over USB and Bluetooth. Bluetooth requires the controller's Bluetooth mode. [Google's pairing instructions](https://support.google.com/stadia/answer/13067284?hl=en)
 
 ### DualSense
 
@@ -94,6 +98,7 @@ git -C "$runtime" apply "$PWD/patches/mac32-feral-entrypoint.patch" \
   "$PWD/patches/mac32-steam-cloud.patch"
 git -C "$runtime" apply "$PWD/patches/mac32-modern-gamepads.patch"
 git -C "$runtime" apply "$PWD/patches/mac32-gpu-frame-time.patch"
+git -C "$runtime" apply "$PWD/patches/mac32-stadia-rumble.patch"
 LLVM="$llvm" "$runtime/tools/get-llvm.sh"
 
 sdk="$(xcrun --sdk macosx --show-sdk-path)"

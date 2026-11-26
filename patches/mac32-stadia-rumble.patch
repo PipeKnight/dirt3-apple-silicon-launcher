@@ -1,0 +1,479 @@
+diff --git a/src/dirt3_gamepad.h b/src/dirt3_gamepad.h
+index ba262ed..77c4b0b 100644
+--- a/src/dirt3_gamepad.h
++++ b/src/dirt3_gamepad.h
+@@ -1,9 +1,12 @@
+ #pragma once
+ #import <Foundation/Foundation.h>
+ #import <IOKit/hid/IOHIDManager.h>
++#include <stdbool.h>
+ 
+ #define DIRT3_GAMEPAD_VENDOR 0x4d33
+ #define DIRT3_GAMEPAD_PRODUCT 1
++#define DIRT3_STADIA_VENDOR 0x18d1
++#define DIRT3_STADIA_PRODUCT 0x9400
+ 
+ void dirt3_gamepad_matching(IOHIDManagerRef manager, IOHIDDeviceCallback callback, void *context);
+ void dirt3_gamepad_removal(IOHIDManagerRef manager, IOHIDDeviceCallback callback, void *context);
+@@ -18,3 +21,5 @@ uint32_t dirt3_gamepad_element_usage_page(IOHIDElementRef element);
+ IOHIDElementRef dirt3_gamepad_value_element(IOHIDValueRef value);
+ CFIndex dirt3_gamepad_value_integer(IOHIDValueRef value);
+ uint64_t dirt3_gamepad_value_time(IOHIDValueRef value);
++
++bool dirt3_gamepad_has_stadia_location(CFNumberRef location);
+diff --git a/src/dirt3_gamepad.m b/src/dirt3_gamepad.m
+index 89a9680..8603e96 100644
+--- a/src/dirt3_gamepad.m
++++ b/src/dirt3_gamepad.m
+@@ -4,6 +4,7 @@
+ #import <GameController/GameController.h>
+ #import <mach/mach_time.h>
+ #include <math.h>
++#include <stdatomic.h>
+ #include "dirt3_gamepad.h"
+ #include "mac32.h"
+ 
+@@ -24,10 +25,14 @@ static struct {
+     void *matching_context, *removal_context, *input_context;
+     NSTimer *timer;
+     GCController *controller;
++    CFNumberRef stadia_location;
++    CFStringRef stadia_transport;
+     int previous[control_count];
+     bool initialized;
+ } bridge;
+ 
++static atomic_uint stadia_location_id;
++
+ // Stable, opaque handles for the guest. Never pass these to host IOKit.
+ #define DEVICE ((IOHIDDeviceRef)CFSTR("mac32 DiRT 3 gamepad device"))
+ #define VALUE ((IOHIDValueRef)CFSTR("mac32 DiRT 3 gamepad value"))
+@@ -57,6 +62,8 @@ static int element_index(IOHIDElementRef element)
+ CFTypeRef dirt3_gamepad_property(IOHIDDeviceRef device, CFStringRef key)
+ {
+     if (device != DEVICE) return IOHIDDeviceGetProperty(device, key);
++    if (CFEqual(key, CFSTR(kIOHIDLocationIDKey))) return bridge.stadia_location;
++    if (bridge.stadia_transport && CFEqual(key, CFSTR(kIOHIDTransportKey))) return bridge.stadia_transport;
+     static NSDictionary *properties;
+     static dispatch_once_t once;
+     dispatch_once(&once, ^{
+@@ -170,6 +177,56 @@ static bool uses_native_dualsense(GCController *controller)
+         ![controller.vendorName localizedCaseInsensitiveContainsString:@"Edge"];
+ }
+ 
++static CFNumberRef copy_stadia_location(GCController *controller, CFStringRef *matched_transport)
++{
++    if (![controller.vendorName localizedCaseInsensitiveContainsString:@"Stadia"]) return NULL;
++    IOHIDManagerRef manager = IOHIDManagerCreate(NULL, kIOHIDOptionsTypeNone);
++    if (!manager) return NULL;
++    IOHIDManagerSetDeviceMatching(manager, (CFDictionaryRef)@{
++        @kIOHIDVendorIDKey: @(DIRT3_STADIA_VENDOR), @kIOHIDProductIDKey: @(DIRT3_STADIA_PRODUCT),
++        @kIOHIDPrimaryUsagePageKey: @1, @kIOHIDPrimaryUsageKey: @5,
++    });
++    CFSetRef devices = IOHIDManagerCopyDevices(manager);
++    CFNumberRef location = NULL;
++    // Game Controller doesn't expose a physical HID identity. Only lend a
++    // location to the guest if the connected Stadia is unambiguous.
++    if (devices && CFSetGetCount(devices) == 1) {
++        IOHIDDeviceRef device;
++        CFSetGetValues(devices, (const void **)&device);
++        CFTypeRef transport = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDTransportKey));
++        CFTypeRef key = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDLocationIDKey));
++        if (transport && key && CFGetTypeID(key) == CFNumberGetTypeID()) {
++            if (CFEqual(transport, CFSTR("USB"))) *matched_transport = CFSTR("USB");
++            if (CFEqual(transport, CFSTR("Bluetooth Low Energy"))) *matched_transport = CFSTR("Bluetooth Low Energy");
++            if (*matched_transport) location = (CFNumberRef)CFRetain(key);
++        }
++    }
++    if (devices) CFRelease(devices);
++    CFRelease(manager);
++    return location;
++}
++
++static uint32_t location_id(CFNumberRef location)
++{
++    int64_t id = 0;
++    return location && CFGetTypeID(location) == CFNumberGetTypeID() &&
++        CFNumberGetValue(location, kCFNumberSInt64Type, &id) ? (uint32_t)id : 0;
++}
++
++bool dirt3_gamepad_has_stadia_location(CFNumberRef location)
++{
++    uint32_t id = location_id(location);
++    return id && id == atomic_load_explicit(&stadia_location_id, memory_order_relaxed);
++}
++
++static void set_stadia_location(CFNumberRef location, CFStringRef transport)
++{
++    if (bridge.stadia_location) CFRelease(bridge.stadia_location);
++    bridge.stadia_location = location;
++    bridge.stadia_transport = transport;
++    atomic_store_explicit(&stadia_location_id, location_id(location), memory_order_relaxed);
++}
++
+ static void update_gamepad(void)
+ {
+     if (!bridge.matching || !bridge.input) return;
+@@ -179,11 +236,17 @@ static void update_gamepad(void)
+         if (bridge.removal) bridge.removal(bridge.removal_context, kIOReturnSuccess, bridge.manager, DEVICE);
+         [bridge.controller release];
+         bridge.controller = nil;
++        set_stadia_location(NULL, NULL);
+     }
+     if (!bridge.controller) {
+         for (GCController *candidate in controllers) {
+             if (!candidate.extendedGamepad || uses_native_dualsense(candidate)) continue;
+             bridge.controller = [candidate retain];
++            CFStringRef transport = NULL;
++            CFNumberRef location = copy_stadia_location(candidate, &transport);
++            set_stadia_location(location, transport);
++            if (location) LOG("DiRT 3 gamepad: Stadia %s service mapped for force feedback\n",
++                [(NSString *)transport UTF8String]);
+             bridge.initialized = false;
+             bridge.matching(bridge.matching_context, kIOReturnSuccess, bridge.manager, DEVICE);
+             LOG("DiRT 3 gamepad: %s through macOS Game Controller\n", candidate.vendorName.UTF8String ?: "Gamepad");
+@@ -236,5 +299,6 @@ void dirt3_gamepad_close(IOHIDManagerRef manager)
+     if (bridge.manager != manager) return;
+     [bridge.timer invalidate];
+     [bridge.controller release];
++    set_stadia_location(NULL, NULL);
+     memset(&bridge, 0, sizeof bridge);
+ }
+diff --git a/src/dirt3_force_feedback.m b/src/dirt3_force_feedback.m
+index 968ca06..8576480 100644
+--- a/src/dirt3_force_feedback.m
++++ b/src/dirt3_force_feedback.m
+@@ -1,6 +1,5 @@
+ // The i386 game sends two motor strengths through the old ForceFeedback API.
+-// Translate only its DualSense gamepad path, keeping the controller's input
+-// connection and any other legacy devices independent of this bridge.
++// Route the legacy effects to either Core Haptics or the Stadia motors.
+ #import <AppKit/AppKit.h>
+ #import <CoreHaptics/CoreHaptics.h>
+ #import <ForceFeedback/ForceFeedback.h>
+@@ -11,6 +10,7 @@
+ #include <stdatomic.h>
+ #include <time.h>
+ #include "thunks.h"
++#include "dirt3_gamepad.h"
+ 
+ extern int dirt3_version_patch_active(void);
+ extern void dirt3_adaptive_triggers_reset_idle_device(void);
+@@ -24,8 +24,12 @@ static bool trace_enabled, trace_only;
+ static _Thread_local float game_rumble_gain = -1;
+ static double terminal_since, terminal_until;
+ 
++enum feedback_kind { no_feedback, dualsense_feedback, stadia_feedback, feedback_kind_count };
++
+ struct device {
+     g32 handle;
++    enum feedback_kind kind;
++    IOHIDDeviceRef hid;
+     float gain, escape[2];
+     float game_rumble_gain;
+     double escape_end;
+@@ -137,7 +141,7 @@ static void capture_game_rumble_gain(struct device *device)
+ {
+     if (!device || game_rumble_gain < 0 || device->game_rumble_gain == game_rumble_gain) return;
+     device->game_rumble_gain = game_rumble_gain;
+-    if (trace_enabled) LOG("DualSense force feedback: game effects gain %.2f\n", game_rumble_gain);
++    if (trace_enabled) LOG("DiRT 3 force feedback: game effects gain %.2f\n", game_rumble_gain);
+ }
+ 
+ static void bind_cached_motors(void)
+@@ -153,20 +157,90 @@ static void bind_cached_motors(void)
+         if (!effects[i].handle || effects[i].owner) continue;
+         effects[i].owner = owner;
+         if (trace_enabled)
+-            LOG("DualSense force feedback: rebound motor %u to device %u\n", effects[i].channel, owner);
++            LOG("DiRT 3 force feedback: rebound motor %u to device %u\n", effects[i].channel, owner);
+     }
+ }
+ 
+-static bool is_dualsense_service(io_service_t service)
++static enum feedback_kind feedback_kind_for_service(io_service_t service)
+ {
+-    if (!service || !dirt3_version_patch_active()) return false;
++    if (!service || !dirt3_version_patch_active()) return no_feedback;
+     CFTypeRef vendor = IORegistryEntryCreateCFProperty(service, CFSTR(kIOHIDVendorIDKey), NULL, 0);
+     CFTypeRef product = IORegistryEntryCreateCFProperty(service, CFSTR(kIOHIDProductIDKey), NULL, 0);
+-    bool matches = vendor && product && CFEqual(vendor, (CFTypeRef)@0x054c) &&
+-                   CFEqual(product, (CFTypeRef)@0x0ce6);
++    enum feedback_kind kind = no_feedback;
++    if (vendor && product) {
++        if (CFEqual(vendor, (CFTypeRef)@0x054c) && CFEqual(product, (CFTypeRef)@0x0ce6))
++            kind = dualsense_feedback;
++        if (CFEqual(vendor, (CFTypeRef)@(DIRT3_STADIA_VENDOR)) &&
++            CFEqual(product, (CFTypeRef)@(DIRT3_STADIA_PRODUCT))) {
++            CFTypeRef location = IORegistryEntryCreateCFProperty(service, CFSTR(kIOHIDLocationIDKey), NULL, 0);
++            if (dirt3_gamepad_has_stadia_location((CFNumberRef)location)) kind = stadia_feedback;
++            if (location) CFRelease(location);
++        }
++    }
+     if (vendor) CFRelease(vendor);
+     if (product) CFRelease(product);
+-    return matches;
++    return kind;
++}
++
++// Use the two 16-bit motor amplitudes described by the SDL Stadia driver.
++static IOReturn send_stadia_rumble(IOHIDDeviceRef device, uint16_t low, uint16_t high)
++{
++    enum { report_id = 5 };
++    const uint8_t report[] = {report_id, low & 0xff, low >> 8, high & 0xff, high >> 8};
++    return IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, report_id, report, sizeof(report));
++}
++
++static os_unfair_lock stadia_lock = OS_UNFAIR_LOCK_INIT;
++static IOHIDDeviceRef stadia_output;
++static uint16_t stadia_low, stadia_high;
++static double stadia_retry_at;
++
++static void close_stadia_output(void)
++{
++    if (!stadia_output) return;
++    send_stadia_rumble(stadia_output, 0, 0);
++    IOHIDDeviceClose(stadia_output, kIOHIDOptionsTypeNone);
++    CFRelease(stadia_output);
++    stadia_output = NULL;
++    stadia_low = stadia_high = 0;
++}
++
++static void stop_stadia_rumble(void)
++{
++    os_unfair_lock_lock(&stadia_lock);
++    close_stadia_output();
++    os_unfair_lock_unlock(&stadia_lock);
++}
++
++static void update_stadia_rumble(IOHIDDeviceRef device, const float strength[2], double time)
++{
++    uint16_t low = (uint16_t)lroundf(strength[0] * UINT16_MAX);
++    uint16_t high = (uint16_t)lroundf(strength[1] * UINT16_MAX);
++    os_unfair_lock_lock(&stadia_lock);
++    if (device != stadia_output) close_stadia_output();
++    if (device && !stadia_output && (low || high) && time >= stadia_retry_at) {
++        IOReturn result = IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone);
++        if (result == kIOReturnSuccess) {
++            stadia_output = (IOHIDDeviceRef)CFRetain(device);
++            LOG("DiRT 3 Stadia rumble ready\n");
++        } else {
++            LOG("DiRT 3 Stadia rumble: open failed (0x%x)\n", result);
++            stadia_retry_at = time + 2;
++        }
++    }
++    if (stadia_output && (low != stadia_low || high != stadia_high)) {
++        IOReturn result = send_stadia_rumble(stadia_output, low, high);
++        if (result == kIOReturnSuccess) {
++            stadia_low = low;
++            stadia_high = high;
++            if (trace_enabled) LOG("DiRT 3 Stadia rumble sent: low=%u high=%u\n", low, high);
++        } else {
++            LOG("DiRT 3 Stadia rumble: report failed (0x%x)\n", result);
++            close_stadia_output();
++            stadia_retry_at = time + 2;
++        }
++    }
++    os_unfair_lock_unlock(&stadia_lock);
+ }
+ 
+ static GCController *one_connected_dualsense(void)
+@@ -256,37 +330,48 @@ static void update_motors(void)
+ {
+     @autoreleasepool {
+         double time = now();
+-        float strength[2] = {0, 0};
+-        float terminal_gain = 0;
+-        bool has_device = false;
++        float strength[feedback_kind_count][2] = {0};
++        float terminal_gain[feedback_kind_count] = {0};
++        bool present[feedback_kind_count] = {0};
++        IOHIDDeviceRef stadia = NULL;
+         os_unfair_lock_lock(&state_lock);
+         for (size_t i = 0; i < max_devices; ++i) {
+             struct device *device = &devices[i];
+             if (!device->handle) continue;
+-            has_device = true;
+-            terminal_gain = fmaxf(terminal_gain, device->game_rumble_gain * device->gain);
++            enum feedback_kind kind = device->kind;
++            present[kind] = true;
++            if (kind == stadia_feedback && device->hid && !stadia)
++                stadia = (IOHIDDeviceRef)CFRetain(device->hid);
++            terminal_gain[kind] = fmaxf(terminal_gain[kind], device->game_rumble_gain * device->gain);
+             if (device->escape_end > time)
+                 for (size_t channel = 0; channel < 2; ++channel)
+-                    strength[channel] = fmaxf(strength[channel], device->escape[channel] * device->gain);
++                    strength[kind][channel] = fmaxf(strength[kind][channel], device->escape[channel] * device->gain);
+         }
+         for (size_t i = 0; i < max_effects; ++i) {
+             struct effect *effect = &effects[i];
+             struct device *device = effect->end > time ? find_device(effect->owner) : NULL;
+-            if (device)
+-                strength[effect->channel] = fmaxf(strength[effect->channel], effect->strength * effect->gain * device->gain);
++            if (device) {
++                float *level = &strength[device->kind][effect->channel];
++                *level = fmaxf(*level, effect->strength * effect->gain * device->gain);
++            }
+         }
+-        if (has_device && time < terminal_until) {
++        if (time < terminal_until) {
+             float elapsed = (float)fmax(0, time - terminal_since);
+-            float shake = (0.245f + 0.64f * expf(-2.7f * elapsed)) * terminal_gain;
+-            strength[0] = fmaxf(strength[0], shake);
+-            strength[1] = fmaxf(strength[1], shake * 0.88f);
+-        } else if (terminal_since && time >= terminal_until) {
+-            if (trace_enabled) LOG("DualSense terminal slow motion: ended after %.2f s\n",
++            float shake = 0.245f + 0.64f * expf(-2.7f * elapsed);
++            for (enum feedback_kind kind = dualsense_feedback; kind < feedback_kind_count; ++kind) {
++                if (!present[kind]) continue;
++                strength[kind][0] = fmaxf(strength[kind][0], shake * terminal_gain[kind]);
++                strength[kind][1] = fmaxf(strength[kind][1], shake * terminal_gain[kind] * 0.88f);
++            }
++        } else if (terminal_since) {
++            if (trace_enabled) LOG("DiRT 3 terminal slow motion: ended after %.2f s\n",
+                 terminal_until - terminal_since);
+             terminal_since = 0;
+         }
+         os_unfair_lock_unlock(&state_lock);
+-        if (!has_device) {
++        if (!trace_only) update_stadia_rumble(NSApp.isActive ? stadia : NULL, strength[stadia_feedback], time);
++        if (stadia) CFRelease(stadia);
++        if (!present[dualsense_feedback] && !present[stadia_feedback]) {
+             reset_motors();
+             [controller release];
+             controller = nil;
+@@ -296,17 +381,18 @@ static void update_motors(void)
+             return;
+         }
+ 
++        const float *dualsense = strength[dualsense_feedback];
+         static bool traced_output;
+         static double trace_at;
+-        bool rumbling = strength[0] > 0 || strength[1] > 0;
++        bool rumbling = dualsense[0] > 0 || dualsense[1] > 0;
+         if (trace_enabled && rumbling && (!traced_output || time >= trace_at)) {
+-            LOG("DualSense force feedback: left=%.3f right=%.3f\n", strength[0], strength[1]);
++            LOG("DualSense force feedback: left=%.3f right=%.3f\n", dualsense[0], dualsense[1]);
+             trace_at = time + 1;
+         }
+         traced_output = rumbling;
+         if (trace_only) return;
+ 
+-        GCController *connected = NSApp.isActive && (rumbling || controller)
++        GCController *connected = present[dualsense_feedback] && NSApp.isActive && (rumbling || controller)
+             ? one_connected_dualsense() : nil;
+         if (connected != controller) {
+             reset_motors();
+@@ -331,8 +417,8 @@ static void update_motors(void)
+             retry_at = time + 2;
+         }
+ 
+-        float first = split_handles ? strength[0] : fmaxf(strength[0], strength[1]);
+-        if (!set_motor(motors[0], first, time) || !set_motor(motors[1], strength[1], time)) {
++        float first = split_handles ? dualsense[0] : fmaxf(dualsense[0], dualsense[1]);
++        if (!set_motor(motors[0], first, time) || !set_motor(motors[1], dualsense[1], time)) {
+             reset_motors();
+             retry_at = time + 2;
+         }
+@@ -343,6 +429,12 @@ static void start_timer(void)
+ {
+     dispatch_async(dispatch_get_main_queue(), ^{
+         if (update_timer) return;
++        static dispatch_once_t once;
++        dispatch_once(&once, ^{
++            atexit(stop_stadia_rumble);
++            [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification
++                object:NSApp queue:nil usingBlock:^(NSNotification *notification) { stop_stadia_rumble(); }];
++        });
+         update_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+         dispatch_source_set_timer(update_timer, DISPATCH_TIME_NOW, NSEC_PER_SEC / 40, NSEC_PER_MSEC * 3);
+         dispatch_source_set_event_handler(update_timer, ^{ update_motors(); });
+@@ -352,8 +444,8 @@ static void start_timer(void)
+ 
+ static void t_ff_supported(uint32_t *args, struct hres *r)
+ {
+-    bool supported = is_dualsense_service(A(0));
+-    if (trace_enabled) LOG("DualSense force feedback: legacy service matched=%d\n", supported);
++    bool supported = feedback_kind_for_service(A(0)) != no_feedback;
++    if (trace_enabled) LOG("DiRT 3 force feedback: legacy service matched=%d\n", supported);
+     RET(supported ? FF_OK : FFERR_NOINTERFACE);
+ }
+ 
+@@ -362,21 +454,27 @@ static void t_ff_create_device(uint32_t *args, struct hres *r)
+     g32 *out = G2H(A(1));
+     if (!out) { RET(FFERR_INVALIDPARAM); return; }
+     *out = 0;
+-    if (!is_dualsense_service(A(0))) { RET(FFERR_NOINTERFACE); return; }
++    enum feedback_kind kind = feedback_kind_for_service(A(0));
++    if (kind == no_feedback) { RET(FFERR_NOINTERFACE); return; }
++    IOHIDDeviceRef hid = kind == stadia_feedback ? IOHIDDeviceCreate(NULL, A(0)) : NULL;
++    if (kind == stadia_feedback && !hid) { RET(FFERR_NOINTERFACE); return; }
+ 
+     os_unfair_lock_lock(&state_lock);
+     for (size_t i = 0; i < max_devices; ++i) {
+         if (devices[i].handle) continue;
+-        devices[i] = (struct device){.handle = next_handle++, .gain = 1};
++        devices[i] = (struct device){.handle = next_handle++, .gain = 1, .kind = kind, .hid = hid};
+         *out = devices[i].handle;
+         break;
+     }
+     if (*out) bind_cached_motors();
+     os_unfair_lock_unlock(&state_lock);
+     if (*out) {
+-        if (trace_enabled) LOG("DualSense force feedback: legacy device created\n");
+-        dirt3_adaptive_triggers_reset_idle_device();
++        if (trace_enabled) LOG("DiRT 3 force feedback: legacy device created for %s\n",
++            kind == stadia_feedback ? "Stadia" : "DualSense");
++        if (kind == dualsense_feedback) dirt3_adaptive_triggers_reset_idle_device();
+         start_timer();
++    } else if (hid) {
++        CFRelease(hid);
+     }
+     RET(*out ? FF_OK : FFERR_DEVICEFULL);
+ }
+@@ -385,6 +483,7 @@ static void t_ff_release_device(uint32_t *args, struct hres *r)
+ {
+     os_unfair_lock_lock(&state_lock);
+     struct device *device = find_device(A(0));
++    IOHIDDeviceRef hid = device ? device->hid : NULL;
+     if (device) {
+         *device = (struct device){0};
+         for (size_t i = 0; i < max_effects; ++i) {
+@@ -401,9 +500,10 @@ static void t_ff_release_device(uint32_t *args, struct hres *r)
+             effect->strength = 0;
+         }
+         bind_cached_motors();
+-        if (trace_enabled) LOG("DualSense force feedback: released device %u\n", A(0));
++        if (trace_enabled) LOG("DiRT 3 force feedback: released device %u\n", A(0));
+     }
+     os_unfair_lock_unlock(&state_lock);
++    if (hid) CFRelease(hid);
+     RET(device ? FF_OK : FFERR_NOINTERFACE);
+ }
+ 
+@@ -429,7 +529,7 @@ static void t_ff_create_effect(uint32_t *args, struct hres *r)
+     if (!type || !CFEqual(type, kFFEffectType_Sine_ID) || !definition || !parse_periodic(definition, &effect)) {
+         static atomic_flag logged = ATOMIC_FLAG_INIT;
+         if (trace_enabled && !atomic_flag_test_and_set_explicit(&logged, memory_order_relaxed))
+-            LOG("DualSense force feedback: unsupported legacy effect\n");
++            LOG("DiRT 3 force feedback: unsupported legacy effect\n");
+         RET(FFERR_UNSUPPORTED);
+         return;
+     }
+@@ -449,7 +549,7 @@ static void t_ff_create_effect(uint32_t *args, struct hres *r)
+     }
+     os_unfair_lock_unlock(&state_lock);
+     if (*out && trace_enabled)
+-        LOG("DualSense force feedback: game created motor %u (%.3f)\n", effect.channel, effect.strength);
++        LOG("DiRT 3 force feedback: game created motor %u (%.3f)\n", effect.channel, effect.strength);
+     RET(!valid_owner ? FFERR_NOINTERFACE : *out ? FF_OK : FFERR_DEVICEFULL);
+ }
+ 
+@@ -593,6 +693,6 @@ static struct hfn feedback[] = {
+ void thunks_dirt3_force_feedback_init(void)
+ {
+     trace_only = getenv("MAC32_DUALSENSE_FF_TRACE_ONLY") != NULL;
+-    trace_enabled = trace_only || getenv("MAC32_TRACE_DUALSENSE_FF") != NULL;
++    trace_enabled = trace_only || getenv("MAC32_TRACE_DUALSENSE_FF") != NULL || getenv("MAC32_TRACE_DIRT3_FF") != NULL;
+     REGISTER(feedback);
+ }
