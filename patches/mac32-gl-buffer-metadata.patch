@@ -1,0 +1,180 @@
+diff --git a/src/gl_special.c b/src/gl_special.c
+index 1bd4042..a9bbc34 100644
+--- a/src/gl_special.c
++++ b/src/gl_special.c
+@@ -7,6 +7,7 @@
+ #include <OpenGL/glext.h>
+ #include <string.h>
+ #include <pthread.h>
++#include <stdatomic.h>
+ #include "thunks.h"
+ 
+ // array of 32-bit guest pointers -> host array
+@@ -106,9 +107,43 @@ static void t_glGetStringi(uint32_t *args, struct hres *r) { RET(keep_string(glG
+ // ---- mapped buffers ---------------------------------------------------------
+ // One shadow per buffer object name, kept between maps and freed when the
+ // buffer is deleted. (Mapping state is per context in GL; the game uses one.)
+-struct mapping { GLuint buf; void *host; g32 shadow; uint32_t cap, size, off; int explicit_flush, flushed, write; };
++struct mapping {
++    GLuint buf;
++    void *host;
++    g32 shadow;
++    uint32_t cap, size, off;
++    int explicit_flush, flushed, write;
++    CGLContextObj metadata_context;
++    uint64_t metadata_generation;
++};
+ static struct mapping *maps;
+ static uint32_t nmaps, capmaps;
++static _Atomic uint64_t metadata_generation = 1;
++static int metadata_cache_enabled;
++
++void dirt3_gl_invalidate_buffer_metadata(void)
++{
++    if (metadata_cache_enabled)
++        atomic_fetch_add_explicit(&metadata_generation, 1, memory_order_relaxed);
++}
++
++static void w_glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage)
++{
++    glBufferData(target, size, data, usage);
++    dirt3_gl_invalidate_buffer_metadata();
++}
++
++static void w_glBufferDataARB(GLenum target, GLsizeiptr size, const void *data, GLenum usage)
++{
++    glBufferDataARB(target, size, data, usage);
++    dirt3_gl_invalidate_buffer_metadata();
++}
++
++static void w_glBufferParameteriAPPLE(GLenum target, GLenum name, GLint value)
++{
++    glBufferParameteriAPPLE(target, name, value);
++    dirt3_gl_invalidate_buffer_metadata();
++}
+ 
+ static GLenum binding_of(GLenum target)
+ {
+@@ -161,10 +196,8 @@ static void t_glDeleteBuffersARB(uint32_t *args, struct hres *r)
+ 	forget_buffers((GLsizei)A(0), G2H(A(1)));
+ 	glDeleteBuffersARB((GLsizei)A(0), G2H(A(1)));
+ }
+-static g32 shadow_map(GLenum target, void *host, uint32_t off, uint32_t size, int read, int write, int explicit_flush)
++static g32 shadow_map(struct mapping *m, void *host, uint32_t off, uint32_t size, int read, int write, int explicit_flush)
+ {
+-	if (!host) return 0;
+-	struct mapping *m = mapping_for(target, 1);
+ 	if (m->cap < size) {
+ 		gfree(m->shadow);
+ 		m->cap = size;
+@@ -187,11 +220,25 @@ static void t_glMapBuffer(uint32_t *args, struct hres *r)
+ 		return;
+ 	}
+ 
+-	// Let mapping synchronize with pending draws before querying buffer state.
+-	GLint size = 0, flushable = GL_TRUE;
+-	glGetBufferParameteriv(A(0), GL_BUFFER_SIZE, &size);
+-	glGetBufferParameteriv(A(0), GL_BUFFER_FLUSHING_UNMAP_APPLE, &flushable);
+-	RET(shadow_map(A(0), h, 0, (uint32_t)size, A(1) != GL_WRITE_ONLY, A(1) != GL_READ_ONLY, !flushable));
++    // These attributes stay constant across maps until storage or buffer
++    // parameters change. Avoid synchronizing with the GL queue to reread them.
++    GLint size = 0, flushable = GL_TRUE;
++    struct mapping *m = NULL;
++    CGLContextObj context = metadata_cache_enabled ? CGLGetCurrentContext() : NULL;
++    if (context) {
++        m = mapping_for(A(0), 1);
++        uint64_t generation = atomic_load_explicit(&metadata_generation, memory_order_relaxed);
++        if (m->metadata_context == context && m->metadata_generation == generation) {
++            RET(shadow_map(m, h, 0, m->size, A(1) != GL_WRITE_ONLY, A(1) != GL_READ_ONLY, m->explicit_flush));
++            return;
++        }
++        m->metadata_context = context;
++        m->metadata_generation = generation;
++    }
++    glGetBufferParameteriv(A(0), GL_BUFFER_SIZE, &size);
++    glGetBufferParameteriv(A(0), GL_BUFFER_FLUSHING_UNMAP_APPLE, &flushable);
++    if (!m) m = mapping_for(A(0), 1);
++    RET(shadow_map(m, h, 0, (uint32_t)size, A(1) != GL_WRITE_ONLY, A(1) != GL_READ_ONLY, !flushable));
+ }
+ static void t_glFlushMappedBufferRangeAPPLE(uint32_t *args, struct hres *r)
+ {
+@@ -252,6 +299,9 @@ static struct hfn gls[] = {
+ 	R("_glGetVertexAttribPointerv", t_glGetVertexAttribPointerv),
+ 	R("_glGetVertexAttribPointervARB", t_glGetVertexAttribPointerv),
+ 	R("_glGetString", t_glGetString), R("_glGetStringi", t_glGetStringi),
++	G("_glBufferData", w_glBufferData, "v:uipu"),
++	G("_glBufferDataARB", w_glBufferDataARB, "v:uipu"),
++	G("_glBufferParameteriAPPLE", w_glBufferParameteriAPPLE, "v:uui"),
+ 	R("_glMapBuffer", t_glMapBuffer), R("_glMapBufferARB", t_glMapBuffer),
+ 	R("_glFlushMappedBufferRangeAPPLE", t_glFlushMappedBufferRangeAPPLE),
+ 	R("_glUnmapBuffer", t_glUnmapBuffer), R("_glUnmapBufferARB", t_glUnmapBuffer),
+@@ -260,4 +310,10 @@ static struct hfn gls[] = {
+ };
+ 
+ void thunks_gl_gen_init(void);
+-void thunks_gl_init(void) { REGISTER(gls); thunks_gl_gen_init(); }
++void thunks_gl_init(void)
++{
++    const char *cache = getenv("MAC32_DIRT3_GL_BUFFER_CACHE");
++    metadata_cache_enabled = cache && !strcmp(cache, "1");
++    REGISTER(gls);
++    thunks_gl_gen_init();
++}
+diff --git a/src/gl_thunks.c b/src/gl_thunks.c
+index 9ead0d3..c2174f2 100644
+--- a/src/gl_thunks.c
++++ b/src/gl_thunks.c
+@@ -477,7 +477,6 @@ static struct hfn gl[] = {
+ 	G("_glBindBuffer", NULL, "v:uu"),
+ 	G("_glGenBuffers", NULL, "v:ip"),
+ 	G("_glIsBuffer", NULL, "b:u"),
+-	G("_glBufferData", NULL, "v:uipu"),
+ 	G("_glBufferSubData", NULL, "v:uiip"),
+ 	G("_glGetBufferSubData", NULL, "v:uiip"),
+ 	G("_glGetBufferParameteriv", NULL, "v:uup"),
+@@ -718,7 +717,6 @@ static struct hfn gl[] = {
+ 	G("_glBindBufferARB", NULL, "v:uu"),
+ 	G("_glGenBuffersARB", NULL, "v:ip"),
+ 	G("_glIsBufferARB", NULL, "b:u"),
+-	G("_glBufferDataARB", NULL, "v:uipu"),
+ 	G("_glBufferSubDataARB", NULL, "v:uiip"),
+ 	G("_glGetBufferSubDataARB", NULL, "v:uiip"),
+ 	G("_glGetBufferParameterivARB", NULL, "v:uup"),
+@@ -936,7 +934,6 @@ static struct hfn gl[] = {
+ 	G("_glFinishFenceAPPLE", NULL, "v:u"),
+ 	G("_glTestObjectAPPLE", NULL, "b:uu"),
+ 	G("_glFinishObjectAPPLE", NULL, "v:uu"),
+-	G("_glBufferParameteriAPPLE", NULL, "v:uui"),
+ 	G("_glFlushRenderAPPLE", NULL, "v:"),
+ 	G("_glFinishRenderAPPLE", NULL, "v:"),
+ 	G("_glSwapAPPLE", NULL, "v:"),
+diff --git a/src/dirt3_overlay.m b/src/dirt3_overlay.m
+index 7c761ea..e57816a 100644
+--- a/src/dirt3_overlay.m
++++ b/src/dirt3_overlay.m
+@@ -140,8 +140,11 @@ void dirt3_cancel_gpu_query(void)
+ 		finish_gpu_query(CGLGetCurrentContext(), false);
+ }
+ 
++extern void dirt3_gl_invalidate_buffer_metadata(void);
++
+ CGLError dirt3_destroy_cgl_context(CGLContextObj context)
+ {
++	dirt3_gl_invalidate_buffer_metadata();
+ 	os_unfair_lock_lock(&gpu_query_lock);
+ 	if (gpu_query.context == context) {
+ 		if (context == CGLGetCurrentContext()) {
+diff --git a/tools/gen_gl.py b/tools/gen_gl.py
+index d5f2af1..b92ef53 100644
+--- a/tools/gen_gl.py
++++ b/tools/gen_gl.py
+@@ -24,7 +24,8 @@ SPECIAL = {'glMapBuffer', 'glMapBufferARB', 'glUnmapBuffer', 'glUnmapBufferARB',
+            'glMultiDrawElementsBaseVertex', 'glTransformFeedbackVaryings', 'glTransformFeedbackVaryingsEXT',
+            'glGetAttachedObjectsARB',
+            'glGetPointervEXT', 'glGetTexParameterPointervAPPLE', 'glGetVertexAttribPointervNV',
+-           'glDeleteBuffers', 'glDeleteBuffersARB', 'glBeginQuery', 'glBeginQueryARB'}
++           'glDeleteBuffers', 'glDeleteBuffersARB', 'glBeginQuery', 'glBeginQueryARB',
++           'glBufferData', 'glBufferDataARB', 'glBufferParameteriAPPLE'}
+ 
+ def code(t, ret=False):
+     t = t.replace('const', '').strip()

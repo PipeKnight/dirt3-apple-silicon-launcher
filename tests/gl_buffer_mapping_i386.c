@@ -1,7 +1,7 @@
 enum {
     profile_attribute = 99, legacy_profile = 0x1000,
     array_buffer = 0x8892, static_draw = 0x88e4,
-    read_only = 0x88b8, write_only = 0x88b9,
+    read_only = 0x88b8, write_only = 0x88b9, flushing_unmap = 0x8a13,
     invalid_enum = 0x0500
 };
 
@@ -13,6 +13,9 @@ extern int CGLSetCurrentContext(void *);
 extern void glGenBuffers(int, unsigned *);
 extern void glBindBuffer(unsigned, unsigned);
 extern void glBufferData(unsigned, int, const void *, unsigned);
+extern void glBufferDataARB(unsigned, int, const void *, unsigned);
+extern void glBufferParameteriAPPLE(unsigned, unsigned, int);
+extern void glFlushMappedBufferRangeAPPLE(unsigned, int, int);
 extern void *glMapBuffer(unsigned, unsigned);
 extern unsigned char glUnmapBuffer(unsigned);
 extern void glDeleteBuffers(int, const unsigned *);
@@ -53,6 +56,31 @@ int main(void)
         return 7;
     if (glMapBuffer(array_buffer, 0) || glGetError() != invalid_enum || glGetError())
         return 8;
+
+    unsigned int replacement[32];
+    for (unsigned int i = 0; i < 32; i++)
+        replacement[i] = 0x42a00000u + i;
+    glBufferDataARB(array_buffer, sizeof(replacement), replacement, static_draw);
+    mapped = glMapBuffer(array_buffer, write_only);
+    if (!mapped || glGetError())
+        return 9;
+    mapped[31] = 0x5a5a5a5a;
+    if (!glUnmapBuffer(array_buffer) || glGetError())
+        return 10;
+
+    glBufferParameteriAPPLE(array_buffer, flushing_unmap, 0);
+    mapped = glMapBuffer(array_buffer, write_only);
+    if (!mapped || glGetError())
+        return 11;
+    mapped[8] = 0x12345678;
+    glFlushMappedBufferRangeAPPLE(array_buffer, 8 * sizeof(*mapped), sizeof(*mapped));
+    if (!glUnmapBuffer(array_buffer) || glGetError())
+        return 12;
+    readback = glMapBuffer(array_buffer, read_only);
+    if (!readback || glGetError() || readback[8] != 0x12345678 || readback[31] != 0x5a5a5a5a)
+        return 13;
+    if (!glUnmapBuffer(array_buffer) || glGetError())
+        return 14;
 
     glDeleteBuffers(1, &buffer);
     CGLSetCurrentContext(0);

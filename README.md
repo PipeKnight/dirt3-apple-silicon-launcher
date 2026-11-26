@@ -101,6 +101,7 @@ git -C "$runtime" apply "$PWD/patches/mac32-feral-entrypoint.patch" \
 git -C "$runtime" apply "$PWD/patches/mac32-modern-gamepads.patch"
 git -C "$runtime" apply "$PWD/patches/mac32-gpu-frame-time.patch"
 git -C "$runtime" apply "$PWD/patches/mac32-stadia-rumble.patch"
+git -C "$runtime" apply "$PWD/patches/mac32-gl-buffer-metadata.patch"
 LLVM="$llvm" "$runtime/tools/get-llvm.sh"
 
 sdk="$(xcrun --sdk macosx --show-sdk-path)"
