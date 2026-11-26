@@ -503,10 +503,10 @@ index 3121c2f..29bb503 100644
  	G("_CFBundleCopyResourceURLsOfType", CFBundleCopyResourceURLsOfType, "o:ooo"),
 diff --git a/src/dirt3_adaptive_triggers.m b/src/dirt3_adaptive_triggers.m
 new file mode 100644
-index 0000000..509dfb4
+index 0000000..1a61ee4
 --- /dev/null
 +++ b/src/dirt3_adaptive_triggers.m
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,389 @@
 +// DiRT 3's extended motion report supplies the two virtual pedal signals.
 +// Route the built-in D-Box defaults to a private address inside this process.
 +#import <AppKit/AppKit.h>
@@ -535,7 +535,7 @@ index 0000000..509dfb4
 +
 +_Static_assert(sizeof(default_motion) == sizeof(local_motion), "the game reads the original file size");
 +
-+static bool enabled;
++static bool enabled, configured;
 +static atomic_bool routed;
 +static os_unfair_lock motion_lock = OS_UNFAIR_LOCK_INIT;
 +static float stage_time;
@@ -554,11 +554,14 @@ index 0000000..509dfb4
 +static struct trigger_effect engine_effect;
 +
 +static IOHIDDeviceRef hid_pad;
++static os_unfair_lock hid_lock = OS_UNFAIR_LOCK_INIT;
 +static double hid_retry_at;
 +static bool bluetooth;
 +static uint8_t bluetooth_sequence;
 +static struct trigger_effect applied[2];
 +static bool trace;
++void dirt3_adaptive_triggers_reset_idle_device(void);
++void dirt3_adaptive_triggers_shutdown(void);
 +
 +float dirt3_set_motion_engine_damage(float damage)
 +{
@@ -571,7 +574,10 @@ index 0000000..509dfb4
 +{
 +    const char *option = getenv("MAC32_DIRT3_ADAPTIVE_TRIGGERS");
 +    enabled = option && !strcmp(option, "1");
++    configured = enabled || (option && !strcmp(option, "0"));
 +    trace = getenv("MAC32_TRACE_DUALSENSE_FF") != NULL;
++    if (enabled) atexit(dirt3_adaptive_triggers_shutdown);
++    dirt3_adaptive_triggers_reset_idle_device();
 +}
 +
 +static bool is_hardware_config(int fd)
@@ -715,6 +721,30 @@ index 0000000..509dfb4
 +    memset(applied, 0, sizeof(applied));
 +}
 +
++void dirt3_adaptive_triggers_shutdown(void)
++{
++    os_unfair_lock_lock(&hid_lock);
++    close_triggers();
++    os_unfair_lock_unlock(&hid_lock);
++}
++
++void dirt3_adaptive_triggers_reset_idle_device(void)
++{
++    if (!configured) return;
++    @autoreleasepool {
++        os_unfair_lock_lock(&hid_lock);
++        if (!hid_pad) {
++            hid_pad = open_dualsense();
++            if (hid_pad) {
++                const struct trigger_effect off[2] = {0};
++                send_triggers(off);
++                close_triggers();
++            }
++        }
++        os_unfair_lock_unlock(&hid_lock);
++    }
++}
++
 +static void update_triggers(void)
 +{
 +    struct trigger_effect next[2] = {0};
@@ -723,13 +753,8 @@ index 0000000..509dfb4
 +    if (time - last_advance < 0.25) {
 +        if (brake_level) {
 +            next[0] = (struct trigger_effect){.level = brake_level, .start_zone = 3};
-+            if (brake_level > 1 && brake_slip_since) {
-+                double phase = fmod(time - brake_slip_since, 0.16);
-+                if (phase >= 0.10 && phase < 0.13 && brake_level > 2)
-+                    next[0].level -= 2;
-+                else if (phase >= 0.07)
-+                    next[0].level--;
-+            }
++            if (brake_slip_since && fmod(time - brake_slip_since, 0.125) >= 0.065)
++                next[0] = (struct trigger_effect){0};
 +        }
 +        next[1] = engine_effect;
 +        if (time < shift_until) {
@@ -738,17 +763,21 @@ index 0000000..509dfb4
 +        }
 +    }
 +    os_unfair_lock_unlock(&motion_lock);
-+    if (!NSApp.isActive) {
++    bool active = NSApp.isActive;
++    os_unfair_lock_lock(&hid_lock);
++    if (!active) {
 +        close_triggers();
-+        return;
++    } else {
++        if (!hid_pad && (next[0].level || next[1].level) && time >= hid_retry_at) {
++            hid_pad = open_dualsense();
++            hid_retry_at = time + 1;
++        }
++        if (hid_pad && memcmp(next, applied, sizeof(applied))) {
++            if (send_triggers(next)) memcpy(applied, next, sizeof(applied));
++            else close_triggers();
++        }
 +    }
-+    if (!hid_pad && (next[0].level || next[1].level) && time >= hid_retry_at) {
-+        hid_pad = open_dualsense();
-+        hid_retry_at = time + 1;
-+    }
-+    if (!hid_pad || !memcmp(next, applied, sizeof(applied))) return;
-+    if (send_triggers(next)) memcpy(applied, next, sizeof(applied));
-+    else close_triggers();
++    os_unfair_lock_unlock(&hid_lock);
 +}
 +
 +static void start_updates(void)
@@ -758,7 +787,7 @@ index 0000000..509dfb4
 +        dispatch_async(dispatch_get_main_queue(), ^{
 +            NSNotificationCenter *notifications = NSNotificationCenter.defaultCenter;
 +            [notifications addObserverForName:NSApplicationWillTerminateNotification object:NSApp
-+                queue:nil usingBlock:^(NSNotification *note) { close_triggers(); }];
++                queue:nil usingBlock:^(NSNotification *note) { dirt3_adaptive_triggers_shutdown(); }];
 +            dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
 +            dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, NSEC_PER_SEC / 30, NSEC_PER_MSEC * 3);
 +            dispatch_source_set_event_handler(timer, ^{
@@ -850,7 +879,10 @@ index 0000000..509dfb4
 +            longitudinal_g <= -0.20f && longitudinal_g > -3.0f &&
 +            slip >= (brake_slip_since ? 0.09f : 0.16f);
 +        if (!slipping) brake_slip_since = 0;
-+        else if (!brake_slip_since) brake_slip_since = last_advance;
++        else if (!brake_slip_since) {
++            brake_slip_since = last_advance;
++            if (trace) LOG("DiRT 3 adaptive triggers: braking slip %.2f\n", slip);
++        }
 +    } else {
 +        brake_level = 0;
 +        brake_force = 0;
@@ -985,10 +1017,10 @@ index 0000000..dd6d979
 +}
 diff --git a/src/dirt3_force_feedback.m b/src/dirt3_force_feedback.m
 new file mode 100644
-index 0000000..9303ef3
+index 0000000..968ca06
 --- /dev/null
 +++ b/src/dirt3_force_feedback.m
-@@ -0,0 +1,596 @@
+@@ -0,0 +1,598 @@
 +// The i386 game sends two motor strengths through the old ForceFeedback API.
 +// Translate only its DualSense gamepad path, keeping the controller's input
 +// connection and any other legacy devices independent of this bridge.
@@ -1004,6 +1036,7 @@ index 0000000..9303ef3
 +#include "thunks.h"
 +
 +extern int dirt3_version_patch_active(void);
++extern void dirt3_adaptive_triggers_reset_idle_device(void);
 +
 +enum { max_devices = 4, max_effects = 12 };
 +static const double output_watchdog = 0.35;
@@ -1365,6 +1398,7 @@ index 0000000..9303ef3
 +    os_unfair_lock_unlock(&state_lock);
 +    if (*out) {
 +        if (trace_enabled) LOG("DualSense force feedback: legacy device created\n");
++        dirt3_adaptive_triggers_reset_idle_device();
 +        start_timer();
 +    }
 +    RET(*out ? FF_OK : FFERR_DEVICEFULL);
@@ -2073,6 +2107,27 @@ index 0000000..a7a60c7
 +        errno = ENOENT;
 +    return fd;
 +}
+diff --git a/src/libc.c b/src/libc.c
+index 781042b..60dce14 100644
+--- a/src/libc.c
++++ b/src/libc.c
+@@ -228,8 +228,15 @@ static void init_stack_guard(g32 a) { *(uint32_t *)G2H(a) = arc4random() | 0xff;
+ 
+ static void t_exit(uint32_t *args, struct hres *r);	// in cxx.c via atexit list
+ void run_guest_atexit(void);
++extern void dirt3_adaptive_triggers_shutdown(void);
+ static void t_exit(uint32_t *args, struct hres *r) { (void)r; run_guest_atexit(); fflush(NULL); exit((int)A(0)); }
+-static void t__exit(uint32_t *args, struct hres *r) { (void)r; fflush(NULL); _exit((int)A(0)); }
++static void t__exit(uint32_t *args, struct hres *r)
++{
++	(void)r;
++	dirt3_adaptive_triggers_shutdown();
++	fflush(NULL);
++	_exit((int)A(0));
++}
+ static void t_abort(uint32_t *args, struct hres *r) { (void)args; (void)r; die("guest called abort()"); }
+ 
+ // ---- time ----------------------------------------------------------------
 diff --git a/src/libc2.c b/src/libc2.c
 index 910d173..20d1582 100644
 --- a/src/libc2.c

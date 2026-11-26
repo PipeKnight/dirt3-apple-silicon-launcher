@@ -189,6 +189,11 @@ In the Steam Bluetooth playtest, the player confirmed the new crash
 effect. The game Effects slider was 0.80. The hook logged an active
 period of 6.04 seconds and the handle feedback decayed over that window.
 
+A process exit immediately after an R2 update could leave the controller
+holding the effect in the next title screen. The runtime explicitly
+clears both triggers on launch, when it detects an idle DualSense,
+and when closing an active controller on process exit.
+
 ## Startup through AppKit
 
 - The guest zone registry honors default-zone reordering and dispatches the
