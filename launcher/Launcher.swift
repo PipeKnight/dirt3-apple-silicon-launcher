@@ -1,19 +1,19 @@
 import AppKit
-import CryptoKit
 import UniformTypeIdentifiers
 
 private let gameIdentifier = "com.feralinteractive.dirt3"
 private let runtimeIdentifier = "com.khesin.mac32"
-private let supportedExecutable = "0415a9ecbaccdc25752a327c7b8a0dbd62435a308d0a95652d4a286e6a579014"
 private let gameFileName = "DiRT 3 Complete Edition.app"
+private let steamIdentifier = "com.valvesoftware.steam"
+private let steamGameDirectory = "Library/Application Support/Steam/steamapps/common/DiRT 3 Complete Edition"
 
 private enum LaunchError: LocalizedError {
-    case wrongApp, unsupportedBuild, missingRuntime, logCreation
+    case wrongApp, missingSteam, missingRuntime, logCreation
 
     var errorDescription: String? {
         switch self {
-        case .wrongApp: "Choose the original DiRT 3 Complete Edition Mac application from Feral Interactive."
-        case .unsupportedBuild: "This build of DiRT 3 is unsupported. This launcher requires Feral Mac version 1.0, build 85186.17625.4091."
+        case .wrongApp: "Choose the 32-bit DiRT 3 Complete Edition Mac application (.app)."
+        case .missingSteam: "Open Steam and sign in, then click Play again."
         case .missingRuntime: "The compatibility runtime is missing. Replace this launcher with a complete copy."
         case .logCreation: "The launcher could not create its session log."
         }
@@ -24,18 +24,17 @@ private func verifiedGame(at candidate: URL) throws -> URL {
     let game = candidate.resolvingSymlinksInPath().standardizedFileURL
     guard game.pathExtension.lowercased() == "app",
           let bundle = Bundle(url: game), bundle.bundleIdentifier == gameIdentifier,
+          bundle.executableArchitectures?.contains(NSNumber(value: NSBundleExecutableArchitectureI386)) == true,
           let executable = bundle.executableURL, FileManager.default.isReadableFile(atPath: executable.path) else {
         throw LaunchError.wrongApp
     }
-    let input = try FileHandle(forReadingFrom: executable)
-    defer { try? input.close() }
-    var digest = SHA256()
-    while let block = try input.read(upToCount: 1024 * 1024), !block.isEmpty {
-        digest.update(data: block)
-    }
-    let fingerprint = digest.finalize().map { String(format: "%02x", $0) }.joined()
-    guard fingerprint == supportedExecutable else { throw LaunchError.unsupportedBuild }
     return game
+}
+
+private func isSteamGame(_ game: URL) -> Bool {
+    FileManager.default.isReadableFile(
+        atPath: game.appendingPathComponent("Contents/Frameworks/libsteam_api.dylib").path
+    )
 }
 
 @MainActor
@@ -115,7 +114,9 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         let global = URL(fileURLWithPath: "/Applications").appendingPathComponent(gameFileName)
         let personal = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications").appendingPathComponent(gameFileName)
-        let candidates = [saved, registered, global, personal].compactMap { $0 }
+        let steam = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(steamGameDirectory).appendingPathComponent(gameFileName)
+        let candidates = [saved, global, personal, steam, registered].compactMap { $0 }
         for candidate in candidates {
             if let found = try? verifiedGame(at: candidate) {
                 select(found)
@@ -132,7 +133,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(found.path, forKey: "gamePath")
         path.stringValue = found.path
         path.toolTip = found.path
-        status.stringValue = "Ready to play"
+        status.stringValue = isSteamGame(found) ? "Steam edition. Keep Steam open while playing." : "Ready to play"
         play.isEnabled = true
     }
 
@@ -168,6 +169,9 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         }
         do {
             let game = try verifiedGame(at: game)
+            if isSteamGame(game), NSRunningApplication.runningApplications(withBundleIdentifier: steamIdentifier).isEmpty {
+                throw LaunchError.missingSteam
+            }
             let runtime = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/Mac32.app/Contents/MacOS/mac32")
             guard FileManager.default.isExecutableFile(atPath: runtime.path) else { throw LaunchError.missingRuntime }
             let directory = try FileManager.default.url(for: .libraryDirectory, in: .userDomainMask,
@@ -222,6 +226,8 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         skipVideos.isEnabled = true
         if signaled {
             status.stringValue = "DiRT 3 stopped on signal \(code). See the session log."
+        } else if code == 78 {
+            status.stringValue = "No compatibility profile matched this DiRT 3 build. See the session log."
         } else {
             status.stringValue = code == 0 ? "Ready to play" : "DiRT 3 exited with status \(code). See the session log."
         }

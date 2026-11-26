@@ -7,6 +7,13 @@ typedef struct {
     const void *(*retain)(const void *);
     void (*release)(const void *);
     CFTypeRef (*describe)(const void *);
+} timer_context;
+typedef struct {
+    int version;
+    void *info;
+    const void *(*retain)(const void *);
+    void (*release)(const void *);
+    CFTypeRef (*describe)(const void *);
     void *(*allocate)(int, unsigned, void *);
     void *(*reallocate)(void *, int, unsigned, void *);
     void (*deallocate)(void *, void *);
@@ -22,6 +29,9 @@ CFTypeRef CFStringCreateMutableCopy(CFTypeRef, int, CFTypeRef);
 unsigned char CFStringFindWithOptions(CFTypeRef, CFTypeRef, range, unsigned, range *);
 void CFStringAppendFormat(CFTypeRef, CFTypeRef, CFTypeRef, ...);
 void CFRelease(CFTypeRef);
+CFTypeRef CFRunLoopTimerCreate(CFTypeRef, double, double, unsigned, int,
+    void (*)(CFTypeRef, void *), const timer_context *);
+void CFRunLoopTimerGetContext(CFTypeRef, timer_context *);
 void *malloc(unsigned);
 void free(void *);
 
@@ -99,6 +109,12 @@ static void deallocate(void *pointer, void *info)
     free(pointer);
 }
 
+static void timer_callback(CFTypeRef timer, void *info)
+{
+    (void)timer;
+    (void)info;
+}
+
 int main(void)
 {
     allocator_context context = {
@@ -157,5 +173,16 @@ int main(void)
     CFRelease(object);
     CFRelease(id);
     if (destructed != 1) return 12;
+
+    timer_context timer_input = { .info = &callbacks, .retain = retain_info, .release = release_info };
+    CFTypeRef timer = CFRunLoopTimerCreate(0, 1000000000, 1, 0, 0, timer_callback, &timer_input);
+    if (!timer || callbacks.retain_calls != 2) return 13;
+    struct { timer_context context; unsigned sentinel; } timer_output = { { .version = -1 }, 0xDEADBEEF };
+    CFRunLoopTimerGetContext(timer, &timer_output.context);
+    if (timer_output.context.version != 0 || timer_output.context.info != &callbacks ||
+        timer_output.context.retain != retain_info || timer_output.context.release != release_info ||
+        timer_output.context.describe || timer_output.sentinel != 0xDEADBEEF) return 14;
+    CFRelease(timer);
+    if (callbacks.release_calls != 2) return 15;
     return 0;
 }

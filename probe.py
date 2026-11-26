@@ -11,7 +11,9 @@ from contextlib import nullcontext
 from pathlib import Path
 
 DEFAULT_BUNDLE = Path("/Applications/DiRT 3 Complete Edition.app")
-REFERENCE_SHA256 = "0415a9ecbaccdc25752a327c7b8a0dbd62435a308d0a95652d4a286e6a579014"
+STEAM_BUNDLE = Path.home() / (
+    "Library/Application Support/Steam/steamapps/common/DiRT 3 Complete Edition/DiRT 3 Complete Edition.app"
+)
 
 
 def fingerprint(path):
@@ -39,7 +41,7 @@ def read_bundle(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("inspect", "check", "run"))
-    parser.add_argument("--app", type=Path, default=DEFAULT_BUNDLE)
+    parser.add_argument("--app", type=Path, default=DEFAULT_BUNDLE if DEFAULT_BUNDLE.exists() else STEAM_BUNDLE)
     parser.add_argument("--engine", type=Path, help="path to the compiled mac32 executable")
     parser.add_argument("--log", type=Path, help="write runtime output to a new file")
     parser.add_argument("--timeout", type=int, help="terminate the engine after this many seconds")
@@ -56,19 +58,16 @@ def main():
 
     try:
         bundle, info, executable, archs = read_bundle(args.app)
-        sha256 = fingerprint(executable)
         print(f"Bundle: {bundle}")
         print(f"Version: {info.get('CFBundleShortVersionString')} ({info.get('CFBundleVersion')})")
         print(f"Architectures: {', '.join(archs)}")
-        print(f"SHA-256: {sha256}", flush=True)
         if args.mode == "inspect":
+            print(f"SHA-256: {fingerprint(executable)}", flush=True)
             return subprocess.run(
                 ["/usr/bin/otool", "-arch", "i386", "-L", executable], check=False
             ).returncode
         if "i386" not in archs:
             raise ValueError("mac32 requires an i386 slice")
-        if sha256 != REFERENCE_SHA256:
-            print("This executable differs from the recorded test build.", file=sys.stderr, flush=True)
 
         engine = args.engine.expanduser().resolve(strict=True)
         command = [engine, "-v"]
@@ -79,18 +78,18 @@ def main():
             )
         else:
             command.append(bundle)
+            steam = (bundle / "Contents/Frameworks/libsteam_api.dylib").is_file()
+            if steam or args.benchmark:
+                environment = {**os.environ, "MAC32_DIRT3_DIRECT": "1"}
         if args.benchmark:
-            if sha256 != REFERENCE_SHA256:
-                raise ValueError("benchmark mode requires the supported Feral build")
             benchmark = "example_benchmark.xml"
-            if not (bundle / "Contents" / "Resources" / "Data" / benchmark).is_file():
-                raise ValueError(f"the game bundle is missing {benchmark}")
+            data = bundle / "Contents/Resources/Data"
+            if steam:
+                data = bundle.parent / "Dirt3Data"
+            if not (data / benchmark).is_file():
+                raise ValueError(f"the installation is missing {data / benchmark}")
             command.extend(["-benchmark", benchmark])
-            environment = {
-                **os.environ,
-                "MAC32_DIRT3_DIRECT": "1",
-                "MAC32_DIRT3_SKIP_STARTUP_VIDEOS": "1",
-            }
+            environment["MAC32_DIRT3_SKIP_STARTUP_VIDEOS"] = "1"
 
         log = args.log.expanduser().resolve() if args.log else None
         if log is not None and bundle in log.parents:

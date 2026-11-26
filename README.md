@@ -27,10 +27,19 @@ Settings → Privacy & Security** for this app. Some managed Macs may
 restrict that option. [Apple's instructions](https://support.apple.com/en-us/102445)
 
 The launcher requires an Apple silicon Mac, macOS 15 or later, Rosetta,
-and an installed copy of the original Feral Mac version 1.0, build
-85186.17625.4091. Testing was on macOS 15.7.7. The disk image contains
-the launcher and compatibility runtime. The game supplies its executable,
-libraries and data from your installed copy.
+and an installed 32-bit Mac copy from Feral. The runtime has compatibility
+profiles for Feral 1.0 (85186.17625.4091) and Steam 1.0.3
+(92701.18470.3). The disk image contains the launcher and compatibility
+runtime. The game executable, libraries and data come from your installation.
+
+### Steam installation
+
+Open Steam and sign in before clicking **Play**. The launcher looks in the
+default Steam library. For a different library, use **Choose Game…** and
+select **DiRT 3 Complete Edition.app** from the game's installation folder.
+Keep the `Dirt3Data` folder beside the app. `Dirt3Data/dirt3_game.exe` is the
+Windows executable. The Mac runtime uses the installed Steam client and
+passes through its Steamworks calls.
 
 ## Inspect the installed copy
 
@@ -42,11 +51,11 @@ python3 probe.py inspect
 
 Use `--app '/path/to/DiRT 3 Complete Edition.app'` for another install. The
 probe reads the bundle metadata and prints the executable's SHA-256, slice
-architectures and linked libraries. The launcher requires an exact match
-for the **executable** SHA-256 because its compatibility patches are tied
-to this build. A matching version label alone does not establish a match.
-For a different Mac binary, report the build number, architecture and
-SHA-256 when filing a compatibility issue.
+architectures and linked libraries. SHA-256 is diagnostic. At startup the
+runtime matches instruction bytes at the locations it needs to patch.
+A compatible profile can match an executable with a different SHA-256.
+If no profile matches, launch stops before the game starts. For a different
+Mac binary, report the build number and architecture in a compatibility issue.
 
 ## Build the experimental runtime
 
@@ -99,8 +108,7 @@ mac32. Run the launcher in a logged-in macOS session. You can double-click
 a separate log in `local/`. To launch from another install, pass `--app`
 followed by the path to the original game bundle.
 
-Click **Play**, press Enter at the title screen, and load or create a local
-profile. In **Singleplayer → Single Race**, choose a car and team, then
+Press Enter at the title screen and load or create a local profile. In **Singleplayer → Single Race**, choose a car and team, then
 select **Race** after the track loads. On the original keyboard mapping,
 Space accelerates, Shift or keypad 2 brakes or reverses, A and D steer, L
 applies the handbrake, and Esc pauses.
@@ -133,7 +141,9 @@ needs access to its Disk Images service when creating the image.
 
 The script applies ad-hoc signatures. The Intel helper uses the unsigned
 executable memory entitlement to load the guest Mach-O and run its call
-thunks. The Apple silicon launcher is signed with Hardened Runtime.
+thunks. The Intel helper can load the installed Steam client across
+signing teams and validates Valve's signature first. The Apple silicon
+launcher is signed with Hardened Runtime.
 Distribute the image, source archive and checksums together.
 
 The release source archive contains the patched `mac32` tree and the

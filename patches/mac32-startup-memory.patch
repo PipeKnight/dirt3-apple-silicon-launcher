@@ -20,10 +20,10 @@ index 4c16e9d..aeabf91 100644
  all: mac32 guest app
 diff --git a/patches/dirt3_2015_version.c b/patches/dirt3_2015_version.c
 new file mode 100644
-index 0000000..6ab294a
+index 0000000..6459de3
 --- /dev/null
 +++ b/patches/dirt3_2015_version.c
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,194 @@
 +#include "../src/patches.h"
 +#include <CoreServices/CoreServices.h>
 +#include <mach-o/loader.h>
@@ -62,110 +62,159 @@ index 0000000..6ab294a
 +int dirt3_version_patch_active(void) { return version_patch_active; }
 +extern int macho_section(struct image *, const char *, const char *, g32 *, uint32_t *);
 +
-+static int request_direct_launch(g32 text)
-+{
-+	const char *direct_launch = getenv("MAC32_DIRT3_DIRECT");
-+	if (!direct_launch || strcmp(direct_launch, "1"))
-+		return 1;
++struct signature {
++	uint32_t offset;
++	const char *bytes;
++	size_t length;
++};
 +
-+	// The preferences predicate reports whether to omit the optional Feral
-+	// options window. Select its direct-start result for this process.
-+	enum { options_offset = 0x637b30 - 0xb980 };
-+	static const uint8_t original[] = {0x55, 0x89, 0xe5, 0x53, 0x57, 0x56};
-+	static const uint8_t direct[] = {0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3};
-+	void *options = G2H(text + options_offset);
-+	if (memcmp(options, original, sizeof original))
-+		return 0;
-+	memcpy(options, direct, sizeof direct);
-+	fprintf(stderr, "[mac32] DiRT 3 direct launch requested\n");
-+	return 1;
++#define SIG(address, base, bytes) { (address) - (base), (bytes), sizeof(bytes) - 1 }
++
++struct profile {
++	const char *name;
++	struct signature version, version_string, options, videos, json_call, json_parser, storage;
++};
++
++// Match the complete instructions at each edit site and surrounding context.
++// Offsets are relative to __text in the i386 slice.
++static const struct profile profiles[] = {
++	{
++		.name = "Feral 1.0 (85186.17625.4091)",
++		.version = SIG(0x781932, 0xb980,
++			"\x8b\x45\xf0\x83\xe0\x0f\x89\xd9\x83\xe1\x10\xc1\xe1\x08\xba\x00\x10\x00"
++			"\x00\x83\xfb\x0a\x0f\x45\xd1\x09\xd6\x09\xc6\x89\xb7\x36\x7d\x28\x01"),
++		.options = SIG(0x637b30, 0xb980,
++			"\x55\x89\xe5\x53\x57\x56\x83\xec\x1c\xe8\0\0\0\0\x5f\x8b\x5d\x08\x8b\x03\x89"
++			"\x1c\x24\xc7\x44\x24\x04\x6b\x67\x65\x72\xff\x50\x3c\x89\xc6\x8b\x87\x96\x98\x34\x01"),
++		.videos = SIG(0x2126ec, 0xb980,
++			"\x5e\x8b\x45\x08\x89\x04\x24\xe8\x58\x8e\x8d\x00\x8d\x86\x18\x50\x41\x01\x89"
++			"\x44\x24\x04\x8d\x45\xf8\x89\x04\x24\xe8\x73\xd7\xa0\x00"),
++		.json_call = SIG(0x8411cc, 0xb980,
++			"\x89\x04\x24\xe8\x0c\xe4\xfe\xff\x89\xc6\x85\xf6\x74\x58\x8b\x45\x0c\x89\x74\x24\x08"),
++		.json_parser = SIG(0x82f5e0, 0xb980,
++			"\x55\x89\xe5\x83\xec\x18\xc7\x45\xfc\0\0\0\0\xc7\x45\xf8\0\0\0\0\x8b\x45\x08"),
++		.storage = SIG(0x839120, 0xb980,
++			"\x55\x89\xe5\x53\x57\x56\x83\xec\x0c\xe8\0\0\0\0\x5e\x8a\x86\x0a\x10\x2e\x01\x84\xc0\x75\x2e"),
++	},
++	{
++		.name = "Steam 1.0.3 (92701.18470.3)",
++		.version = SIG(0x7a3e12, 0xba50,
++			"\x8b\x45\xf0\x83\xe0\x0f\x89\xd9\x83\xe1\x10\xc1\xe1\x08\x83\xfb\x0a\xba\x00"
++			"\x10\x00\x00\x0f\x45\xd1\x09\xd6\x09\xc6\x89\xb7\xb6\xe9\x2d\x01"),
++		.version_string = SIG(0x7a3ecf, 0xba50,
++			"\x8b\x45\xf0\x83\xe0\x0f\x89\xd9\x83\xe1\x10\xc1\xe1\x08\x83\xfb\x0a\xba\x00"
++			"\x10\x00\x00\x0f\x45\xd1\x09\xd6\x09\xc6\x8b\x4d\xbc\x89\xb1\xf6\xe8\x2d\x01"),
++		.options = SIG(0x65c7c0, 0xba50,
++			"\x55\x89\xe5\x53\x57\x56\x83\xec\x0c\xe8\0\0\0\0\x5b\x8b\x7d\x08\x8b\x07\x89"
++			"\x3c\x24\xc7\x44\x24\x04\x6b\x67\x65\x72\xff\x50\x3c\x89\xc6\x8b\x83\x46\xeb\x39\x01"),
++		.videos = SIG(0x21ad2c, 0xba50,
++			"\x5e\x8b\x45\x08\x89\x04\x24\xe8\xe8\x3c\x8f\x00\x8d\x86\x78\x87\x47\x01\x89"
++			"\x44\x24\x04\x8d\x45\xf8\x89\x04\x24\xe8\xe3\xce\xa3\x00"),
++		.json_call = SIG(0x8644bf, 0xba50,
++			"\x89\x04\x24\xe8\x69\xd9\xfe\xff\x89\xc6\x85\xf6\x74\x55\x8b\x45\x0c\x89\x74\x24\x08"),
++		.json_parser = SIG(0x851e30, 0xba50,
++			"\x55\x89\xe5\x83\xec\x18\x8b\x45\x08\xc7\x45\xfc\0\0\0\0\xc7\x45\xf8\0\0\0\0"),
++		.storage = SIG(0x85c0f0, 0xba50,
++			"\x55\x89\xe5\x57\x56\x83\xec\x10\xe8\0\0\0\0\x5e\x8a\x86\x23\x77\x33\x01\x84\xc0\x75\x2e"),
++	},
++};
++
++static int matches(g32 text, uint32_t size, struct signature signature)
++{
++	return !signature.length ||
++		(signature.offset <= size && signature.length <= size - signature.offset &&
++		 !memcmp(G2H(text + signature.offset), signature.bytes, signature.length));
 +}
 +
-+// StateSkipVideosDecision normally returns the "false" boot flow edge.
-+static int request_skip_startup_videos(g32 text)
++static int enabled(const char *name)
 +{
-+	const char *skip_videos = getenv("MAC32_DIRT3_SKIP_STARTUP_VIDEOS");
-+	if (!skip_videos || strcmp(skip_videos, "1"))
-+		return 1;
-+
-+	enum { false_edge_offset = 0x2126f8 - 0xb980 };
-+	static const uint8_t false_edge[] = {0x8d, 0x86, 0x18, 0x50, 0x41, 0x01};
-+	uint8_t *select_edge = G2H(text + false_edge_offset);
-+	if (memcmp(select_edge, false_edge, sizeof false_edge))
-+		return 0;
-+
-+	// The alternate edge name ("true") is stored immediately before "false".
-+	select_edge[2] -= sizeof("true");
-+	fprintf(stderr, "[mac32] DiRT 3 startup video skip requested\n");
-+	return 1;
++	const char *value = getenv(name);
++	return value && !strcmp(value, "1");
 +}
 +
-+// The game converts Gestalt's three components to the old 0x10xy format.
-+// Its calculation clears the major field for releases 11 through 15, so
-+// its launcher rejects a newer system as older than its 10.x minimum.
++static void retarget_rel32(g32 call, struct hfn *thunk)
++{
++	int32_t relative = (int32_t)(hfn_stub(thunk) - (call + 5));
++	memcpy(G2H(call + 1), &relative, sizeof relative);
++}
++
++extern struct image *macho_dlopen(const char *path);
++
 +static int apply(struct image *image)
 +{
-+	SInt32 major = 0;
-+	if (Gestalt(gestaltSystemVersionMajor, &major) != noErr || major <= 10)
-+		return 0;
-+
-+	static const uint8_t packing[] = {
-+		0x89, 0xd9, 0x83, 0xe1, 0x10, 0xc1, 0xe1, 0x08,
-+		0xba, 0x00, 0x10, 0x00, 0x00, 0x83, 0xfb, 0x0a,
-+		0x0f, 0x45, 0xd1, 0x09, 0xd6, 0x09, 0xc6,
-+	};
-+	static const uint8_t parse_call[] = {0xe8, 0x0c, 0xe4, 0xfe, 0xff};
-+	static const uint8_t storage_call[] = {0xe8, 0x4f, 0xb4, 0xfc, 0xff};
-+	enum {
-+		packing_offset = 0x781938 - 0xb980,
-+		parse_call_offset = 0x8411cf - 0xb980,
-+		parse_offset = 0x82f5e0 - 0xb980,
-+		storage_call_offset = 0x86dccc - 0xb980,
-+	};
 +	g32 text;
 +	uint32_t text_size;
-+	if (!macho_section(image, "__TEXT", "__text", &text, &text_size) ||
-+		text_size < storage_call_offset + sizeof(storage_call))
++	if (image != macho_dlopen(NULL) ||
++		!macho_section(image, "__TEXT", "__text", &text, &text_size))
 +		return 0;
-+	uint8_t *code = G2H(text + packing_offset);
-+	uint8_t *call = G2H(text + parse_call_offset);
-+	uint8_t *storage = G2H(text + storage_call_offset);
++
++	const struct profile *profile = NULL;
++	for (size_t i = 0; i < sizeof profiles / sizeof profiles[0]; i++) {
++		const struct profile *p = &profiles[i];
++		if (matches(text, text_size, p->version) && matches(text, text_size, p->version_string) &&
++			matches(text, text_size, p->options) &&
++			matches(text, text_size, p->videos) && matches(text, text_size, p->json_call) &&
++			matches(text, text_size, p->json_parser) && matches(text, text_size, p->storage)) {
++			profile = p;
++			break;
++		}
++	}
++	if (!profile) return 0;
++
 +	g32 segment = macho_main_segment("__TEXT");
-+	if (!segment || memcmp(code, packing, sizeof(packing)) ||
-+		memcmp(call, parse_call, sizeof(parse_call)) || memcmp(storage, storage_call, sizeof(storage_call)) ||
-+		!request_direct_launch(text) || !request_skip_startup_videos(text))
-+		return 0;
-+
-+	// Saturate the legacy result at 10.15.0 and jump to its original cache
-+	// store. Other version callers continue to see the real host version.
-+	static const uint8_t clamp[] = {0xbe, 0xf0, 0x10, 0x00, 0x00, 0xeb, sizeof(packing) - 7};
-+	memcpy(code, clamp, sizeof(clamp));
-+
-+	// Absent display text can reach the launcher's parser as an empty byte
-+	// string. Represent missing text as an
-+	// empty JSON array, the existing interface's missing-value convention.
-+	parse_json = text + parse_offset;
-+	empty_array = gstrdup("[]");
-+	int32_t relative = (int32_t)(hfn_stub(&parse_json_thunk) - (text + parse_call_offset + sizeof(parse_call)));
-+	memcpy(call + 1, &relative, sizeof(relative));
-+	// The i386 getsegbyname command describes the preferred image address.
-+	// The game's string constructor uses that range to borrow permanent
-+	// literals. Compare against the mapped range so heap strings are copied
-+	// before their source is destroyed. Preserve the system API's header.
++	if (!segment) return 0;
 +	const struct segment_command *text_segment = G2H(segment);
 +	image_text_start = text_segment->vmaddr + (g32)macho_image_slide(0);
 +	image_text_size = text_segment->vmsize;
-+	relative = (int32_t)(hfn_stub(&in_image_text_thunk) - (text + storage_call_offset + sizeof(storage_call)));
-+	memcpy(storage + 1, &relative, sizeof(relative));
 +
++	// The state's PIC base points at the pop instruction (videos.offset).
++	// Confirm the original choice and alternate choice before editing the LEA.
++	g32 video_base = text + profile->videos.offset;
++	uint32_t displacement;
++	memcpy(&displacement, G2H(video_base + 14), sizeof displacement);
++	g32 video_labels = video_base + displacement - sizeof("true");
++	static const char labels[] = "true\0false";
++	if (video_labels - image_text_start >= image_text_size ||
++		sizeof labels > image_text_size - (video_labels - image_text_start) ||
++		memcmp(G2H(video_labels), labels, sizeof labels))
++		return 0;
++
++	// The original 10.x packing calculation loses the major field on 11–15.
++	// Saturate the legacy result at 10.15.0 and continue at its cache store.
++	SInt32 major = 0;
++	if (Gestalt(gestaltSystemVersionMajor, &major) == noErr && major > 10) {
++		static const uint8_t clamp[] = {0xbe, 0xf0, 0x10, 0, 0, 0xeb, 23 - 7};
++		memcpy(G2H(text + profile->version.offset + 6), clamp, sizeof clamp);
++		if (profile->version_string.length)
++			memcpy(G2H(text + profile->version_string.offset + 6), clamp, sizeof clamp);
++	}
++	if (enabled("MAC32_DIRT3_DIRECT")) {
++		static const uint8_t direct[] = {0xb8, 1, 0, 0, 0, 0xc3};
++		memcpy(G2H(text + profile->options.offset), direct, sizeof direct);
++		fprintf(stderr, "[mac32] DiRT 3 direct launch requested\n");
++	}
++	if (enabled("MAC32_DIRT3_SKIP_STARTUP_VIDEOS")) {
++		displacement -= sizeof("true");
++		memcpy(G2H(video_base + 14), &displacement, sizeof displacement);
++		fprintf(stderr, "[mac32] DiRT 3 startup video skip requested\n");
++	}
++
++	// Keep absent WebView display text valid JSON and only borrow permanent
++	// string literals from the mapped __TEXT range.
++	parse_json = text + profile->json_parser.offset;
++	empty_array = gstrdup("[]");
++	retarget_rel32(text + profile->json_call.offset + 3, &parse_json_thunk);
++	g32 storage = text + profile->storage.offset;
++	*(uint8_t *)G2H(storage) = 0xe9;
++	retarget_rel32(storage, &in_image_text_thunk);
 +	version_patch_active = 1;
++	fprintf(stderr, "[mac32] DiRT 3 compatibility profile: %s\n", profile->name);
 +	return 1;
 +}
 +
 +const struct guest_patch patch_dirt3_2015_version = {
 +	.library = "DiRT 3 Complete Edition",
-+	.sha256 = "0415a9ecbaccdc25752a327c7b8a0dbd62435a308d0a95652d4a286e6a579014",
-+	.game = "DiRT 3 Complete Edition 1.0 (85186.17625.4091)",
++	.game = "DiRT 3 Complete Edition",
 +	.what = "adapt macOS version, launcher text and i386 image addresses",
 +	.apply = apply,
 +};
@@ -1590,6 +1639,18 @@ index 9dad843..d4921a8 100644
  	R("_AudioObjectAddPropertyListener", t_ok), R("_AudioObjectRemovePropertyListener", t_ok),
  };
  
+diff --git a/src/carbon_thunks.c b/src/carbon_thunks.c
+index 5c2b8d4..69efd8e 100644
+--- a/src/carbon_thunks.c
++++ b/src/carbon_thunks.c
+@@ -66,7 +66,6 @@ static struct hfn carbon[] = {
+ 	G("_GetMacOSStatusCommentString", GetMacOSStatusCommentString, "S:i"),
+ 	G("_GetMainEventLoop", GetMainEventLoop, "o:"),
+ 	G("_GetNextProcess", GetNextProcess, "i:p"),
+-	G("_GetProcessBundleLocation", GetProcessBundleLocation, "i:pp"),
+ 	G("_GetProcessPID", GetProcessPID, "i:pp"),
+ 	G("_GetThemeMetric", GetThemeMetric, "i:up"),
+ 	G("_HIThemeDrawFocusRect", HIThemeDrawFocusRect, "i:rBou"),
 diff --git a/src/carbon_windows.m b/src/carbon_windows.m
 new file mode 100644
 index 0000000..60ed016
@@ -1836,10 +1897,10 @@ index 0000000..60ed016
 +void thunks_carbon_windows_init(void) { REGISTER(carbon_windows_fns); }
 diff --git a/src/cf_streams.c b/src/cf_streams.c
 new file mode 100644
-index 0000000..e724caa
+index 0000000..0dd84e8
 --- /dev/null
 +++ b/src/cf_streams.c
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,200 @@
 +// CoreFoundation streams and CFNetwork HTTP messages. Stream contexts
 +// contain i386 callbacks and are owned for as long as CF keeps the client.
 +#include "thunks.h"
@@ -1987,7 +2048,9 @@ index 0000000..e724caa
 +static void t_CFRunLoopTimerGetContext(uint32_t *args, struct hres *r)
 +{
 +	struct stream_client32 *out = G2H(A(1));
-+	if (!out || out->version) return;
++	if (!out) return;
++	// Shipping CoreFoundation writes the context even when a legacy caller
++	// supplies an uninitialized output record. Only the host temporary is input.
 +	CFRunLoopTimerContext context = { .version = 0 };
 +	CFRunLoopTimerGetContext(hobj_unwrap(A(0)), &context);
 +	if (context.retain == retain_timer && context.info) {
@@ -2902,13 +2965,14 @@ index 484efa9..c36b53d 100644
  	R("_CGImageCreateWithJPEGDataProvider", t_CGImageCreateWithJPEGDataProvider),
 diff --git a/src/legacy_crypto.c b/src/legacy_crypto.c
 new file mode 100644
-index 0000000..82445a9
+index 0000000..bcb2141
 --- /dev/null
 +++ b/src/legacy_crypto.c
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,199 @@
 +// OpenSSL 0.9.8 guest objects, backed by the system libcrypto. The guest
 +// can write the public modulus and exponent into its old RSA structure.
 +#include "thunks.h"
++#include <Security/Security.h>
 +#include <dlfcn.h>
 +#include <pthread.h>
 +#include <stdbool.h>
@@ -3089,6 +3153,10 @@ index 0000000..82445a9
 +}
 +
 +static struct hfn crypto_entries[] = {
++	G("_SecRequirementCreateWithString", SecRequirementCreateWithString, "i:ouO"),
++	G("_SecRequirementCreateWithData", SecRequirementCreateWithData, "i:ouO"),
++	G("_SecCodeCopySelf", SecCodeCopySelf, "i:uO"),
++	G("_SecCodeCheckValidity", SecCodeCheckValidity, "i:ouo"),
 +	G("_CRYPTO_set_mem_functions", set_guest_memory_functions, "i:uuu"),
 +	G("_BN_bin2bn", w_BN_bin2bn, "u:piu"),
 +	G("_RSA_new", w_RSA_new, "u:"), G("_RSA_free", w_RSA_free, "v:u"),
@@ -3592,6 +3660,52 @@ index 29859a8..bdbe8eb 100644
  struct image *macho_dlopen(const char *path)
  {
  	if (!path) return main_image;
+diff --git a/src/main.c b/src/main.c
+index 43a2f42..7d7f5fe 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -9,6 +9,7 @@
+ #include <limits.h>
+ #include <time.h>
+ #include <sys/mman.h>
++#include <sysexits.h>
+ #include <mach-o/dyld.h>
+ #include <CoreFoundation/CoreFoundation.h>
+ 
+@@ -257,8 +258,21 @@ int main(int argc, char **argv)
+ 	// an .app bundle: run its CFBundleExecutable, look for libraries in its
+ 	// Frameworks folder, and make it the guest's main bundle
+ 	static char exe[PATH_MAX];
++	int dirt3 = 0;
+ 	if (bundle_executable(argv[i], exe, sizeof exe)) {
+ 		set_guest_bundle(argv[i]);
++		extern void *guest_main_cfbundle(void);
++		CFBundleRef bundle = guest_main_cfbundle();
++		CFStringRef identifier = bundle ? CFBundleGetIdentifier(bundle) : NULL;
++		dirt3 = identifier && CFEqual(identifier, CFSTR("com.feralinteractive.dirt3"));
++		if (dirt3) {
++			char library[PATH_MAX];
++			snprintf(library, sizeof library, "%s/Contents/Frameworks/libsteam_api.dylib", argv[i]);
++			if (access(library, R_OK) == 0) {
++				setenv("SteamAppId", "321040", 1);
++				setenv("SteamGameId", "321040", 1);
++			}
++		}
+ 		argv[i] = exe;
+ 	}
+ 	char dir[PATH_MAX];
+@@ -275,6 +289,11 @@ int main(int argc, char **argv)
+ 	setup_process(argc - i, argv + i);
+ 	struct image *img = macho_load(argv[i]);
+ 	if (!img) die("cannot load %s", argv[i]);
++	extern int dirt3_version_patch_active(void);
++	if (dirt3 && !getenv("MAC32_NOPATCH") && !dirt3_version_patch_active()) {
++		fprintf(stderr, "[mac32] Unsupported DiRT 3 build: no compatibility profile matched the executable.\n");
++		return EX_CONFIG;
++	}
+ 	low_exe_placed(0);	// a position-independent program: nothing is fixed below EXE_ZONE
+ 	g32 entry = macho_entry(img), mainfn = macho_main(img);
+ 	if (!entry && !mainfn) die("%s has no entry point", argv[i]);
 diff --git a/src/malloc_zones.c b/src/malloc_zones.c
 new file mode 100644
 index 0000000..4129d89
@@ -4055,18 +4169,19 @@ index 0000000..2085a81
 +
 +void thunks_media_init(void) { REGISTER(media); }
 diff --git a/src/objc.m b/src/objc.m
-index f53ca50..b08d85c 100644
+index f53ca50..0f9f535 100644
 --- a/src/objc.m
 +++ b/src/objc.m
-@@ -11,6 +11,7 @@
+@@ -11,6 +11,8 @@
  #import <Foundation/Foundation.h>
  #import <AppKit/AppKit.h>
  #import <ApplicationServices/ApplicationServices.h>
 +#import <CoreMedia/CoreMedia.h>
++#import <Carbon/Carbon.h>
  #import <OpenGL/OpenGL.h>
  #import <objc/runtime.h>
  #import <objc/message.h>
-@@ -276,6 +277,15 @@ static enum st_kind struct_kind(const char *t)
+@@ -276,6 +278,15 @@ static enum st_kind struct_kind(const char *t)
  	return ST_NONE;
  }
  
@@ -4082,7 +4197,7 @@ index f53ca50..b08d85c 100644
  // guest -> host value for one argument; returns guest words consumed
  static int arg_g2h(const char *t, const uint32_t *g, void *out, g32 *outparam)
  {
-@@ -310,6 +320,8 @@ static int arg_g2h(const char *t, const uint32_t *g, void *out, g32 *outparam)
+@@ -310,6 +321,8 @@ static int arg_g2h(const char *t, const uint32_t *g, void *out, g32 *outparam)
  		}
  		return 1;
  	case '{': {
@@ -4091,7 +4206,7 @@ index f53ca50..b08d85c 100644
  		float f[4];
  		switch (struct_kind(t)) {
  		case ST_RECT: memcpy(f, g, 16); for (int i = 0; i < 4; i++) ((double *)out)[i] = f[i]; return 4;
-@@ -340,8 +352,19 @@ static void ret_h2g(const char *t, const void *v, struct hres *r, g32 sret)
+@@ -340,8 +353,19 @@ static void ret_h2g(const char *t, const void *v, struct hres *r, g32 sret)
  	case '@': case '#': r->rax = objc_wrap(*(id *)v); return;
  	case ':': { SEL s = *(SEL *)v; r->rax = s ? canon_sel(sel_getName(s), 0) : 0; return; }
  	case '*': { char *s = *(char **)v; r->rax = s ? guest_cstr(s) : 0; return; }
@@ -4112,7 +4227,7 @@ index f53ca50..b08d85c 100644
  		const double *d = v;
  		float f[4];
  		switch (struct_kind(t)) {
-@@ -537,6 +560,7 @@ static int ui_on_main(id target, const char *sel)
+@@ -537,6 +561,7 @@ static int ui_on_main(id target, const char *sel)
  {
  	if ([NSThread isMainThread] || object_isClass(target)) return 0;
  	if (![target isKindOfClass:[NSView class]] && ![target isKindOfClass:[NSWindow class]]) return 0;
@@ -4120,7 +4235,7 @@ index f53ca50..b08d85c 100644
  	static const char *const pre[] = { "display", "set", "order", "make", "close", "start", "stop",
  					   "increment", "scroll", "lockFocus", "unlockFocus", "center", NULL };
  	for (int i = 0; pre[i]; i++)
-@@ -547,6 +571,10 @@ static int ui_on_main(id target, const char *sel)
+@@ -547,6 +572,10 @@ static int ui_on_main(id target, const char *sel)
  static void call_host(id target, Class super_cls, SEL hsel, const char *selname,
  		      const uint32_t *ga, struct hres *r, g32 sret)
  {
@@ -4131,7 +4246,7 @@ index f53ca50..b08d85c 100644
  	if (!strcmp(selname, "makeCurrentContext") && [target isKindOfClass:[NSOpenGLContext class]]) {
  		[(NSOpenGLContext *)target makeCurrentContext];
  		gl_last_context = CGLGetCurrentContext();
-@@ -601,8 +629,25 @@ static void call_host(id target, Class super_cls, SEL hsel, const char *selname,
+@@ -601,8 +630,25 @@ static void call_host(id target, Class super_cls, SEL hsel, const char *selname,
  	uint8_t buf[64];
  	g32 outp[16];
  	id outv[16];
@@ -4157,7 +4272,7 @@ index f53ca50..b08d85c 100644
  		const char *t = [sig getArgumentTypeAtIndex:i];
  		memset(buf, 0, sizeof buf);
  		ga += arg_g2h(t, ga, buf, &outp[i]);
-@@ -626,6 +671,9 @@ static void call_host(id target, Class super_cls, SEL hsel, const char *selname,
+@@ -626,6 +672,9 @@ static void call_host(id target, Class super_cls, SEL hsel, const char *selname,
  		extern void print_recent_calls(void);
  		print_recent_calls();
  		@throw;
@@ -4167,7 +4282,7 @@ index f53ca50..b08d85c 100644
  	}
  	for (NSUInteger i = 2; i < n && i < 16; i++)
  		if (outp[i]) U32(outp[i]) = objc_wrap(outv[i]);
-@@ -871,6 +919,9 @@ static int variadic_objects(id target, const char *sel, const uint32_t *ga, stru
+@@ -871,6 +920,9 @@ static int variadic_objects(id target, const char *sel, const uint32_t *ga, stru
  	return 1;
  }
  
@@ -4177,7 +4292,7 @@ index f53ca50..b08d85c 100644
  static void msgsend(uint32_t *a, struct hres *r, int kind)
  {
  	g32 sret = 0;
-@@ -957,6 +1008,16 @@ static void msgsend(uint32_t *a, struct hres *r, int kind)
+@@ -957,6 +1009,16 @@ static void msgsend(uint32_t *a, struct hres *r, int kind)
  	}
  	// no autorelease pool here: returned objects belong to the guest's own pools
  	call_host(target, super_cls, sel_registerName(sel), sel, ga, r, sret);
@@ -4194,7 +4309,7 @@ index f53ca50..b08d85c 100644
  }
  
  static void t_msgSend(uint32_t *a, struct hres *r) { msgsend(a, r, K_NORMAL); }
-@@ -1007,6 +1068,8 @@ static int arg_h2g(const char *t, NSInvocation *inv, NSUInteger i, uint32_t *g)
+@@ -1007,6 +1069,8 @@ static int arg_h2g(const char *t, NSInvocation *inv, NSUInteger i, uint32_t *g)
  	case '*': { char *s = *(char **)b; g[0] = s ? guest_cstr(s) : 0; return 1; }
  	case '^': { void *p = *(void **)b; g[0] = (uintptr_t)p < LOW_END ? (g32)(uintptr_t)p : hobj_wrap(p); return 1; }
  	case '{': {
@@ -4203,7 +4318,7 @@ index f53ca50..b08d85c 100644
  		const double *d = (const double *)b;
  		float f[4];
  		switch (struct_kind(t)) {
-@@ -1020,15 +1083,52 @@ static int arg_h2g(const char *t, NSInvocation *inv, NSUInteger i, uint32_t *g)
+@@ -1020,15 +1084,52 @@ static int arg_h2g(const char *t, NSInvocation *inv, NSUInteger i, uint32_t *g)
  	}
  }
  
@@ -4256,7 +4371,7 @@ index f53ca50..b08d85c 100644
  	g32 imp = gc ? find_imp(gc, sel, classmethod, NULL) : 0;
  	if (!imp) {
  		Class base = host_base(gc);
-@@ -1038,17 +1138,23 @@ static void forward_to_guest(id self, SEL _cmd, NSInvocation *inv)
+@@ -1038,17 +1139,23 @@ static void forward_to_guest(id self, SEL _cmd, NSInvocation *inv)
  	}
  	NSMethodSignature *sig = inv.methodSignature;
  	const char *rt = skipq(sig.methodReturnType);
@@ -4282,7 +4397,7 @@ index f53ca50..b08d85c 100644
  	if (*rt == 'v') return;
  	uint8_t out[64] = {0};
  	switch (*rt) {
-@@ -1064,6 +1170,11 @@ static void forward_to_guest(id self, SEL _cmd, NSInvocation *inv)
+@@ -1064,6 +1171,11 @@ static void forward_to_guest(id self, SEL _cmd, NSInvocation *inv)
  	case ':': *(SEL *)out = rax ? sel_registerName(G2H((g32)rax)) : NULL; break;
  	case '*': case '^': *(void **)out = rax ? G2H((g32)rax) : NULL; break;
  	case '{': {
@@ -4294,7 +4409,24 @@ index f53ca50..b08d85c 100644
  		float f[4];
  		double *d = (double *)out;
  		switch (struct_kind(rt)) {
-@@ -1408,6 +1519,20 @@ static void t_NSLog(uint32_t *args, struct hres *r)
+@@ -1347,6 +1459,16 @@ void *guest_main_cfbundle(void)
+ 	return b;
+ }
+ 
++static OSStatus guest_process_bundle_location(const ProcessSerialNumber *psn, FSRef *location)
++{
++	pid_t pid;
++	if (guest_bundle && psn && location &&
++		((!psn->highLongOfPSN && psn->lowLongOfPSN == kCurrentProcess) ||
++		 (GetProcessPID(psn, &pid) == noErr && pid == getpid())))
++		return CFURLGetFSRef((__bridge CFURLRef)guest_bundle.bundleURL, location) ? noErr : fnfErr;
++	return GetProcessBundleLocation(psn, location);
++}
++
+ // ---- system data constants the guest imports by name ----------------------------
+ // NSFontAttributeName, kCFAllocatorSystemDefault, ...: a host global holding an
+ // object. The guest gets a 4-byte cell with a handle to that object. Values
+@@ -1408,6 +1530,20 @@ static void t_NSLog(uint32_t *args, struct hres *r)
  		free(s);
  	}
  }
@@ -4315,7 +4447,7 @@ index f53ca50..b08d85c 100644
  // NSRunAlertPanel(title, msgFormat, default, alternate, other, ...): show it, and log it
  static void t_NSRunAlertPanel(uint32_t *args, struct hres *r)
  {
-@@ -1641,12 +1766,83 @@ static void t_dispatch_async(uint32_t *args, struct hres *r)
+@@ -1641,12 +1777,83 @@ static void t_dispatch_async(uint32_t *args, struct hres *r)
  	g32 b = block_copy(A(1));
  	dispatch_async(host_queue(A(0)), ^{ gcall(U32(b + 12), 1, b); block_release(b); });
  }
@@ -4399,11 +4531,12 @@ index f53ca50..b08d85c 100644
  static void t_dispatch_get_main_queue(uint32_t *args, struct hres *r) { (void)args; RET(main_q); }
  
  // ---- AppKit / Foundation constants ------------------------------------------------
-@@ -1671,12 +1867,16 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
+@@ -1671,12 +1878,17 @@ static void t_sel_getName(uint32_t *args, struct hres *r) { RET(A(0)); }
  
  static struct hfn objc_fns[] = {
  	R("_NSApplicationMain", t_NSApplicationMain),
 +	G("_NSApplicationLoad", NSApplicationLoad, "b:"),
++	G("_GetProcessBundleLocation", guest_process_bundle_location, "i:pp"),
 +	G("_NSDisableScreenUpdates", NSDisableScreenUpdates, "v:"),
 +	G("_NSEnableScreenUpdates", NSEnableScreenUpdates, "v:"),
  	R("_objc_msgSend", t_msgSend), R("_objc_msgSend_stret", t_msgSend_stret),
@@ -4416,7 +4549,7 @@ index f53ca50..b08d85c 100644
  	D("_NSApp", 4, init_nsapp), D("_NSDefaultRunLoopMode", 4, init_runloopmode),
  	D("___CFConstantStringClassReference", 32, init_cfconst),
  	R("_objc_retain", t_objc_retain), R("_objc_release", t_objc_release),
-@@ -1694,6 +1894,14 @@ static struct hfn objc_fns[] = {
+@@ -1694,6 +1906,14 @@ static struct hfn objc_fns[] = {
  	R("__Block_copy", t_Block_copy), R("__Block_release", t_Block_release),
  	D("__dispatch_main_q", 128, init_main_q), R("_dispatch_get_main_queue", t_dispatch_get_main_queue),
  	R("_dispatch_async", t_dispatch_async), R("_dispatch_sync", t_dispatch_sync),
@@ -4792,10 +4925,19 @@ index 0000000..bcbede9
 +
 +void thunks_opencl_init(void) { REGISTER(opencl_entries); }
 diff --git a/src/patches.c b/src/patches.c
-index d89b800..b30212c 100644
+index d89b800..7163b4c 100644
 --- a/src/patches.c
 +++ b/src/patches.c
-@@ -8,9 +8,11 @@
+@@ -1,16 +1,16 @@
+-// Applies the patches in patches/ when their library loads. A patch runs only
+-// on the exact build it names (SHA-256 of the i386 slice), so a fixed build
+-// from the vendor is left alone. MAC32_NOPATCH=1 turns all patches off, to
+-// tell a loader bug from a patch bug.
++// Applies the patches in patches/ when their library loads. Each patch checks
++// a slice SHA-256 or validates its own edit sites. MAC32_NOPATCH disables them.
+ #include "patches.h"
+ #include <string.h>
+ #include <CommonCrypto/CommonDigest.h>
  
  // ---- the list: one entry per file in patches/ ----------------------------------
  extern const struct guest_patch patch_source2024_vguimatsurface, patch_css2024_launcher;
@@ -4807,6 +4949,47 @@ index d89b800..b30212c 100644
  };
  
  int patch_jump(struct image *img, const char *fn, struct hfn *h)
+@@ -44,17 +44,17 @@ void apply_guest_patches(struct image *img)
+ 			fprintf(stderr, "[mac32] patch for %s (%s) skipped: MAC32_NOPATCH is set\n", base, p->game);
+ 			continue;
+ 		}
+-		if (!*hash) {
++		if (p->sha256 && !*hash) {
+ 			size_t n;
+ 			const uint8_t *f = macho_file_bytes(img, &n);
+ 			sha256_hex(f, n, hash);
+ 		}
+-		if (strcmp(hash, p->sha256)) {
++		if (p->sha256 && strcmp(hash, p->sha256)) {
+ 			LOG("patch for %s (%s) not applied: this build is %.16s..., the patch is for %.16s...\n",
+ 			    base, p->game, hash, p->sha256);
+ 			continue;
+ 		}
+ 		if (p->apply(img)) fprintf(stderr, "[mac32] patched %s (%s): %s\n", base, p->game, p->what);
+-		else fprintf(stderr, "[mac32] patch for %s (%s) matched the build but could not be applied\n", base, p->game);
++		else fprintf(stderr, "[mac32] compatibility patch for %s (%s) did not match its edit sites\n", base, p->game);
+ 	}
+ }
+diff --git a/src/patches.h b/src/patches.h
+index 4500505..20016f3 100644
+--- a/src/patches.h
++++ b/src/patches.h
+@@ -1,13 +1,12 @@
+ // Fixes for bugs in games' own 32-bit code, applied in memory when a library
+-// loads. One file per game library in patches/; each names the exact build
+-// (SHA-256 of its i386 code) it was written for and steps aside for any other.
++// loads. Patches specify an i386 slice hash or validate their edit sites in apply().
+ #pragma once
+ #include "thunks.h"
+ 
+ struct image;
+ struct guest_patch {
+ 	const char *library;	// file name, e.g. "vguimatsurface.dylib"
+-	const char *sha256;	// of the library's i386 slice: the one build this fixes
++	const char *sha256;	// optional i386 slice hash, otherwise apply() checks the edit sites
+ 	const char *game;	// who ships that build
+ 	const char *what;	// one line for the log
+ 	int (*apply)(struct image *img);	// nonzero when applied
 diff --git a/src/pthread.c b/src/pthread.c
 index b9a8110..fabcbeb 100644
 --- a/src/pthread.c
@@ -4841,6 +5024,123 @@ index b9a8110..fabcbeb 100644
  	R("_pthread_getschedparam", t_getschedparam), R("_pthread_setschedparam", t_setschedparam),
  	R("_pthread_mach_thread_np", t_mach_thread_np), R("_pthread_setname_np", t_setname_np),
  	R("_pthread_key_create", t_key_create), R("_pthread_key_delete", t_key_delete),
+diff --git a/src/steam.c b/src/steam.c
+index c43c690..56ae677 100644
+--- a/src/steam.c
++++ b/src/steam.c
+@@ -14,6 +14,7 @@
+ #include <string.h>
+ #include <pthread.h>
+ #include <setjmp.h>
++#include <Security/Security.h>
+ 
+ void call_sig(void *fn, const char *sig, const char *name, uint32_t *a, struct hres *r);
+ g32 hobj_wrap_block(void *h, uint32_t size, g32 first_word);
+@@ -22,12 +23,38 @@ g32 hfn_stub(struct hfn *f);
+ static void *steamclient;
+ static pthread_mutex_t lk = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
+ 
++// The packaged helper loads Steam's library across signing teams. Validate
++// Valve's signature on the installed library before loading it.
++static void verify_steam_client(const char *path)
++{
++	CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL,
++		(const UInt8 *)path, (CFIndex)strlen(path), false);
++	if (!url) die("invalid Steam client library path");
++	SecStaticCodeRef code = NULL;
++	OSStatus status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code);
++	CFRelease(url);
++	if (status != errSecSuccess)
++		die("cannot read the Steam client library at %s (OSStatus %d)", path, status);
++	SecRequirementRef requirement = NULL;
++	status = SecRequirementCreateWithString(CFSTR(
++		"anchor apple generic and identifier \"com.valvesoftware.steam\" "
++		"and certificate leaf[subject.OU] = \"MXGJJ98X76\""), kSecCSDefaultFlags, &requirement);
++	if (status == errSecSuccess) {
++		status = SecStaticCodeCheckValidity(code, kSecCSDefaultFlags, requirement);
++		CFRelease(requirement);
++	}
++	CFRelease(code);
++	if (status != errSecSuccess)
++		die("Steam client library failed Valve signature verification (OSStatus %d)", status);
++}
++
+ static void *sc_sym(const char *name)
+ {
+ 	if (!steamclient) {
+ 		char p[1024];
+ 		snprintf(p, sizeof p, "%s/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steamclient.dylib",
+ 			 getenv("HOME"));
++		verify_steam_client(p);
+ 		steamclient = dlopen(p, RTLD_NOW | RTLD_LOCAL);
+ 		if (!steamclient) die("cannot load the Steam client library: %s", dlerror());
+ 		LOG("steam: loaded host %s\n", p);
+@@ -56,6 +83,26 @@ static const struct legacy legacy_ifaces[] = {
+ 		"GetServerReputation", "GetPublicIP", "HandleIncomingPacket", "GetNextOutgoingPacket",
+ 		"EnableHeartbeats", "SetHeartbeatInterval", "ForceHeartbeat", "AssociateWithClan",
+ 		"ComputeNewPlayerCompatibility", NULL } },
++	// Steamworks 1.31; the legacy interfaces have different slot orders.
++	{ "SteamUtils007", "SteamUtils010", {
++		"GetSecondsSinceAppActive", "GetSecondsSinceComputerActive", "GetConnectedUniverse",
++		"GetServerRealTime", "GetIPCountry", "GetImageSize", "GetImageRGBA", "GetCSERIPPort",
++		"GetCurrentBatteryPower", "GetAppID", "SetOverlayNotificationPosition", "IsAPICallCompleted",
++		"GetAPICallFailureReason", "GetAPICallResult", "RunFrame", "GetIPCCallCount",
++		"SetWarningMessageHook", "IsOverlayEnabled", "BOverlayNeedsPresent", "CheckFileSignature",
++		"ShowGamepadTextInput", "GetEnteredGamepadTextLength", "GetEnteredGamepadTextInput",
++		"GetSteamUILanguage", "IsSteamRunningInVR", NULL } },
++	{ "SteamClient016", "SteamClient020", {
++		"CreateSteamPipe", "BReleaseSteamPipe", "ConnectToGlobalUser", "CreateLocalUser", "ReleaseUser",
++		"GetISteamUser", "GetISteamGameServer", "SetLocalIPBinding", "GetISteamFriends", "GetISteamUtils",
++		"GetISteamMatchmaking", "GetISteamMatchmakingServers", "GetISteamGenericInterface",
++		"GetISteamUserStats", "GetISteamGameServerStats", "GetISteamApps", "GetISteamNetworking",
++		"GetISteamRemoteStorage", "GetISteamScreenshots", "RunFrame", "GetIPCCallCount",
++		"SetWarningMessageHook", "BShutdownIfAllPipesClosed", "GetISteamHTTP",
++		"DEPRECATED_GetISteamUnifiedMessages", "GetISteamController", "GetISteamUGC", "GetISteamAppList",
++		"GetISteamMusic", "GetISteamMusicRemote", "GetISteamHTMLSurface",
++		"DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess", "DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess",
++		"Set_SteamAPI_CCheckCallbackRegisteredInProcess", NULL } },
+ 	// Steamworks 1.39-1.41 (Counter-Strike: Source's client.dylib)
+ 	{ "SteamClient017", "SteamClient020", {
+ 		"CreateSteamPipe", "BReleaseSteamPipe", "ConnectToGlobalUser", "CreateLocalUser", "ReleaseUser",
+@@ -76,12 +123,29 @@ static const struct smethod legacy_extra[] = {
+ 	{ "EnableHeartbeats", NULL, "v:oB", 0, -1 }, { "SetHeartbeatInterval", NULL, "v:oi", 0, -1 },
+ 	{ "ForceHeartbeat", NULL, "v:o", 0, -1 }, { "RunFrame", NULL, "v:o", 0, -1 },
+ 	{ "GetIPCCallCount", NULL, "u:o", 0, -1 },
++	{ "GetCSERIPPort", NULL, "b:opp", 0, -1 },
+ 	{ "DEPRECATED_GetISteamUnifiedMessages", NULL, "o:oiip", 3, -1 },
+ 	{ NULL }
+ };
+ 
++// Steamworks 1.31 predates action-based controller input. Its controller
++// state record is packed to one byte on both architectures.
++static const struct smethod legacy_controller_methods[] = {
++	{ "Init", NULL, "b:op", 0, 0 },
++	{ "Shutdown", NULL, "b:o", 0, 1 },
++	{ "RunFrame", NULL, "v:o", 0, 2 },
++	{ "GetControllerState", NULL, "b:oup", 0, 3 },
++	{ "TriggerHapticPulse", NULL, "v:ouiu", 0, 4 },
++	{ "SetOverrideMode", NULL, "v:op", 0, 5 },
++};
++static const struct siface legacy_controller = {
++	"ISteamController", "STEAMCONTROLLER_INTERFACE_VERSION",
++	sizeof legacy_controller_methods / sizeof legacy_controller_methods[0], legacy_controller_methods,
++};
++
+ static const struct siface *exact_iface(const char *version)
+ {
++	if (!strcmp(version, legacy_controller.version)) return &legacy_controller;
+ 	for (const struct siface *i = steam_ifaces; i->cls; i++)
+ 		if (!strcmp(i->version, version)) return i;
+ 	return NULL;
+@@ -109,6 +173,8 @@ static const struct siface *legacy_iface(const char *version)
+ 			}
+ 			for (int j = 0; legacy_extra[j].name && !src; j++) if (!strcmp(legacy_extra[j].name, want)) src = &legacy_extra[j];
+ 			m[k] = src ? *src : (struct smethod){ want, NULL, "X:o", 0, -1 };
++			if (!strcmp(lg->version, "SteamClient016") && !strcmp(want, "SetLocalIPBinding"))
++				m[k].sig = "v:ouu";
+ 			m[k].name = want;
+ 			m[k].flat = NULL;
+ 			m[k].slot = k;		// fixed: the SDK order above
 diff --git a/src/thunks.c b/src/thunks.c
 index a5bde77..5b0de7d 100644
 --- a/src/thunks.c

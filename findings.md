@@ -47,6 +47,29 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
    caller then gets the default zone, unregisters it, and registers it
    again. This sequence makes registration order relevant to the bridge.
 
+## Steam 1.0.3 Mac build
+
+The Steam depot installs the i386 Feral app (92701.18470.3) next to
+`Dirt3Data`. The launcher opens the Mac bundle. It uses the game-provided
+`libsteam_api.dylib` and mac32's bridge to the running Steam client.
+
+- The old Carbon process-location call returned the compatibility runtime's
+  path. It now returns the guest app bundle for calls about the current
+  process, allowing the game to open its original executable and resources.
+  The Security bridge forwards requirement and validity calls to macOS.
+- The shipped Steam API uses the Steamworks 1.31 client, utilities and
+  controller interface layouts. The modern utility layout read the wrong
+  return value at the old `GetAppID` slot. With the 1.31 layouts the running
+  Steam client returned App ID 321040. The controller interface's startup
+  calls were exercised without a physical controller.
+- Both legacy OS version packing routines in the Steam executable need the
+  compatibility clamp. The timer bridge now fills the i386 output record
+  even when the guest leaves it uninitialized, as the shipped game does.
+- Both Mac builds now use instruction signatures at the patch sites.
+  Changing only the Steam executable's Mach-O UUID preserved the match.
+  Changing an instruction in the version check made the runtime stop before
+  guest initializers. The original executables are used in place.
+
 ## Startup through AppKit
 
 - The guest zone registry honors default-zone reordering and dispatches the
@@ -91,10 +114,9 @@ loader and an ABI bridge for system calls and frameworks. [Apple 32-bit support]
 - The first visible alert came from `kErrorRequireMacOSTenVersion`.
   The game read the actual component values 15, 7 and 7. Its packing
   routine encoded those components as `0x0077`, below its 10.x minimum.
-  The runtime patch checks the original executable SHA-256 and instruction
-  bytes. For macOS major versions above 10 it saturates that routine's
-  legacy result at `0x10f0` (10.15.0), leaving other system version queries
-  on their original path. The installed app is read-only input.
+  The runtime matches the instructions in that routine before editing it.
+  On macOS releases above 10 it saturates the legacy result at `0x10f0`
+  (10.15.0), keeping other version queries on their original path.
 - The game used both OpenGL 2.1 and 4.1 on the test Mac. mac32 had reused
   the 2.1 version string in the 4.1 context, which sent the game down its
   legacy extension query and crashed on a null result. mac32 now returns
@@ -224,8 +246,7 @@ In a failing trace, an embedded NUL in the corrupted language component
 truncated the path to `Resources/` before `Game.strings`. The launcher
 lost localized labels and settings used by the original resource check.
 
-The fingerprinted DiRT 3 patch uses the mapped `__TEXT` range for the
-string storage check. The `getsegbyname` bridge continues to expose the
+The DiRT 3 patch uses the mapped `__TEXT` range for the string storage check. The `getsegbyname` bridge continues to expose the
 original header and the game continues opening and checking its own files.
 The runtime also maps the game's `_Exit` call to immediate termination so
 normal shutdown can finish.
