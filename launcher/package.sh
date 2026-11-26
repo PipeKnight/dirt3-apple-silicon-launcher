@@ -20,7 +20,10 @@ git -C "$runtime" archive "$revision" | tar -xf - -C "$source/mac32"
 # The staging directory is inside this repository. Stop Git's search there
 # so it applies upstream-relative paths to the extracted tree.
 GIT_CEILING_DIRECTORIES="$source" git -C "$source/mac32" apply \
-    "$project/patches/mac32-feral-entrypoint.patch" "$project/patches/mac32-startup-memory.patch"
+    "$project/patches/mac32-feral-entrypoint.patch" \
+    "$project/patches/mac32-startup-memory.patch" \
+    "$project/patches/mac32-display-and-dualsense.patch" \
+    "$project/patches/mac32-steam-cloud.patch"
 while IFS= read -r -d '' file; do
     cmp -s "$file" "$runtime/${file#"$source/mac32/"}" || {
         printf 'Runtime source differs from the release patches: %s\n' "${file#"$source/mac32/"}" >&2

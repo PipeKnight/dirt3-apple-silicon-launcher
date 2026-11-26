@@ -16,7 +16,7 @@ Codemasters developed DiRT 3. Feral Interactive developed and published the Mac 
 | Standalone | 1.0 | `85186.17625.4091` |
 | Steam | 1.0.3 | `92701.18470.3` |
 
-On an Apple M4 running macOS 15.7.7, the standalone edition completed a single-player rally and reloaded a saved profile. The Steam edition ran a Finland Time Trial with keyboard controls and completed the Aspen benchmark. Gamepad testing is still pending. [Compatibility notes](findings.md) · [Steam test results](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/releases/tag/v0.2.0)
+On an Apple M4 running macOS 15.7.7, the standalone edition completed a single-player rally and reloaded a saved profile. The Steam edition ran a Finland Time Trial with keyboard controls and completed the Aspen benchmark. [Compatibility notes](findings.md) · [Steam test results](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/releases/tag/v0.2.0)
 
 ## Install and play
 
@@ -30,9 +30,15 @@ The GitHub download is ad-hoc signed. If macOS says it cannot verify the develop
 
 ## Graphics and startup videos
 
-Change resolution, VSync, multisampling (MSAA) and other graphics settings in **Options → Graphics Options** in the game. The game chooses its defaults on the first launch and uses its saved settings thereafter. [Feral's graphics guide](https://www.feralinteractive.com/en/readmes/dirt3/latest/steam/)
+Change render resolution, VSync, multisampling (MSAA) and other graphics settings in **Options → Graphics Options** in the game. On Retina displays, the launcher includes compatible scaled modes and keeps the original 640 × 480 setting selectable. The game uses the desktop refresh rate. To change it, select a rate in **System Settings → Displays** before launching. [Feral's graphics guide](https://www.feralinteractive.com/en/readmes/dirt3/latest/steam/)
+
+During play, press **F9** to toggle the performance overlay. It shows FPS, frame interval and 1% low over the last five seconds. CPU use is for the game process, with 100% equivalent to one core. CPU time per frame sums the work across its threads. GPU utilization covers the whole GPU and appears when macOS exposes it. The thermal indicator shows the macOS thermal state.
 
 **Skip startup videos** is on by default. Clear the checkbox in the launcher to play the opening videos.
+
+## DualSense over USB
+
+Connect a DualSense directly to your Mac before clicking **Play**. Press **Options** at the title screen. The launcher registers a controller profile for your installed game and routes the game's two vibration channels to the DualSense handle actuators.
 
 ## Troubleshooting
 
@@ -69,7 +75,9 @@ llvm="$build_dir/llvm-project"
 git clone https://github.com/Shagulka/mac32.git "$runtime"
 git -C "$runtime" checkout --detach dcfed5b9ad1ca1356bddd39ac6a26e564d536c28
 git -C "$runtime" apply "$PWD/patches/mac32-feral-entrypoint.patch" \
-  "$PWD/patches/mac32-startup-memory.patch"
+  "$PWD/patches/mac32-startup-memory.patch" \
+  "$PWD/patches/mac32-display-and-dualsense.patch" \
+  "$PWD/patches/mac32-steam-cloud.patch"
 LLVM="$llvm" "$runtime/tools/get-llvm.sh"
 
 sdk="$(xcrun --sdk macosx --show-sdk-path)"

@@ -1,0 +1,1182 @@
+diff --git a/Makefile b/Makefile
+index aeabf91..ca8ab39 100644
+--- a/Makefile
++++ b/Makefile
+@@ -3,10 +3,10 @@ CC = clang
+ CFLAGS = -arch x86_64 -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations \
+          -DGL_SILENCE_DEPRECATION -Wno-missing-field-initializers
+ LDFLAGS = -arch x86_64 -lffi -lcurl -liconv -lz -framework Foundation -framework AppKit -framework WebKit -framework Carbon -framework AVFoundation -framework CoreMedia \
+-          -framework IOKit -framework OpenGL -framework OpenCL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
++          -framework IOKit -framework GameController -framework CoreHaptics -framework OpenGL -framework OpenCL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
+           -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
+ SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c src/media_bridge.c \
+-      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
++      src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
+ OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
+ 
+ all: mac32 guest app
+diff --git a/src/apple.m b/src/apple.m
+index e27be43..f5fbadf 100644
+--- a/src/apple.m
++++ b/src/apple.m
+@@ -78,10 +78,110 @@ static int w_CFStringGetCString(CFStringRef s, char *b, int32_t n, uint32_t e) {
+ static uint32_t w_CGDisplayPixelsWide(uint32_t d) { return (uint32_t)CGDisplayPixelsWide(d); }
+ static uint32_t w_CGDisplayPixelsHigh(uint32_t d) { return (uint32_t)CGDisplayPixelsHigh(d); }
+ static int w_CGCursorIsVisible(void) { return CGCursorIsVisible() ? 1 : 0; }
+-static uint32_t w_CGDisplayModeGetWidth(CGDisplayModeRef m) { return (uint32_t)CGDisplayModeGetWidth(m); }
+-static uint32_t w_CGDisplayModeGetHeight(CGDisplayModeRef m) { return (uint32_t)CGDisplayModeGetHeight(m); }
+ static int w_CGDisplayIsActive(uint32_t d) { return CGDisplayIsActive(d) ? 1 : 0; }
+ 
++extern int dirt3_version_patch_active(void);
++
++// DiRT 3 renders its selected size into a borderless window. The original
++// 640×480 default may no longer exist as a physical display mode, even
++// though the game can still render at that size. Include it in the guest's
++// mode list so that a saved default resolves to a selectable menu entry.
++struct dirt3_render_mode {
++	uint32_t width, height, flags;
++	double refresh;
++};
++
++static const struct dirt3_render_mode *dirt3_render_mode(CGDisplayModeRef mode)
++{
++	if (!mode || !dirt3_version_patch_active() || CFGetTypeID(mode) != CFDataGetTypeID())
++		return NULL;
++	CFDataRef data = (CFDataRef)mode;
++	return CFDataGetLength(data) == sizeof(struct dirt3_render_mode)
++		? (const struct dirt3_render_mode *)CFDataGetBytePtr(data) : NULL;
++}
++
++static uint32_t w_CGDisplayModeGetWidth(CGDisplayModeRef m)
++{
++	const struct dirt3_render_mode *mode = dirt3_render_mode(m);
++	return mode ? mode->width : (uint32_t)CGDisplayModeGetWidth(m);
++}
++
++static uint32_t w_CGDisplayModeGetHeight(CGDisplayModeRef m)
++{
++	const struct dirt3_render_mode *mode = dirt3_render_mode(m);
++	return mode ? mode->height : (uint32_t)CGDisplayModeGetHeight(m);
++}
++
++static double w_CGDisplayModeGetRefreshRate(CGDisplayModeRef m)
++{
++	const struct dirt3_render_mode *mode = dirt3_render_mode(m);
++	return mode ? mode->refresh : CGDisplayModeGetRefreshRate(m);
++}
++
++uint32_t w_CGDisplayModeGetIOFlags(CGDisplayModeRef m)
++{
++	const struct dirt3_render_mode *mode = dirt3_render_mode(m);
++	return mode ? mode->flags : CGDisplayModeGetIOFlags(m);
++}
++
++static uint32_t w_CGDisplayModeGetIODisplayModeID(CGDisplayModeRef m)
++{
++	return dirt3_render_mode(m) ? 0 : CGDisplayModeGetIODisplayModeID(m);
++}
++
++static int w_CGDisplayModeIsUsableForDesktopGUI(CGDisplayModeRef m)
++{
++	return dirt3_render_mode(m) ? 1 : CGDisplayModeIsUsableForDesktopGUI(m);
++}
++
++static void add_dirt3_render_mode(CFMutableArrayRef modes, CGDisplayModeRef desktop,
++	uint32_t width, uint32_t height)
++{
++	if (width > CGDisplayModeGetWidth(desktop) || height > CGDisplayModeGetHeight(desktop))
++		return;
++	double refresh = CGDisplayModeGetRefreshRate(desktop);
++	for (CFIndex i = 0; i < CFArrayGetCount(modes); i++) {
++		CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
++		if (w_CGDisplayModeGetWidth(mode) == width && w_CGDisplayModeGetHeight(mode) == height &&
++		    w_CGDisplayModeGetRefreshRate(mode) == refresh)
++			return;
++	}
++	const struct dirt3_render_mode mode = { width, height, CGDisplayModeGetIOFlags(desktop), refresh };
++	CFDataRef value = CFDataCreate(NULL, (const UInt8 *)&mode, sizeof(mode));
++	if (value) {
++		CFArrayAppendValue(modes, value);
++		CFRelease(value);
++	}
++}
++
++static CFArrayRef w_CGDisplayCopyAllDisplayModes(CGDirectDisplayID display, CFDictionaryRef options)
++{
++	if (!dirt3_version_patch_active() || options)
++		return CGDisplayCopyAllDisplayModes(display, options);
++
++	// The game compares mode dimensions to the desktop's logical size.
++	// macOS can exclude the matching HiDPI modes from the default list.
++	const void *keys[] = { kCGDisplayShowDuplicateLowResolutionModes };
++	const void *values[] = { kCFBooleanTrue };
++	options = CFDictionaryCreate(NULL, keys, values, 1,
++		&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++	CFArrayRef modes = CGDisplayCopyAllDisplayModes(display, options);
++	if (options) CFRelease(options);
++	if (!modes) return NULL;
++
++	CGDisplayModeRef desktop = CGDisplayCopyDisplayMode(display);
++	if (!desktop) return modes;
++	CFMutableArrayRef available = CFArrayCreateMutableCopy(NULL, 0, modes);
++	if (available) {
++		add_dirt3_render_mode(available, desktop, 640, 480);
++		add_dirt3_render_mode(available, desktop, 1280, 720);
++		CFRelease(modes);
++		modes = available;
++	}
++	CGDisplayModeRelease(desktop);
++	return modes;
++}
++
+ // the guest gets its own copy of CFData bytes (host memory is above 4 GB)
+ static void t_CFDataGetBytePtr(uint32_t *args, struct hres *r)
+ {
+@@ -488,13 +588,15 @@ static void t_CFAbsoluteTimeGetGregorianDate(uint32_t *args, struct hres *r)
+ 	r->flags |= F_POP4;
+ }
+ 
+-// CFUUIDBytes is 16 bytes: passed by value (4 words), returned through a hidden pointer
++// Each UInt8 argument occupies one i386 stack slot.
+ static void t_CFUUIDGetConstantUUIDWithBytes(uint32_t *args, struct hres *r)
+ {
+-	uint8_t *b = (uint8_t *)&args[1];
++	uint8_t b[16];
++	for (size_t i = 0; i < sizeof b; i++) b[i] = (uint8_t)args[i + 1];
+ 	RET(hobj_wrap((void *)CFUUIDGetConstantUUIDWithBytes(NULL, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+ 							       b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])));
+ }
++// CFUUIDBytes is a 16-byte structure returned through a hidden pointer.
+ static void t_CFUUIDGetUUIDBytes(uint32_t *args, struct hres *r)
+ {
+ 	CFUUIDBytes u = CFUUIDGetUUIDBytes(hobj_unwrap(A(1)));
+@@ -537,7 +639,6 @@ static void t_HIGetMousePosition(uint32_t *args, struct hres *r)
+ 	RET(A(2));
+ }
+ static void t_io_unsupported(uint32_t *args, struct hres *r) { (void)args; RET(0xe00002c7); }	// kIOReturnUnsupported
+-static void t_ff_none(uint32_t *args, struct hres *r) { (void)args; RET(0x80040001); }		// FFERR_NOINTERFACE
+ static int w_CFEqual(CFTypeRef a, CFTypeRef b) { return CFEqual(a, b) ? 1 : 0; }
+ static CFURLRef w_CFURLCreateWithBytes(CFAllocatorRef a, const UInt8 *b, int32_t n, uint32_t enc, CFURLRef base)
+ { return CFURLCreateWithBytes(a, b, n, enc, base); }
+@@ -586,6 +687,8 @@ KEY(kCFProxyPortNumberKey) KEY(kCFProxyTypeAutoConfigurationURL) KEY(kCFProxyTyp
+ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
+ #define DKEY(sym) D("_" #sym, 4, init_##sym)
+ 
++extern CGLError dirt3_flush_drawable(CGLContextObj context);
++
+ static int w_CGLSetCurrentContext(CGLContextObj c) { if (c) gl_last_context = c; return CGLSetCurrentContext(c); }
+ 
+ static const CGAffineTransform *host_font_matrix(const float *guest, CGAffineTransform *matrix)
+@@ -734,8 +837,6 @@ static struct hfn apple[] = {
+ 	G("_IOMasterPort", IOMasterPort, "i:up"),
+ 	R("_IORegistryEntryCreateCFProperties", t_IORegistryEntryCreateCFProperties),
+ 	R("_IOCreatePlugInInterfaceForService", t_io_unsupported),
+-	R("_FFIsForceFeedback", t_ff_none), R("_FFCreateDevice", t_ff_none),
+-	R("_FFReleaseDevice", t_ff_none), R("_FFDeviceEscape", t_ff_none),
+ 	R("_GetGlobalMouse", t_GetGlobalMouse),
+ 	R("_HIGetMousePosition", t_HIGetMousePosition),
+ 	G("_HIThemeGetUIFontType", HIThemeGetUIFontType, "u:u"),
+@@ -751,13 +852,14 @@ static struct hfn apple[] = {
+ 	R("_CGDisplayAvailableModes", t_CGDisplayAvailableModes),
+ 	R("_CGDisplayCurrentMode", t_CGDisplayCurrentMode),
+ 	G("_CGDisplayCopyDisplayMode", CGDisplayCopyDisplayMode, "o:u"),
+-	G("_CGDisplayCopyAllDisplayModes", CGDisplayCopyAllDisplayModes, "o:uo"),
++	G("_CGDisplayCopyAllDisplayModes", w_CGDisplayCopyAllDisplayModes, "o:uo"),
+ 	G("_CGDisplayModeGetWidth", w_CGDisplayModeGetWidth, "u:o"),
+ 	G("_CGDisplayModeGetHeight", w_CGDisplayModeGetHeight, "u:o"),
+-	G("_CGDisplayModeGetRefreshRate", CGDisplayModeGetRefreshRate, "d:o"),
+-	G("_CGDisplayModeGetIODisplayModeID", CGDisplayModeGetIODisplayModeID, "i:o"),
+-	G("_CGDisplayModeRelease", CGDisplayModeRelease, "v:o"),
+-	G("_CGDisplayModeRetain", CGDisplayModeRetain, "o:o"),
++	G("_CGDisplayModeIsUsableForDesktopGUI", w_CGDisplayModeIsUsableForDesktopGUI, "i:o"),
++	G("_CGDisplayModeGetRefreshRate", w_CGDisplayModeGetRefreshRate, "d:o"),
++	G("_CGDisplayModeGetIODisplayModeID", w_CGDisplayModeGetIODisplayModeID, "u:o"),
++	G("_CGDisplayModeRelease", CFRelease, "v:o"),
++	G("_CGDisplayModeRetain", CFRetain, "o:o"),
+ 	G("_CGDisplayHideCursor", CGDisplayHideCursor, "i:u"),
+ 	G("_CGDisplayShowCursor", CGDisplayShowCursor, "i:u"),
+ 	G("_CGCursorIsVisible", w_CGCursorIsVisible, "i:"),
+@@ -817,9 +919,10 @@ static struct hfn apple[] = {
+ 	G("_CGLSetParameter", CGLSetParameter, "i:oup"),
+ 	G("_CGLGetParameter", CGLGetParameter, "i:oup"),
+ 	G("_CGLDescribeRenderer", CGLDescribeRenderer, "i:oiup"),
+-	G("_CGLFlushDrawable", CGLFlushDrawable, "i:o"),
++	G("_CGLFlushDrawable", dirt3_flush_drawable, "i:o"),
+ 	G("_CGLLockContext", CGLLockContext, "i:o"),
+ 	G("_CGLUnlockContext", CGLUnlockContext, "i:o"),
+ };
+ 
+-void thunks_apple_init(void) { REGISTER(apple); }
++void thunks_dirt3_force_feedback_init(void);
++void thunks_apple_init(void) { REGISTER(apple); thunks_dirt3_force_feedback_init(); }
+diff --git a/src/apple2.m b/src/apple2.m
+index b862a30..3268a98 100644
+--- a/src/apple2.m
++++ b/src/apple2.m
+@@ -198,8 +198,7 @@ static void init_rlcommon(g32 a) { U32(a) = hobj_wrap((void *)kCFRunLoopCommonMo
+ static void t_ok(uint32_t *args, struct hres *r) { (void)args; RET(0); }
+ static void t_fade_reserve(uint32_t *args, struct hres *r) { if (A(1)) U32(A(1)) = 1; RET(0); }
+ static int w_CGDisplayIsMain(uint32_t d) { return CGDisplayIsMain(d); }
+-static uint32_t w_CGDisplayModeGetIOFlags(CGDisplayModeRef m) { return CGDisplayModeGetIOFlags(m); }
+-static int w_CGDisplayModeIsUsableForDesktopGUI(CGDisplayModeRef m) { return CGDisplayModeIsUsableForDesktopGUI(m); }
++extern uint32_t w_CGDisplayModeGetIOFlags(CGDisplayModeRef m);
+ static CFStringRef w_CGDisplayModeCopyPixelEncoding(CGDisplayModeRef m)
+ {
+ 	(void)m;
+@@ -534,7 +533,6 @@ static struct hfn apple2_fns[] = {
+ 	G("_CGDisplayIsMain", w_CGDisplayIsMain, "i:u"), G("_CGDisplayMirrorsDisplay", CGDisplayMirrorsDisplay, "u:u"),
+ 	G("_CGDisplayModeCopyPixelEncoding", w_CGDisplayModeCopyPixelEncoding, "o:o"),
+ 	G("_CGDisplayModeGetIOFlags", w_CGDisplayModeGetIOFlags, "u:o"),
+-	G("_CGDisplayModeIsUsableForDesktopGUI", w_CGDisplayModeIsUsableForDesktopGUI, "i:o"),
+ 	R("_CGDisplayMoveCursorToPoint", t_CGDisplayMoveCursorToPoint),
+ 	R("_CGDisplayScreenSize", t_CGDisplayScreenSize),
+ 	G("_CGDisplaySetDisplayMode", CGDisplaySetDisplayMode, "i:uoo"),
+diff --git a/src/cf_thunks.c b/src/cf_thunks.c
+index 3121c2f..29bb503 100644
+--- a/src/cf_thunks.c
++++ b/src/cf_thunks.c
+@@ -4,6 +4,8 @@
+ 
+ #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+ 
++extern CFURLRef w_CFBundleCopyResourceURL(CFBundleRef, CFStringRef, CFStringRef, CFStringRef);
++
+ 
+ static struct hfn cf[] = {
+ 	G("_CFAbsoluteTimeGetDayOfWeek", CFAbsoluteTimeGetDayOfWeek, "i:do"),
+@@ -69,7 +71,7 @@ static struct hfn cf[] = {
+ 	G("_CFBundleCopyLocalizedStringForLocalizations", CFBundleCopyLocalizedStringForLocalizations, "o:ooooo"),
+ 	G("_CFBundleCopyPreferredLocalizationsFromArray", CFBundleCopyPreferredLocalizationsFromArray, "o:o"),
+ 	G("_CFBundleCopyPrivateFrameworksURL", CFBundleCopyPrivateFrameworksURL, "o:o"),
+-	G("_CFBundleCopyResourceURL", CFBundleCopyResourceURL, "o:oooo"),
++	G("_CFBundleCopyResourceURL", w_CFBundleCopyResourceURL, "o:oooo"),
+ 	G("_CFBundleCopyResourceURLForLocalization", CFBundleCopyResourceURLForLocalization, "o:ooooo"),
+ 	G("_CFBundleCopyResourceURLInDirectory", CFBundleCopyResourceURLInDirectory, "o:oooo"),
+ 	G("_CFBundleCopyResourceURLsOfType", CFBundleCopyResourceURLsOfType, "o:ooo"),
+diff --git a/src/dirt3_force_feedback.m b/src/dirt3_force_feedback.m
+new file mode 100644
+index 0000000..338b0a3
+--- /dev/null
++++ b/src/dirt3_force_feedback.m
+@@ -0,0 +1,515 @@
++// The i386 game sends two motor strengths through the old ForceFeedback API.
++// Translate only its DualSense gamepad path, keeping the controller's input
++// connection and any other legacy devices independent of this bridge.
++#import <AppKit/AppKit.h>
++#import <CoreHaptics/CoreHaptics.h>
++#import <ForceFeedback/ForceFeedback.h>
++#import <GameController/GameController.h>
++#import <IOKit/hid/IOHIDKeys.h>
++#include <math.h>
++#include <os/lock.h>
++#include <stdatomic.h>
++#include <time.h>
++#include "thunks.h"
++
++extern int dirt3_version_patch_active(void);
++
++enum { max_devices = 4, max_effects = 12 };
++static const double output_watchdog = 0.35;
++static const double haptic_event_duration = 0.25;
++static os_unfair_lock state_lock = OS_UNFAIR_LOCK_INIT;
++static g32 next_handle = 1;
++static bool trace_enabled, trace_only;
++
++struct device {
++    g32 handle;
++    float gain, escape[2];
++    double escape_end;
++};
++
++struct effect {
++    g32 handle, owner;
++    uint32_t channel, duration;
++    float strength, gain;
++    double end;
++};
++
++struct effect32 {
++    uint32_t size, flags, duration, sample_period, gain;
++    uint32_t trigger, repeat, axes, axis_list, directions, envelope;
++    uint32_t params_size;
++    g32 params;
++    uint32_t start_delay;
++};
++
++struct escape32 {
++    uint32_t size, command;
++    g32 input;
++    uint32_t input_size;
++    g32 output;
++    uint32_t output_size;
++};
++
++_Static_assert(sizeof(struct effect32) == 56, "32-bit FFEFFECT");
++_Static_assert(sizeof(struct escape32) == 24, "32-bit FFEFFESCAPE");
++_Static_assert(sizeof(FFCAPABILITIES) == 72, "FFCAPABILITIES uses fixed-size fields");
++_Static_assert(sizeof(FFPERIODIC) == 16, "FFPERIODIC uses fixed-size fields");
++
++static struct device devices[max_devices];
++static struct effect effects[max_effects];
++
++@interface Dirt3Motor : NSObject
++@property (retain) CHHapticEngine *engine;
++@property (retain) id<CHHapticPatternPlayer> player;
++@property float level;
++@property double renewAt;
++@end
++@implementation Dirt3Motor
++- (void)dealloc
++{
++    [_player release];
++    [_engine release];
++    [super dealloc];
++}
++@end
++
++// Core Haptics and controller identity are owned by the main-queue timer.
++static GCController *controller;
++static Dirt3Motor *motors[2];
++static double retry_at;
++static bool split_handles;
++static dispatch_source_t update_timer;
++
++static double now(void)
++{
++    return (double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
++}
++
++static float normalize(uint32_t value)
++{
++    return fminf(value, FF_FFNOMINALMAX) / FF_FFNOMINALMAX;
++}
++
++static struct device *find_device(g32 handle)
++{
++    for (size_t i = 0; handle && i < max_devices; ++i)
++        if (devices[i].handle == handle) return &devices[i];
++    return NULL;
++}
++
++static struct effect *find_effect(g32 handle)
++{
++    for (size_t i = 0; handle && i < max_effects; ++i)
++        if (effects[i].handle == handle) return &effects[i];
++    return NULL;
++}
++
++static bool is_dualsense_service(io_service_t service)
++{
++    if (!service || !dirt3_version_patch_active()) return false;
++    CFTypeRef vendor = IORegistryEntryCreateCFProperty(service, CFSTR(kIOHIDVendorIDKey), NULL, 0);
++    CFTypeRef product = IORegistryEntryCreateCFProperty(service, CFSTR(kIOHIDProductIDKey), NULL, 0);
++    bool matches = vendor && product && CFEqual(vendor, (CFTypeRef)@0x054c) &&
++                   CFEqual(product, (CFTypeRef)@0x0ce6);
++    if (vendor) CFRelease(vendor);
++    if (product) CFRelease(product);
++    return matches;
++}
++
++static GCController *one_connected_dualsense(void)
++{
++    GCController *match = nil;
++    for (GCController *candidate in GCController.controllers) {
++        if (![candidate.extendedGamepad isKindOfClass:[GCDualSenseGamepad class]]) continue;
++        // The public framework does not expose the IORegistry identity. Avoid
++        // applying effects to the wrong controller when there are two.
++        if (match) return nil;
++        match = candidate;
++    }
++    return match;
++}
++
++static void reset_motors(void)
++{
++    for (size_t i = 0; i < 2; ++i) {
++        [motors[i].player stopAtTime:CHHapticTimeImmediate error:nil];
++        [motors[i].engine stopWithCompletionHandler:nil];
++        [motors[i] release];
++        motors[i] = nil;
++    }
++}
++
++static Dirt3Motor *create_motor(GCHapticsLocality locality, float sharpness)
++{
++    Dirt3Motor *motor = [[Dirt3Motor alloc] init];
++    motor.engine = [controller.haptics createEngineWithLocality:locality];
++    if (!motor.engine) { [motor release]; return nil; }
++    motor.engine.playsHapticsOnly = YES;
++    NSError *error = nil;
++    if (![motor.engine startAndReturnError:&error]) {
++        LOG("DualSense haptic engine start failed: %s (%ld)\n",
++            error.localizedDescription.UTF8String ?: "unknown error", (long)error.code);
++        [motor release];
++        return nil;
++    }
++    CHHapticEventParameter *tone = [[[CHHapticEventParameter alloc]
++        initWithParameterID:CHHapticEventParameterIDHapticSharpness value:sharpness] autorelease];
++    CHHapticEventParameter *intensity = [[[CHHapticEventParameter alloc]
++        initWithParameterID:CHHapticEventParameterIDHapticIntensity value:1.0f] autorelease];
++    CHHapticEvent *event = [[[CHHapticEvent alloc]
++        initWithEventType:CHHapticEventTypeHapticContinuous parameters:@[intensity, tone]
++        relativeTime:0 duration:haptic_event_duration] autorelease];
++    CHHapticPattern *pattern = [[[CHHapticPattern alloc] initWithEvents:@[event]
++        parameters:@[] error:&error] autorelease];
++    // Controller haptic daemons can reject advanced players. The basic
++    // player supports both finite events and dynamic intensity changes.
++    if (pattern) motor.player = [motor.engine createPlayerWithPattern:pattern error:&error];
++    if (!motor.player) {
++        [motor.engine stopWithCompletionHandler:nil];
++        LOG("DualSense haptic player creation failed: %s (%ld)\n",
++            error.localizedDescription.UTF8String ?: "unknown error", (long)error.code);
++        [motor release];
++        return nil;
++    }
++    return motor;
++}
++
++static bool set_motor(Dirt3Motor *motor, float strength, double time)
++{
++    if (!motor) return true;
++    strength = roundf(strength * 255.0f) / 255.0f;
++    if (strength == 0) {
++        if (motor.level != 0) [motor.player stopAtTime:CHHapticTimeImmediate error:nil];
++        motor.level = 0;
++        return true;
++    }
++    bool restart = !motor.level || time >= motor.renewAt;
++    if (!restart && motor.level == strength) return true;
++    CHHapticDynamicParameter *intensity = [[[CHHapticDynamicParameter alloc]
++        initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
++        value:strength relativeTime:0] autorelease];
++    NSError *error = nil;
++    if ((restart && ![motor.player startAtTime:CHHapticTimeImmediate error:&error]) ||
++        ![motor.player sendParameters:@[intensity] atTime:CHHapticTimeImmediate error:&error]) {
++        LOG("DualSense haptics stopped: %s\n", error.localizedDescription.UTF8String ?: "player failed");
++        return false;
++    }
++    if (restart) motor.renewAt = time + haptic_event_duration;
++    motor.level = strength;
++    return true;
++}
++
++static void update_motors(void)
++{
++    @autoreleasepool {
++        double time = now();
++        float strength[2] = {0, 0};
++        bool has_device = false;
++        os_unfair_lock_lock(&state_lock);
++        for (size_t i = 0; i < max_devices; ++i) {
++            struct device *device = &devices[i];
++            if (!device->handle) continue;
++            has_device = true;
++            if (device->escape_end > time)
++                for (size_t channel = 0; channel < 2; ++channel)
++                    strength[channel] = fmaxf(strength[channel], device->escape[channel] * device->gain);
++        }
++        for (size_t i = 0; i < max_effects; ++i) {
++            struct effect *effect = &effects[i];
++            struct device *device = effect->end > time ? find_device(effect->owner) : NULL;
++            if (device)
++                strength[effect->channel] = fmaxf(strength[effect->channel], effect->strength * effect->gain * device->gain);
++        }
++        os_unfair_lock_unlock(&state_lock);
++        if (!has_device) {
++            reset_motors();
++            [controller release];
++            controller = nil;
++            dispatch_source_cancel(update_timer);
++            dispatch_release(update_timer);
++            update_timer = NULL;
++            return;
++        }
++
++        static bool traced_output;
++        static double trace_at;
++        bool rumbling = strength[0] > 0 || strength[1] > 0;
++        if (trace_enabled && rumbling && (!traced_output || time >= trace_at)) {
++            LOG("DualSense force feedback: left=%.3f right=%.3f\n", strength[0], strength[1]);
++            trace_at = time + 1;
++        }
++        traced_output = rumbling;
++        if (trace_only) return;
++
++        GCController *connected = NSApp.isActive && (rumbling || controller)
++            ? one_connected_dualsense() : nil;
++        if (connected != controller) {
++            reset_motors();
++            [controller release];
++            controller = [connected retain];
++            retry_at = 0;
++        }
++        if (!controller) return;
++        if (rumbling && !motors[0] && time >= retry_at) {
++            NSSet *locations = controller.haptics.supportedLocalities;
++            split_handles = [locations containsObject:GCHapticsLocalityLeftHandle] &&
++                            [locations containsObject:GCHapticsLocalityRightHandle];
++            if (split_handles) {
++                motors[0] = create_motor(GCHapticsLocalityLeftHandle, 0.25f);
++                motors[1] = create_motor(GCHapticsLocalityRightHandle, 0.75f);
++                if (!motors[0] || !motors[1]) { reset_motors(); split_handles = false; }
++            }
++            if (!split_handles && locations.count)
++                motors[0] = create_motor(GCHapticsLocalityDefault, 0.5f);
++            if (motors[0])
++                LOG("DualSense haptics ready (%s)\n", split_handles ? "two handles" : "combined handles");
++            retry_at = time + 2;
++        }
++
++        float first = split_handles ? strength[0] : fmaxf(strength[0], strength[1]);
++        if (!set_motor(motors[0], first, time) || !set_motor(motors[1], strength[1], time)) {
++            reset_motors();
++            retry_at = time + 2;
++        }
++    }
++}
++
++static void start_timer(void)
++{
++    dispatch_async(dispatch_get_main_queue(), ^{
++        if (update_timer) return;
++        update_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
++        dispatch_source_set_timer(update_timer, DISPATCH_TIME_NOW, NSEC_PER_SEC / 40, NSEC_PER_MSEC * 3);
++        dispatch_source_set_event_handler(update_timer, ^{ update_motors(); });
++        dispatch_activate(update_timer);
++    });
++}
++
++static void t_ff_supported(uint32_t *args, struct hres *r)
++{
++    bool supported = is_dualsense_service(A(0));
++    if (trace_enabled) LOG("DualSense force feedback: legacy service matched=%d\n", supported);
++    RET(supported ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static void t_ff_create_device(uint32_t *args, struct hres *r)
++{
++    g32 *out = G2H(A(1));
++    if (!out) { RET(FFERR_INVALIDPARAM); return; }
++    *out = 0;
++    if (!is_dualsense_service(A(0))) { RET(FFERR_NOINTERFACE); return; }
++
++    os_unfair_lock_lock(&state_lock);
++    for (size_t i = 0; i < max_devices; ++i) {
++        if (devices[i].handle) continue;
++        devices[i] = (struct device){.handle = next_handle++, .gain = 1};
++        *out = devices[i].handle;
++        break;
++    }
++    os_unfair_lock_unlock(&state_lock);
++    if (*out) {
++        if (trace_enabled) LOG("DualSense force feedback: legacy device created\n");
++        start_timer();
++    }
++    RET(*out ? FF_OK : FFERR_DEVICEFULL);
++}
++
++static void t_ff_release_device(uint32_t *args, struct hres *r)
++{
++    os_unfair_lock_lock(&state_lock);
++    struct device *device = find_device(A(0));
++    if (device) {
++        *device = (struct device){0};
++        for (size_t i = 0; i < max_effects; ++i)
++            if (effects[i].owner == A(0)) effects[i] = (struct effect){0};
++    }
++    os_unfair_lock_unlock(&state_lock);
++    RET(device ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static bool parse_periodic(const struct effect32 *definition, struct effect *effect)
++{
++    if (definition->size != sizeof(*definition) || definition->params_size != sizeof(FFPERIODIC) ||
++        !definition->params) return false;
++    const FFPERIODIC *periodic = G2H(definition->params);
++    if (periodic->dwPeriod != 500000 && periodic->dwPeriod != 250000) return false;
++    effect->channel = periodic->dwPeriod == 250000;
++    effect->strength = normalize(periodic->dwMagnitude);
++    return true;
++}
++
++static void t_ff_create_effect(uint32_t *args, struct hres *r)
++{
++    const struct effect32 *definition = G2H(A(2));
++    g32 *out = G2H(A(3));
++    CFUUIDRef type = hobj_unwrap(A(1));
++    if (!out) { RET(FFERR_INVALIDPARAM); return; }
++    *out = 0;
++    struct effect effect = {.owner = A(0)};
++    if (!type || !CFEqual(type, kFFEffectType_Sine_ID) || !definition || !parse_periodic(definition, &effect)) {
++        static atomic_flag logged = ATOMIC_FLAG_INIT;
++        if (trace_enabled && !atomic_flag_test_and_set_explicit(&logged, memory_order_relaxed))
++            LOG("DualSense force feedback: unsupported legacy effect\n");
++        RET(FFERR_UNSUPPORTED);
++        return;
++    }
++    effect.duration = definition->duration;
++    effect.gain = normalize(definition->gain);
++
++    os_unfair_lock_lock(&state_lock);
++    bool valid_owner = find_device(effect.owner) != NULL;
++    if (valid_owner) {
++        for (size_t i = 0; i < max_effects; ++i) {
++            if (effects[i].handle) continue;
++            effect.handle = next_handle++;
++            effects[i] = effect;
++            *out = effect.handle;
++            break;
++        }
++    }
++    os_unfair_lock_unlock(&state_lock);
++    if (*out && trace_enabled)
++        LOG("DualSense force feedback: game created motor %u (%.3f)\n", effect.channel, effect.strength);
++    RET(!valid_owner ? FFERR_NOINTERFACE : *out ? FF_OK : FFERR_DEVICEFULL);
++}
++
++static double playback_end(const struct effect *effect, uint32_t iterations)
++{
++    return now() + fmin(output_watchdog, iterations * (effect->duration / 1e6));
++}
++
++static void t_ff_set_effect(uint32_t *args, struct hres *r)
++{
++    const struct effect32 *definition = G2H(A(1));
++    uint32_t flags = A(2);
++    if (!definition || definition->size != sizeof(*definition)) { RET(FFERR_INVALIDPARAM); return; }
++    os_unfair_lock_lock(&state_lock);
++    struct effect *effect = find_effect(A(0));
++    bool valid = effect && (!(flags & FFEP_TYPESPECIFICPARAMS) || parse_periodic(definition, effect));
++    if (valid) {
++        if (flags & FFEP_GAIN) effect->gain = normalize(definition->gain);
++        if (flags & FFEP_DURATION) effect->duration = definition->duration;
++        if (flags & FFEP_START) effect->end = playback_end(effect, 1);
++    }
++    os_unfair_lock_unlock(&state_lock);
++    RET(valid ? FF_OK : FFERR_INVALIDPARAM);
++}
++
++static void t_ff_start_effect(uint32_t *args, struct hres *r)
++{
++    os_unfair_lock_lock(&state_lock);
++    struct effect *effect = find_effect(A(0));
++    if (effect) effect->end = playback_end(effect, A(1));
++    os_unfair_lock_unlock(&state_lock);
++    RET(effect ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static void t_ff_stop_effect(uint32_t *args, struct hres *r)
++{
++    os_unfair_lock_lock(&state_lock);
++    struct effect *effect = find_effect(A(0));
++    if (effect) effect->end = 0;
++    os_unfair_lock_unlock(&state_lock);
++    RET(effect ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static void t_ff_effect_status(uint32_t *args, struct hres *r)
++{
++    uint32_t *status = G2H(A(1));
++    if (!status) { RET(FFERR_INVALIDPARAM); return; }
++    os_unfair_lock_lock(&state_lock);
++    struct effect *effect = find_effect(A(0));
++    *status = effect ? FFEGES_EMULATED | (effect->end > now() ? FFEGES_PLAYING : 0) : 0;
++    os_unfair_lock_unlock(&state_lock);
++    RET(effect ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static void t_ff_download_effect(uint32_t *args, struct hres *r)
++{
++    os_unfair_lock_lock(&state_lock);
++    bool valid = find_effect(A(0)) != NULL;
++    os_unfair_lock_unlock(&state_lock);
++    RET(valid ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static void t_ff_release_effect(uint32_t *args, struct hres *r)
++{
++    os_unfair_lock_lock(&state_lock);
++    struct effect *effect = find_effect(A(1));
++    bool valid = effect && effect->owner == A(0);
++    if (valid) *effect = (struct effect){0};
++    os_unfair_lock_unlock(&state_lock);
++    RET(valid ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static void t_ff_capabilities(uint32_t *args, struct hres *r)
++{
++    FFCAPABILITIES *out = G2H(A(1));
++    if (!out) { RET(FFERR_INVALIDPARAM); return; }
++    os_unfair_lock_lock(&state_lock);
++    bool valid = find_device(A(0)) != NULL;
++    os_unfair_lock_unlock(&state_lock);
++    if (valid) *out = (FFCAPABILITIES){
++        .supportedEffects = FFCAP_ET_SINE, .emulatedEffects = FFCAP_ET_SINE,
++        .subType = FFCAP_ST_VIBRATION, .storageCapacity = max_effects, .playbackCapacity = 2,
++    };
++    RET(valid ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static void t_ff_set_property(uint32_t *args, struct hres *r)
++{
++    if (A(1) != FFPROP_FFGAIN || !A(2)) { RET(FFERR_UNSUPPORTED); return; }
++    os_unfair_lock_lock(&state_lock);
++    struct device *device = find_device(A(0));
++    if (device) device->gain = normalize(*(const uint32_t *)G2H(A(2)));
++    os_unfair_lock_unlock(&state_lock);
++    RET(device ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static void t_ff_escape(uint32_t *args, struct hres *r)
++{
++    const struct escape32 *command = G2H(A(1));
++    if (!command || command->size != sizeof(*command) || !command->input || command->output_size) {
++        RET(FFERR_INVALIDPARAM);
++        return;
++    }
++    const uint8_t *input = G2H(command->input);
++    bool enable = command->command == 0 && command->input_size == 1 && input[0] <= 1;
++    bool motors_update = command->command == 1 && command->input_size == 2;
++    if (!enable && !motors_update) { RET(FFERR_UNSUPPORTED); return; }
++
++    os_unfair_lock_lock(&state_lock);
++    struct device *device = find_device(A(0));
++    if (device && motors_update) {
++        device->escape[0] = input[0] / 255.0f;
++        device->escape[1] = input[1] / 255.0f;
++        device->escape_end = now() + output_watchdog;
++    } else if (device && input[0] == 0) {
++        device->escape_end = 0;
++    }
++    os_unfair_lock_unlock(&state_lock);
++    RET(device ? FF_OK : FFERR_NOINTERFACE);
++}
++
++static struct hfn feedback[] = {
++    R("_FFIsForceFeedback", t_ff_supported),
++    R("_FFCreateDevice", t_ff_create_device),
++    R("_FFReleaseDevice", t_ff_release_device),
++    R("_FFDeviceCreateEffect", t_ff_create_effect),
++    R("_FFDeviceReleaseEffect", t_ff_release_effect),
++    R("_FFDeviceGetForceFeedbackCapabilities", t_ff_capabilities),
++    R("_FFDeviceSetForceFeedbackProperty", t_ff_set_property),
++    R("_FFDeviceEscape", t_ff_escape),
++    R("_FFEffectDownload", t_ff_download_effect),
++    R("_FFEffectGetEffectStatus", t_ff_effect_status),
++    R("_FFEffectSetParameters", t_ff_set_effect),
++    R("_FFEffectStart", t_ff_start_effect),
++    R("_FFEffectStop", t_ff_stop_effect),
++};
++
++void thunks_dirt3_force_feedback_init(void)
++{
++    trace_only = getenv("MAC32_DUALSENSE_FF_TRACE_ONLY") != NULL;
++    trace_enabled = trace_only || getenv("MAC32_TRACE_DUALSENSE_FF") != NULL;
++    REGISTER(feedback);
++}
+diff --git a/src/dirt3_input.m b/src/dirt3_input.m
+new file mode 100644
+index 0000000..7149d5b
+--- /dev/null
++++ b/src/dirt3_input.m
+@@ -0,0 +1,121 @@
++#import <Foundation/Foundation.h>
++#include "thunks.h"
++
++extern void *guest_main_cfbundle(void);
++
++static NSURL *input_workspace;
++static const int sony_vendor_id = 0x054c;
++static const int dualsense_product_id = 0x0ce6;
++
++static BOOL is_sony_profile(NSDictionary *profile, int product_id)
++{
++	return [profile[@"VendorID"] isEqual:@(sony_vendor_id)] &&
++		[profile[@"ProductID"] isEqual:@(product_id)];
++}
++
++static void remove_input_workspace(void)
++{
++	@autoreleasepool {
++		[[NSFileManager defaultManager] removeItemAtURL:input_workspace error:NULL];
++		[input_workspace release];
++	}
++}
++
++static BOOL stage_input_directory(NSURL *original, NSURL *staged, NSFileManager *files)
++{
++	// Build the new directories with local permissions so a read-only game
++	// installation can still use and clean up its private copy.
++	if (![files createDirectoryAtURL:staged withIntermediateDirectories:NO attributes:nil error:NULL])
++		return NO;
++
++	NSArray<NSURL *> *entries = [files contentsOfDirectoryAtURL:original
++		includingPropertiesForKeys:@[NSURLIsDirectoryKey, NSURLIsSymbolicLinkKey]
++		options:0 error:NULL];
++	if (!entries)
++		return NO;
++	for (NSURL *entry in entries) {
++		NSNumber *is_directory, *is_symlink;
++		if (![entry getResourceValue:&is_directory forKey:NSURLIsDirectoryKey error:NULL] ||
++			![entry getResourceValue:&is_symlink forKey:NSURLIsSymbolicLinkKey error:NULL])
++			return NO;
++		NSURL *destination = [staged URLByAppendingPathComponent:entry.lastPathComponent];
++		BOOL copied = is_directory.boolValue && !is_symlink.boolValue ?
++			stage_input_directory(entry, destination, files) :
++			[files copyItemAtURL:entry toURL:destination error:NULL];
++		if (!copied)
++			return NO;
++	}
++	return YES;
++}
++
++static NSURL *copy_input_directory_with_dualsense(NSURL *original)
++{
++	NSFileManager *files = [NSFileManager defaultManager];
++	NSMutableDictionary *profile = [NSMutableDictionary dictionaryWithContentsOfURL:
++		[original URLByAppendingPathComponent:@"AnalogTriggers/PS4Dualshock.plist"]];
++	if (!is_sony_profile(profile, 0x05c4))
++		return nil;
++
++	// Keep a caller's own controller profiles authoritative, regardless of filename.
++	for (NSURL *entry in [files enumeratorAtURL:original includingPropertiesForKeys:nil
++		options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil]) {
++		if ([entry.pathExtension isEqualToString:@"plist"] &&
++			is_sony_profile([NSDictionary dictionaryWithContentsOfURL:entry], dualsense_product_id))
++			return nil;
++	}
++
++	NSString *template = [NSTemporaryDirectory() stringByAppendingPathComponent:@"mac32-dirt3-input.XXXXXX"];
++	char *path = strdup(template.fileSystemRepresentation);
++	if (!path)
++		return nil;
++	NSURL *workspace = nil;
++	if (mkdtemp(path))
++		workspace = [NSURL fileURLWithFileSystemRepresentation:path isDirectory:YES relativeToURL:nil];
++	free(path);
++	if (!workspace)
++		return nil;
++
++	// The game enumerates the controller directory by path. Stage only that
++	// resource instead of changing the installed bundle or copying the game.
++	NSURL *staged = [workspace URLByAppendingPathComponent:@"InputDevices" isDirectory:YES];
++	profile[@"ProductID"] = @(dualsense_product_id);
++	profile[@"CGPDisplayNameOvr"] = @"DualSense";
++	profile[@"ButtonBack"] = @"9:9";
++	NSURL *destination = [staged URLByAppendingPathComponent:@"AnalogTriggers/DualSense.plist"];
++	if (!stage_input_directory(original, staged, files) ||
++		![profile writeToURL:destination atomically:YES] ||
++		atexit(remove_input_workspace) != 0) {
++		[files removeItemAtURL:workspace error:NULL];
++		return nil;
++	}
++
++	input_workspace = [workspace retain];
++	LOG("DiRT 3: added the DualSense controller profile\n");
++	return [staged retain];
++}
++
++CFURLRef w_CFBundleCopyResourceURL(CFBundleRef bundle, CFStringRef name, CFStringRef type,
++	CFStringRef directory)
++{
++	CFURLRef original = CFBundleCopyResourceURL(bundle, name, type, directory);
++	if (!original || !name || !CFEqual(name, CFSTR("InputDevices")) ||
++		(type && CFStringGetLength(type)) || (directory && CFStringGetLength(directory)) ||
++		bundle != guest_main_cfbundle())
++		return original;
++
++	CFStringRef identifier = CFBundleGetIdentifier(bundle);
++	if (!identifier || !CFEqual(identifier, CFSTR("com.feralinteractive.dirt3")))
++		return original;
++
++	static dispatch_once_t once;
++	static NSURL *staged;
++	dispatch_once(&once, ^{
++		@autoreleasepool {
++			staged = copy_input_directory_with_dualsense((__bridge NSURL *)original);
++		}
++	});
++	if (!staged)
++		return original;
++	CFRelease(original);
++	return (CFURLRef)CFRetain((__bridge CFURLRef)staged);
++}
+diff --git a/src/dirt3_overlay.m b/src/dirt3_overlay.m
+new file mode 100644
+index 0000000..281c3e0
+--- /dev/null
++++ b/src/dirt3_overlay.m
+@@ -0,0 +1,273 @@
++#import <AppKit/AppKit.h>
++#import <Carbon/Carbon.h>
++#import <IOKit/IOKitLib.h>
++#import <OpenGL/OpenGL.h>
++#include <os/lock.h>
++#include <stdatomic.h>
++#include <sys/resource.h>
++#include <time.h>
++#include "mac32.h"
++
++extern int dirt3_version_patch_active(void);
++
++enum { frame_capacity = 2048 };
++struct frame_sample { uint64_t end, elapsed; };
++static const uint64_t history_ns = 5 * NSEC_PER_SEC;
++static const uint64_t no_present_ns = NSEC_PER_SEC;
++
++static atomic_bool monitor_installed;
++static atomic_bool recording;
++static os_unfair_lock frame_lock = OS_UNFAIR_LOCK_INIT;
++static struct {
++	CGLContextObj context;
++	uint64_t last_present;
++	uint64_t presented;
++	size_t next, count;
++	struct frame_sample history[frame_capacity];
++} frames;
++
++// The display code lives on the main thread. Only the small timing ring is
++// shared with the render thread.
++static NSPanel *panel;
++static NSTextField *text;
++static NSTimer *refresh_timer;
++static id key_monitor;
++static io_service_t gpu;
++static uint64_t last_poll, last_cpu_time, last_cpu_frames;
++static double cpu_percent, cpu_ms;
++static int gpu_percent;
++
++static void set_recording(bool on)
++{
++	if (atomic_load_explicit(&recording, memory_order_relaxed) == on) return;
++	os_unfair_lock_lock(&frame_lock);
++	atomic_store_explicit(&recording, on, memory_order_relaxed);
++	frames.context = NULL;
++	frames.last_present = 0;
++	frames.count = frames.next = 0;
++	os_unfair_lock_unlock(&frame_lock);
++	last_poll = 0;
++	cpu_percent = cpu_ms = -1;
++}
++
++static void record_present(CGLContextObj context)
++{
++	os_unfair_lock_lock(&frame_lock);
++	if (atomic_load_explicit(&recording, memory_order_relaxed)) {
++		uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++		uint64_t elapsed = now - frames.last_present;
++		if (frames.context == context && frames.last_present) {
++			if (elapsed && elapsed < history_ns) {
++				frames.history[frames.next] = (struct frame_sample){now, elapsed};
++				frames.next = (frames.next + 1) % frame_capacity;
++				if (frames.count < frame_capacity) frames.count++;
++			}
++		} else if (elapsed >= no_present_ns) {
++			// Select one drawable to avoid counting additional GL contexts
++			// twice. Allow a new context after the game recreates its window.
++			frames.context = context;
++			frames.count = frames.next = 0;
++		}
++		if (frames.context == context) {
++			frames.last_present = now;
++			frames.presented++;
++		}
++	}
++	os_unfair_lock_unlock(&frame_lock);
++}
++
++static int compare_slowest_first(const void *a, const void *b)
++{
++	uint64_t left = *(const uint64_t *)a, right = *(const uint64_t *)b;
++	return (right > left) - (right < left);
++}
++
++static uint64_t cpu_time_ns(void)
++{
++	struct rusage usage;
++	if (getrusage(RUSAGE_SELF, &usage) != 0) return 0;
++	return (uint64_t)(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * NSEC_PER_SEC +
++		(uint64_t)(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) * NSEC_PER_USEC;
++}
++
++static int gpu_utilization(void)
++{
++	if (!gpu) return -1;
++	CFTypeRef stats = IORegistryEntryCreateCFProperty(gpu, CFSTR("PerformanceStatistics"), NULL, 0);
++	int result = -1;
++	if (stats && CFGetTypeID(stats) == CFDictionaryGetTypeID()) {
++		CFTypeRef value = CFDictionaryGetValue(stats, CFSTR("Device Utilization %"));
++		if (value && CFGetTypeID(value) == CFNumberGetTypeID()) {
++			int percent;
++			if (CFNumberGetValue(value, kCFNumberIntType, &percent) && percent >= 0 && percent <= 100)
++				result = percent;
++		}
++	}
++	if (stats) CFRelease(stats);
++	return result;
++}
++
++static NSString *thermal_state(void)
++{
++	switch ([NSProcessInfo processInfo].thermalState) {
++	case NSProcessInfoThermalStateNominal: return @"Normal";
++	case NSProcessInfoThermalStateFair: return @"Elevated";
++	case NSProcessInfoThermalStateSerious: return @"High";
++	case NSProcessInfoThermalStateCritical: return @"Critical";
++	}
++	return @"—";
++}
++
++static void refresh_overlay(void)
++{
++	NSWindow *game = NSApp.keyWindow ?: NSApp.mainWindow;
++	if (!NSApp.active || !game.visible || game.miniaturized || !game.contentView) {
++		[panel orderOut:nil];
++		set_recording(false);
++		return;
++	}
++
++	set_recording(true);
++	NSRect bounds = [game convertRectToScreen:game.contentLayoutRect];
++	NSRect frame = panel.frame;
++	NSPoint origin = NSMakePoint(NSMinX(bounds) + 12, NSMaxY(bounds) - NSHeight(frame) - 12);
++	if (!NSEqualPoints(frame.origin, origin)) [panel setFrameOrigin:origin];
++	if (panel.parentWindow != game) {
++		[panel.parentWindow removeChildWindow:panel];
++		[game addChildWindow:panel ordered:NSWindowAbove];
++	}
++	if (!panel.visible) [panel orderFront:nil];
++
++	uint64_t times[frame_capacity];
++	uint64_t total_time = 0;
++	size_t count = 0;
++	os_unfair_lock_lock(&frame_lock);
++	uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++	uint64_t presented = frames.presented;
++	if (now - frames.last_present < no_present_ns) {
++		for (size_t i = 0; i < frames.count; i++) {
++			size_t index = (frames.next + frame_capacity - 1 - i) % frame_capacity;
++			if (now - frames.history[index].end >= history_ns) break;
++			times[count++] = frames.history[index].elapsed;
++			total_time += frames.history[index].elapsed;
++		}
++	}
++	os_unfair_lock_unlock(&frame_lock);
++
++	if (!last_poll || now - last_poll >= NSEC_PER_SEC) {
++		uint64_t spent = cpu_time_ns();
++		if (last_poll && spent && last_cpu_time && spent >= last_cpu_time && presented > last_cpu_frames) {
++			uint64_t delta = spent - last_cpu_time;
++			cpu_percent = 100.0 * delta / (now - last_poll);
++			cpu_ms = (double)delta / (presented - last_cpu_frames) / NSEC_PER_MSEC;
++		} else {
++			cpu_percent = cpu_ms = -1;
++		}
++		last_poll = now;
++		last_cpu_time = spent;
++		last_cpu_frames = presented;
++		gpu_percent = gpu_utilization();
++	}
++
++	NSString *rate = @"Collecting frame timings…";
++	NSString *low = @"1% low       —";
++	if (count) {
++		rate = [NSString stringWithFormat:@"%5.1f FPS  /  %4.1f ms",
++			(double)NSEC_PER_SEC * count / total_time, (double)total_time / count / NSEC_PER_MSEC];
++	}
++	if (count >= 100) {
++		qsort(times, count, sizeof(times[0]), compare_slowest_first);
++		size_t slow_count = (count + 99) / 100;
++		uint64_t slow_time = 0;
++		for (size_t i = 0; i < slow_count; i++) slow_time += times[i];
++		low = [NSString stringWithFormat:@"1%% low    %5.1f FPS", (double)NSEC_PER_SEC * slow_count / slow_time];
++	}
++	NSString *cpu = cpu_percent >= 0 && count ? [NSString stringWithFormat:@"CPU game   %5.0f%% · %.1f ms/frame",
++		cpu_percent, cpu_ms] : @"CPU game     —";
++	NSString *device = gpu_percent >= 0 ? [NSString stringWithFormat:@"%d%%", gpu_percent] : @"—";
++	text.stringValue = [NSString stringWithFormat:@"%@\n%@\n%@\nGPU system   %@\nThermal      %@",
++		rate, low, cpu, device, thermal_state()];
++}
++
++static void hide_overlay(void)
++{
++	set_recording(false);
++	[refresh_timer invalidate];
++	refresh_timer = nil;
++	[panel.parentWindow removeChildWindow:panel];
++	[panel orderOut:nil];
++	if (gpu) IOObjectRelease(gpu);
++	gpu = IO_OBJECT_NULL;
++}
++
++static void toggle_overlay(void)
++{
++	if (refresh_timer) {
++		hide_overlay();
++		LOG("DiRT 3 performance overlay hidden\n");
++		return;
++	}
++
++	if (!panel) {
++		panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 294, 104)
++			styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
++			backing:NSBackingStoreBuffered defer:NO];
++		panel.title = @"Performance";
++		panel.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary;
++		panel.excludedFromWindowsMenu = YES;
++		panel.hidesOnDeactivate = YES;
++		panel.ignoresMouseEvents = YES;
++		panel.opaque = NO;
++		panel.backgroundColor = [NSColor colorWithWhite:0.06 alpha:0.89];
++		text = [[NSTextField wrappingLabelWithString:@""] retain];
++		text.frame = NSInsetRect(panel.contentView.bounds, 10, 8);
++		text.font = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightMedium];
++		text.textColor = [NSColor whiteColor];
++		text.maximumNumberOfLines = 5;
++		text.lineBreakMode = NSLineBreakByClipping;
++		[panel.contentView addSubview:text];
++	}
++
++	// Apple silicon Macs have one integrated GPU. This optional I/O Registry
++	// statistic is device-wide and can be absent on a particular OS or driver.
++	gpu = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAccelerator"));
++	refresh_timer = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
++		refresh_overlay();
++	}];
++	[[NSRunLoop mainRunLoop] addTimer:refresh_timer forMode:NSRunLoopCommonModes];
++	refresh_overlay();
++	LOG("DiRT 3 performance overlay shown\n");
++}
++
++static void install_overlay_monitor(void)
++{
++	key_monitor = [[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp
++		handler:^NSEvent *(NSEvent *event) {
++			NSEventModifierFlags modifiers = NSEventModifierFlagCommand | NSEventModifierFlagControl |
++				NSEventModifierFlagOption | NSEventModifierFlagShift;
++			if (event.keyCode != kVK_F9 || (event.modifierFlags & modifiers)) return event;
++			if (event.type == NSEventTypeKeyDown && !event.isARepeat) toggle_overlay();
++			return nil;
++		}] retain];
++	[[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification
++		object:NSApp queue:nil usingBlock:^(NSNotification *notification) {
++			if (key_monitor) [NSEvent removeMonitor:key_monitor];
++			[key_monitor release];
++			key_monitor = nil;
++			hide_overlay();
++		}];
++}
++
++CGLError dirt3_flush_drawable(CGLContextObj context)
++{
++	CGLError result = CGLFlushDrawable(context);
++	if (result != kCGLNoError) return result;
++	if (atomic_load_explicit(&recording, memory_order_relaxed)) {
++		record_present(context);
++	} else if (!atomic_load_explicit(&monitor_installed, memory_order_relaxed) &&
++		dirt3_version_patch_active() &&
++		!atomic_exchange_explicit(&monitor_installed, true, memory_order_relaxed)) {
++		dispatch_async(dispatch_get_main_queue(), ^{ install_overlay_monitor(); });
++	}
++	return result;
++}

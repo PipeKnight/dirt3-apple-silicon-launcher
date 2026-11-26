@@ -29,6 +29,12 @@ CFTypeRef CFStringCreateMutableCopy(CFTypeRef, int, CFTypeRef);
 unsigned char CFStringFindWithOptions(CFTypeRef, CFTypeRef, range, unsigned, range *);
 void CFStringAppendFormat(CFTypeRef, CFTypeRef, CFTypeRef, ...);
 void CFRelease(CFTypeRef);
+typedef struct { unsigned char bytes[16]; } uuid_bytes;
+CFTypeRef CFUUIDGetConstantUUIDWithBytes(CFTypeRef, unsigned char, unsigned char,
+    unsigned char, unsigned char, unsigned char, unsigned char, unsigned char, unsigned char,
+    unsigned char, unsigned char, unsigned char, unsigned char, unsigned char, unsigned char,
+    unsigned char, unsigned char);
+uuid_bytes CFUUIDGetUUIDBytes(CFTypeRef);
 CFTypeRef CFRunLoopTimerCreate(CFTypeRef, double, double, unsigned, int,
     void (*)(CFTypeRef, void *), const timer_context *);
 void CFRunLoopTimerGetContext(CFTypeRef, timer_context *);
@@ -117,6 +123,15 @@ static void timer_callback(CFTypeRef timer, void *info)
 
 int main(void)
 {
+    const uuid_bytes expected = {{0xE5, 0x59, 0xC4, 0x63, 0xC5, 0xCD, 0x11, 0xD6,
+                                  0x8A, 0x1C, 0x00, 0x03, 0x93, 0x53, 0xBD, 0x00}};
+    CFTypeRef uuid = CFUUIDGetConstantUUIDWithBytes(0, 0xE5, 0x59, 0xC4, 0x63,
+        0xC5, 0xCD, 0x11, 0xD6, 0x8A, 0x1C, 0x00, 0x03, 0x93, 0x53, 0xBD, 0x00);
+    if (!uuid) return 20;
+    uuid_bytes roundtrip = CFUUIDGetUUIDBytes(uuid);
+    for (unsigned index = 0; index < sizeof expected.bytes; index++)
+        if (roundtrip.bytes[index] != expected.bytes[index]) return 20;
+
     allocator_context context = {
         .info = &callbacks, .retain = retain_info, .release = release_info,
         .allocate = allocate, .deallocate = deallocate,

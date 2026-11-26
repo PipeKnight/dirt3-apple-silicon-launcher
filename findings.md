@@ -79,6 +79,36 @@ accelerated to 52 mph with the keyboard before pausing. Autosave was
 disabled for this run. A separate built-in benchmark run stalled without
 writing results, so this play test provides no Steam FPS measurement.
 
+### Steam profile loading
+
+The Steam game requests `ISteamRemoteStorage` version `012`. The
+runtime used a newer method table. The first two slots, which handle
+synchronous writes and reads, were the same. The newer table inserted
+three asynchronous methods ahead of the file listing methods, so the
+game could write save files but could not list its existing profiles.
+The bridge now uses the [version 012 method order](https://github.com/ValveSoftware/Proton/blob/proton_11.0/lsteamclient/steamworks_sdk_132/isteamremotestorage.h)
+for that interface. A fresh Steam game process listed the existing
+Player One profile in **Load Profile**, loaded it, showed the autosave
+notice, and reached **Singleplayer**.
+
+### Retina display modes and FPS overlay
+
+DiRT 3 checks the logical desktop size and refresh rate when building its
+resolution list. The default Core Graphics enumeration on the test Mac
+returned no modes that fit the logical size. Including HiDPI modes restored
+the list. The game also needed its saved 640 × 480 render size in the list
+before the menu could select a mode. The runtime now offers that size and
+1280 × 720 where they fit the desktop.
+
+The Steam graphics menu displayed 640 × 480 and 120 Hz, switched to
+960 × 600, drew the confirmation prompt, and reverted to the previous
+render size when its countdown ended.
+
+A successful OpenGL buffer swap supplies each frame timestamp for the F9
+overlay. Its game CPU measurement includes all game process threads.
+The optional GPU utilization comes from the system I/O Registry and covers
+the whole GPU.
+
 ## Startup through AppKit
 
 - The guest zone registry honors default-zone reordering and dispatches the

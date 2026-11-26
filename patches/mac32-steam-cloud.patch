@@ -1,0 +1,30 @@
+diff --git a/src/steam.c b/src/steam.c
+index 56ae677..96e0f98 100644
+--- a/src/steam.c
++++ b/src/steam.c
+@@ -103,6 +103,25 @@ static const struct legacy legacy_ifaces[] = {
+ 		"GetISteamMusic", "GetISteamMusicRemote", "GetISteamHTMLSurface",
+ 		"DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess", "DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess",
+ 		"Set_SteamAPI_CCheckCallbackRegisteredInProcess", NULL } },
++	// Steam Cloud in Steamworks 1.31. Newer interfaces insert async methods
++	// before file enumeration, shifting the signatures used to load saves.
++	{ "STEAMREMOTESTORAGE_INTERFACE_VERSION012", "STEAMREMOTESTORAGE_INTERFACE_VERSION016", {
++		"FileWrite", "FileRead", "FileForget", "FileDelete", "FileShare", "SetSyncPlatforms",
++		"FileWriteStreamOpen", "FileWriteStreamWriteChunk", "FileWriteStreamClose",
++		"FileWriteStreamCancel", "FileExists", "FilePersisted", "GetFileSize", "GetFileTimestamp",
++		"GetSyncPlatforms", "GetFileCount", "GetFileNameAndSize", "GetQuota",
++		"IsCloudEnabledForAccount", "IsCloudEnabledForApp", "SetCloudEnabledForApp", "UGCDownload",
++		"GetUGCDownloadProgress", "GetUGCDetails", "UGCRead", "GetCachedUGCCount",
++		"GetCachedUGCHandle", "PublishWorkshopFile", "CreatePublishedFileUpdateRequest",
++		"UpdatePublishedFileFile", "UpdatePublishedFilePreviewFile", "UpdatePublishedFileTitle",
++		"UpdatePublishedFileDescription", "UpdatePublishedFileVisibility", "UpdatePublishedFileTags",
++		"CommitPublishedFileUpdate", "GetPublishedFileDetails", "DeletePublishedFile",
++		"EnumerateUserPublishedFiles", "SubscribePublishedFile", "EnumerateUserSubscribedFiles",
++		"UnsubscribePublishedFile", "UpdatePublishedFileSetChangeDescription",
++		"GetPublishedItemVoteDetails", "UpdateUserPublishedItemVote",
++		"GetUserPublishedItemVoteDetails", "EnumerateUserSharedWorkshopFiles", "PublishVideo",
++		"SetUserPublishedFileAction", "EnumeratePublishedFilesByUserAction",
++		"EnumeratePublishedWorkshopFiles", "UGCDownloadToLocation", NULL } },
+ 	// Steamworks 1.39-1.41 (Counter-Strike: Source's client.dylib)
+ 	{ "SteamClient017", "SteamClient020", {
+ 		"CreateSteamPipe", "BReleaseSteamPipe", "ConnectToGlobalUser", "CreateLocalUser", "ReleaseUser",
