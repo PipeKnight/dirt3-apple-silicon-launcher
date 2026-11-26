@@ -300,10 +300,10 @@ index 3121c2f..29bb503 100644
  	G("_CFBundleCopyResourceURLsOfType", CFBundleCopyResourceURLsOfType, "o:ooo"),
 diff --git a/src/dirt3_adaptive_triggers.m b/src/dirt3_adaptive_triggers.m
 new file mode 100644
-index 0000000..92d36e9
+index 0000000..07907f1
 --- /dev/null
 +++ b/src/dirt3_adaptive_triggers.m
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,277 @@
 +// DiRT 3's extended motion report supplies the two virtual pedal signals.
 +// Route the built-in D-Box defaults to a private address inside this process.
 +#import <AppKit/AppKit.h>
@@ -530,6 +530,14 @@ index 0000000..92d36e9
 +    });
 +}
 +
++static unsigned resistance_level(float strength, unsigned previous)
++{
++    if (strength <= 0.0f) return 0;
++    // Keep small changes around a boundary from toggling the motor repeatedly.
++    if (fabsf(strength - (float)previous) < 0.65f) return previous;
++    return (unsigned)roundf(strength);
++}
++
 +bool dirt3_adaptive_triggers_send(const void *bytes, uint32_t size, const struct sockaddr *address, uint32_t address_size)
 +{
 +    if (!atomic_load(&routed) || !address || address_size < sizeof(struct sockaddr_in) ||
@@ -549,15 +557,19 @@ index 0000000..92d36e9
 +          rpm_tens >= 0 && rpm_tens < 2200)) return true;
 +
 +    os_unfair_lock_lock(&motion_lock);
-+    if (stage > stage_time || stage_time - stage > 1.0f) last_advance = seconds();
++    if (stage > stage_time || stage_time - stage > 1.0f) {
++        double now = seconds();
++        if (now - last_advance >= 0.25) levels[0] = levels[1] = 0;
++        last_advance = now;
++    }
 +    stage_time = stage;
 +    if (stage > 0 && rpm_tens > 40) {
 +        float wheels = (fabsf(wheel_left) + fabsf(wheel_right)) * 0.5f;
 +        float braking = speed > 3 ? clamp_unit((brake - 0.20f) / 0.80f) : 0;
 +        float slip = speed > 3 ? clamp_unit((speed - wheels) / speed) : 0;
 +        float load = clamp_unit((throttle - 0.35f) / 0.65f) * clamp_unit((rpm_tens - 200) / 650);
-+        levels[0] = (unsigned)roundf(braking * (2.0f + slip));
-+        levels[1] = (unsigned)roundf(2.0f * load);
++        levels[0] = resistance_level(braking * (2.0f + slip), levels[0]);
++        levels[1] = resistance_level(2.0f * load, levels[1]);
 +    } else {
 +        levels[0] = levels[1] = 0;
 +    }
