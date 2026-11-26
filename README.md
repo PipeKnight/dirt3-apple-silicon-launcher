@@ -44,7 +44,7 @@ During play, press **F9** to toggle the performance overlay in the lower-left co
 
 Connect a DualSense to your Mac over USB or Bluetooth before clicking **Play**. Press **Options** at the title screen. The launcher registers a controller profile for your installed game and routes the game's two vibration channels to the DualSense handle actuators. The Bluetooth input bridge handles one DualSense at a time.
 
-Enable **DualSense adaptive triggers** in the launcher for variable resistance on L2 and R2. Resistance builds deep in the trigger travel during braking or under throttle load and drops away when you release the pedal. This option uses the default D-Box setting in `hardware_settings_config.xml` and keeps the motion data inside the game process.
+Enable **DualSense adaptive triggers** in the launcher to feel progressive braking resistance on L2 and a brief pulse on R2 when shifting between forward gears. This option uses the default D-Box setting in `hardware_settings_config.xml` and keeps the motion data inside the game process.
 
 ## Troubleshooting
 

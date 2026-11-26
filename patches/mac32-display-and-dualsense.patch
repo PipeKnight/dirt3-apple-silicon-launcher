@@ -16,10 +16,10 @@ index aeabf91..24d5453 100644
  
  all: mac32 guest app
 diff --git a/src/apple.m b/src/apple.m
-index e27be43..f5fbadf 100644
+index e27be43..61c03da 100644
 --- a/src/apple.m
 +++ b/src/apple.m
-@@ -78,10 +78,110 @@ static int w_CFStringGetCString(CFStringRef s, char *b, int32_t n, uint32_t e) {
+@@ -78,10 +78,122 @@ static int w_CFStringGetCString(CFStringRef s, char *b, int32_t n, uint32_t e) {
  static uint32_t w_CGDisplayPixelsWide(uint32_t d) { return (uint32_t)CGDisplayPixelsWide(d); }
  static uint32_t w_CGDisplayPixelsHigh(uint32_t d) { return (uint32_t)CGDisplayPixelsHigh(d); }
  static int w_CGCursorIsVisible(void) { return CGCursorIsVisible() ? 1 : 0; }
@@ -28,6 +28,18 @@ index e27be43..f5fbadf 100644
  static int w_CGDisplayIsActive(uint32_t d) { return CGDisplayIsActive(d) ? 1 : 0; }
  
 +extern int dirt3_version_patch_active(void);
++extern bool dirt3_window_mode_keeps_cursor(void);
++
++static CGError w_CGAssociateMouseAndMouseCursorPosition(boolean_t connected)
++{
++    // Mission Control can open without deactivating the game's window.
++    // Keep macOS pointer movement available during windowed play.
++    if (!connected && dirt3_version_patch_active() && dirt3_window_mode_keeps_cursor()) {
++        LOG("DiRT 3 windowed mode: kept the system cursor connected\n");
++        return kCGErrorSuccess;
++    }
++    return CGAssociateMouseAndMouseCursorPosition(connected);
++}
 +
 +// DiRT 3 renders its selected size into a borderless window. The original
 +// 640×480 default may no longer exist as a physical display mode, even
@@ -132,7 +144,7 @@ index e27be43..f5fbadf 100644
  // the guest gets its own copy of CFData bytes (host memory is above 4 GB)
  static void t_CFDataGetBytePtr(uint32_t *args, struct hres *r)
  {
-@@ -488,13 +588,15 @@ static void t_CFAbsoluteTimeGetGregorianDate(uint32_t *args, struct hres *r)
+@@ -488,13 +600,15 @@ static void t_CFAbsoluteTimeGetGregorianDate(uint32_t *args, struct hres *r)
  	r->flags |= F_POP4;
  }
  
@@ -150,7 +162,7 @@ index e27be43..f5fbadf 100644
  static void t_CFUUIDGetUUIDBytes(uint32_t *args, struct hres *r)
  {
  	CFUUIDBytes u = CFUUIDGetUUIDBytes(hobj_unwrap(A(1)));
-@@ -537,7 +639,6 @@ static void t_HIGetMousePosition(uint32_t *args, struct hres *r)
+@@ -537,7 +651,6 @@ static void t_HIGetMousePosition(uint32_t *args, struct hres *r)
  	RET(A(2));
  }
  static void t_io_unsupported(uint32_t *args, struct hres *r) { (void)args; RET(0xe00002c7); }	// kIOReturnUnsupported
@@ -158,7 +170,7 @@ index e27be43..f5fbadf 100644
  static int w_CFEqual(CFTypeRef a, CFTypeRef b) { return CFEqual(a, b) ? 1 : 0; }
  static CFURLRef w_CFURLCreateWithBytes(CFAllocatorRef a, const UInt8 *b, int32_t n, uint32_t enc, CFURLRef base)
  { return CFURLCreateWithBytes(a, b, n, enc, base); }
-@@ -586,6 +687,8 @@ KEY(kCFProxyPortNumberKey) KEY(kCFProxyTypeAutoConfigurationURL) KEY(kCFProxyTyp
+@@ -586,6 +699,8 @@ KEY(kCFProxyPortNumberKey) KEY(kCFProxyTypeAutoConfigurationURL) KEY(kCFProxyTyp
  KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
  #define DKEY(sym) D("_" #sym, 4, init_##sym)
  
@@ -167,7 +179,7 @@ index e27be43..f5fbadf 100644
  static int w_CGLSetCurrentContext(CGLContextObj c) { if (c) gl_last_context = c; return CGLSetCurrentContext(c); }
  
  static const CGAffineTransform *host_font_matrix(const float *guest, CGAffineTransform *matrix)
-@@ -734,8 +837,6 @@ static struct hfn apple[] = {
+@@ -734,8 +849,6 @@ static struct hfn apple[] = {
  	G("_IOMasterPort", IOMasterPort, "i:up"),
  	R("_IORegistryEntryCreateCFProperties", t_IORegistryEntryCreateCFProperties),
  	R("_IOCreatePlugInInterfaceForService", t_io_unsupported),
@@ -176,7 +188,7 @@ index e27be43..f5fbadf 100644
  	R("_GetGlobalMouse", t_GetGlobalMouse),
  	R("_HIGetMousePosition", t_HIGetMousePosition),
  	G("_HIThemeGetUIFontType", HIThemeGetUIFontType, "u:u"),
-@@ -751,13 +852,14 @@ static struct hfn apple[] = {
+@@ -751,18 +864,19 @@ static struct hfn apple[] = {
  	R("_CGDisplayAvailableModes", t_CGDisplayAvailableModes),
  	R("_CGDisplayCurrentMode", t_CGDisplayCurrentMode),
  	G("_CGDisplayCopyDisplayMode", CGDisplayCopyDisplayMode, "o:u"),
@@ -196,7 +208,13 @@ index e27be43..f5fbadf 100644
  	G("_CGDisplayHideCursor", CGDisplayHideCursor, "i:u"),
  	G("_CGDisplayShowCursor", CGDisplayShowCursor, "i:u"),
  	G("_CGCursorIsVisible", w_CGCursorIsVisible, "i:"),
-@@ -817,9 +919,10 @@ static struct hfn apple[] = {
+ 	G("_CGWarpMouseCursorPosition", w_CGWarpMouseCursorPosition, "i:ff"),
+-	G("_CGAssociateMouseAndMouseCursorPosition", CGAssociateMouseAndMouseCursorPosition, "i:i"),
++	G("_CGAssociateMouseAndMouseCursorPosition", w_CGAssociateMouseAndMouseCursorPosition, "i:i"),
+ 	G("_CGWindowLevelForKey", CGWindowLevelForKey, "i:i"),
+ 	G("_CGDisplayIDToOpenGLDisplayMask", CGDisplayIDToOpenGLDisplayMask, "u:u"),
+ 	G("_CGOpenGLDisplayMaskToDisplayID", CGOpenGLDisplayMaskToDisplayID, "u:u"),
+@@ -817,9 +931,10 @@ static struct hfn apple[] = {
  	G("_CGLSetParameter", CGLSetParameter, "i:oup"),
  	G("_CGLGetParameter", CGLGetParameter, "i:oup"),
  	G("_CGLDescribeRenderer", CGLDescribeRenderer, "i:oiup"),
@@ -300,10 +318,10 @@ index 3121c2f..29bb503 100644
  	G("_CFBundleCopyResourceURLsOfType", CFBundleCopyResourceURLsOfType, "o:ooo"),
 diff --git a/src/dirt3_adaptive_triggers.m b/src/dirt3_adaptive_triggers.m
 new file mode 100644
-index 0000000..07907f1
+index 0000000..1f14052
 --- /dev/null
 +++ b/src/dirt3_adaptive_triggers.m
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,296 @@
 +// DiRT 3's extended motion report supplies the two virtual pedal signals.
 +// Route the built-in D-Box defaults to a private address inside this process.
 +#import <AppKit/AppKit.h>
@@ -337,7 +355,9 @@ index 0000000..07907f1
 +static os_unfair_lock motion_lock = OS_UNFAIR_LOCK_INIT;
 +static float stage_time;
 +static double last_advance;
-+static unsigned levels[2];
++static unsigned brake_level;
++static int forward_gear;
++static double forward_gear_at, shift_until;
 +
 +static IOHIDDeviceRef hid_pad;
 +static double hid_retry_at;
@@ -497,7 +517,10 @@ index 0000000..07907f1
 +    unsigned next[2] = {0, 0};
 +    double time = seconds();
 +    os_unfair_lock_lock(&motion_lock);
-+    if (time - last_advance < 0.25) memcpy(next, levels, sizeof(next));
++    if (time - last_advance < 0.25) {
++        next[0] = brake_level;
++        next[1] = time < shift_until ? 2 : 0;
++    }
 +    os_unfair_lock_unlock(&motion_lock);
 +    if (!NSApp.isActive) {
 +        close_triggers();
@@ -550,16 +573,32 @@ index 0000000..07907f1
 +    if (size != sizeof(data)) return true;
 +    memcpy(data, bytes, sizeof(data));
 +    float stage = data[0], speed = data[7], wheel_left = data[27], wheel_right = data[28];
-+    float throttle = data[29], brake = data[31], rpm_tens = data[37];
++    float brake = data[31], gear = data[33], rpm_tens = data[37];
 +    if (!isfinite(stage) || stage < 0 || !isfinite(speed) || speed < 0 ||
 +        !isfinite(wheel_left) || !isfinite(wheel_right) ||
-+        !(throttle >= 0 && throttle <= 1 && brake >= 0 && brake <= 1 &&
-+          rpm_tens >= 0 && rpm_tens < 2200)) return true;
++        !(brake >= 0 && brake <= 1 && rpm_tens >= 0 && rpm_tens < 2200)) return true;
 +
 +    os_unfair_lock_lock(&motion_lock);
 +    if (stage > stage_time || stage_time - stage > 1.0f) {
 +        double now = seconds();
-+        if (now - last_advance >= 0.25) levels[0] = levels[1] = 0;
++        if (now - last_advance >= 0.25 || stage < stage_time) {
++            brake_level = 0;
++            forward_gear = 0;
++            shift_until = 0;
++        }
++        if (stage > 0 && speed > 2 && gear >= 1 && gear <= 9 && gear == (int)gear) {
++            // A short trip through neutral during a shift keeps the old gear.
++            // Seed the first gear without firing on starts or after a pause.
++            if (forward_gear && forward_gear != (int)gear && now - forward_gear_at < 0.35) {
++                shift_until = now + 0.11;
++                if (trace) LOG("DiRT 3 adaptive triggers: shift %d -> %d\n", forward_gear, (int)gear);
++            }
++            forward_gear = (int)gear;
++            forward_gear_at = now;
++        } else if (stage <= 0 || speed <= 2 || gear != 0) {
++            forward_gear = 0;
++            shift_until = 0;
++        }
 +        last_advance = now;
 +    }
 +    stage_time = stage;
@@ -567,11 +606,9 @@ index 0000000..07907f1
 +        float wheels = (fabsf(wheel_left) + fabsf(wheel_right)) * 0.5f;
 +        float braking = speed > 3 ? clamp_unit((brake - 0.20f) / 0.80f) : 0;
 +        float slip = speed > 3 ? clamp_unit((speed - wheels) / speed) : 0;
-+        float load = clamp_unit((throttle - 0.35f) / 0.65f) * clamp_unit((rpm_tens - 200) / 650);
-+        levels[0] = resistance_level(braking * (2.0f + slip), levels[0]);
-+        levels[1] = resistance_level(2.0f * load, levels[1]);
++        brake_level = resistance_level(braking * (2.0f + slip), brake_level);
 +    } else {
-+        levels[0] = levels[1] = 0;
++        brake_level = 0;
 +    }
 +    os_unfair_lock_unlock(&motion_lock);
 +    if (trace) {
@@ -1663,10 +1700,10 @@ index 0000000..b581770
 +}
 diff --git a/src/dirt3_window_mode.c b/src/dirt3_window_mode.c
 new file mode 100644
-index 0000000..4cdd412
+index 0000000..a7a60c7
 --- /dev/null
 +++ b/src/dirt3_window_mode.c
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,74 @@
 +// Apply the launcher's window choice to Feral's existing registry setting.
 +#include "mac32.h"
 +#include <errno.h>
@@ -1684,6 +1721,11 @@ index 0000000..4cdd412
 +    if (!mode) return;
 +    if (!strcmp(mode, "windowed")) fullscreen = '0';
 +    if (!strcmp(mode, "fullscreen")) fullscreen = '1';
++}
++
++bool dirt3_window_mode_keeps_cursor(void)
++{
++    return fullscreen == '0';
 +}
 +
 +static bool is_preferences(const char *path)

@@ -147,6 +147,22 @@ and reattachment. The bridge now clears their output on removal and binds
 the same handles when a single DualSense is available again. A lifecycle
 test exercised removal, rebinding, restarting and explicit effect release.
 
+In a Bluetooth test on the Finland course, sudden deceleration at stage
+times 31.68 s, 39.24 s and 42.72 s coincided with motor requests peaking
+at 0.50 on both channels. Core Haptics accepted 0.498 after quantization.
+The player's in-game vibration strength had been set to 50%. Raising
+that setting made the effects more noticeable.
+
+A separate terminal-damage event yielded only four nonzero game motor
+updates across the impact and the next 1.4 s, with a peak of 0.079.
+Core Haptics accepted up to 0.078. The game requested appreciably weaker
+feedback for this event than for the ordinary impacts in the same session.
+
+R2 now applies a 110 ms resistance pulse on a forward gear change
+while moving. Replay of synthetic motion packets verified upshifts,
+downshifts, a brief neutral transition, and no pulse on steady throttle,
+after a pause, or when selecting reverse.
+
 ## Startup through AppKit
 
 - The guest zone registry honors default-zone reordering and dispatches the
