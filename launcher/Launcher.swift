@@ -50,7 +50,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
     private let logs = NSButton(title: "Show Logs", target: nil, action: nil)
     private let skipVideos = NSButton(checkboxWithTitle: "Skip startup videos", target: nil, action: nil)
     private let windowed = NSButton(checkboxWithTitle: "Run in a window", target: nil, action: nil)
-    private let adaptiveTriggers = NSButton(checkboxWithTitle: "DualSense adaptive triggers", target: nil, action: nil)
+    private let adaptiveTriggers = NSButton(checkboxWithTitle: "Enable Adaptive Triggers", target: nil, action: nil)
     private var game: URL?
     private var process: Process?
     private var lastLog: URL?
@@ -77,7 +77,7 @@ private final class Launcher: NSObject, NSApplicationDelegate {
         windowed.toolTip = "Start in a regular macOS window. Clear this option for full screen."
         adaptiveTriggers.target = self
         adaptiveTriggers.action = #selector(saveAdaptiveTriggerPreference)
-        adaptiveTriggers.toolTip = "Use the game's pedal and vehicle telemetry to add resistance to L2 and R2."
+        adaptiveTriggers.toolTip = "Enable resistance on the DualSense L2 and R2 triggers. Handle vibration follows the game's settings."
         UserDefaults.standard.register(defaults: ["skipStartupVideos": true])
         skipVideos.state = UserDefaults.standard.bool(forKey: "skipStartupVideos") ? .on : .off
         windowed.state = UserDefaults.standard.bool(forKey: "runInWindow") ? .on : .off

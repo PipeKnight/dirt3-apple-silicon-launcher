@@ -158,7 +158,7 @@ updates across the impact and the next 1.4 s, with a peak of 0.079.
 Core Haptics accepted up to 0.078. The game requested appreciably weaker
 feedback for this event than for the ordinary impacts in the same session.
 
-R2 now applies a 110 ms resistance pulse on a forward gear change
+R2 now applies a 150 ms resistance pulse on a forward gear change
 while moving. Replay of synthetic motion packets verified upshifts,
 downshifts, a brief neutral transition, and no pulse on steady throttle,
 after a pause, or when selecting reverse.
@@ -171,9 +171,9 @@ serializer runs. At the minor-damage indicator, resistance starts at
 minimum strength in the last two zones of R2 travel. Further damage
 expands the affected travel, and severe damage increases peak strength.
 
-Under hard braking, L2 pulses by one level when the front wheels
+Under hard braking, L2 briefly eases its resistance when the front wheels
 slow substantially relative to the car and the car is decelerating.
-Its base resistance follows brake input with a 55 ms smoothing time
+Its base resistance follows brake input with a 30 ms smoothing time
 constant. These inputs estimate braking slip. The motion packet has
 no ABS activation flag.
 

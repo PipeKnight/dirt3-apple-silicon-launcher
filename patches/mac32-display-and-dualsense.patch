@@ -503,10 +503,10 @@ index 3121c2f..29bb503 100644
  	G("_CFBundleCopyResourceURLsOfType", CFBundleCopyResourceURLsOfType, "o:ooo"),
 diff --git a/src/dirt3_adaptive_triggers.m b/src/dirt3_adaptive_triggers.m
 new file mode 100644
-index 0000000..40a5a8d
+index 0000000..509dfb4
 --- /dev/null
 +++ b/src/dirt3_adaptive_triggers.m
-@@ -0,0 +1,353 @@
+@@ -0,0 +1,357 @@
 +// DiRT 3's extended motion report supplies the two virtual pedal signals.
 +// Route the built-in D-Box defaults to a private address inside this process.
 +#import <AppKit/AppKit.h>
@@ -722,15 +722,19 @@ index 0000000..40a5a8d
 +    os_unfair_lock_lock(&motion_lock);
 +    if (time - last_advance < 0.25) {
 +        if (brake_level) {
-+            next[0] = (struct trigger_effect){.level = brake_level, .start_zone = 4};
-+            if (brake_level > 1 && brake_slip_since &&
-+                fmod(time - brake_slip_since, 0.16) >= 0.09)
-+                next[0].level--;
++            next[0] = (struct trigger_effect){.level = brake_level, .start_zone = 3};
++            if (brake_level > 1 && brake_slip_since) {
++                double phase = fmod(time - brake_slip_since, 0.16);
++                if (phase >= 0.10 && phase < 0.13 && brake_level > 2)
++                    next[0].level -= 2;
++                else if (phase >= 0.07)
++                    next[0].level--;
++            }
 +        }
 +        next[1] = engine_effect;
 +        if (time < shift_until) {
-+            next[1].level = next[1].level ? next[1].level + 1 : 2;
-+            next[1].start_zone = 4;
++            next[1].level = next[1].level + 2;
++            next[1].start_zone = 2;
 +        }
 +    }
 +    os_unfair_lock_unlock(&motion_lock);
@@ -805,7 +809,7 @@ index 0000000..40a5a8d
 +            // A short trip through neutral during a shift keeps the old gear.
 +            // Seed the first gear without firing on starts or after a pause.
 +            if (forward_gear && forward_gear != (int)gear && now - forward_gear_at < 0.35) {
-+                shift_until = now + 0.11;
++                shift_until = now + 0.15;
 +                if (trace) LOG("DiRT 3 adaptive triggers: shift %d -> %d\n", forward_gear, (int)gear);
 +            }
 +            forward_gear = (int)gear;
@@ -836,9 +840,9 @@ index 0000000..40a5a8d
 +        float wheels = (fabsf(wheel_left) + fabsf(wheel_right)) * 0.5f;
 +        float braking = speed > 3 ? clamp_unit((brake - 0.20f) / 0.80f) : 0;
 +        float slip = speed > 3 ? clamp_unit((speed - wheels) / speed) : 0;
-+        float target_force = braking * (2.0f + slip);
++        float target_force = braking * (3.0f + slip);
 +        if (target_force == 0) brake_force = 0;
-+        else brake_force += (target_force - brake_force) * -expm1f(-step / 0.055f);
++        else brake_force += (target_force - brake_force) * -expm1f(-step / 0.030f);
 +        brake_level = resistance_level(brake_force, brake_level);
 +        // The motion stream has wheel speeds and acceleration. Use both to
 +        // estimate braking slip without assuming the game's ABS is active.
@@ -981,7 +985,7 @@ index 0000000..dd6d979
 +}
 diff --git a/src/dirt3_force_feedback.m b/src/dirt3_force_feedback.m
 new file mode 100644
-index 0000000..71618bb
+index 0000000..9303ef3
 --- /dev/null
 +++ b/src/dirt3_force_feedback.m
 @@ -0,0 +1,596 @@
@@ -1263,7 +1267,7 @@ index 0000000..71618bb
 +        }
 +        if (has_device && time < terminal_until) {
 +            float elapsed = (float)fmax(0, time - terminal_since);
-+            float shake = (0.21f + 0.61f * expf(-2.7f * elapsed)) * terminal_gain;
++            float shake = (0.245f + 0.64f * expf(-2.7f * elapsed)) * terminal_gain;
 +            strength[0] = fmaxf(strength[0], shake);
 +            strength[1] = fmaxf(strength[1], shake * 0.88f);
 +        } else if (terminal_since && time >= terminal_until) {
