@@ -55,11 +55,23 @@ def main():
     parser.add_argument("trace", type=Path)
     parser.add_argument("benchmark", type=Path, help="XML for the same game run")
     parser.add_argument("--trim-seconds", type=float, default=8)
+    parser.add_argument("--exclude-confirmed-pauses", type=float, metavar="SECONDS",
+                        help="Remove intervals at least this long after independently confirming game pauses")
     args = parser.parse_args()
+    pause_threshold = args.exclude_confirmed_pauses
+    if pause_threshold is not None and (not math.isfinite(pause_threshold) or pause_threshold <= 0):
+        parser.error("--exclude-confirmed-pauses must be a finite positive duration")
 
     benchmark = benchmark_xml(args.benchmark)
     samples = int(benchmark.find(".//*[@samples]").attrib["samples"])
     intervals = frame_intervals(args.trace, samples, args.trim_seconds * 1000)
+    if pause_threshold is not None:
+        cutoff_ms = pause_threshold * 1000
+        paused = [interval for interval in intervals if interval >= cutoff_ms]
+        print(f"Excluded {len(paused):,} confirmed pauses totaling {sum(paused) / 1000:.2f} seconds")
+        intervals = [interval for interval in intervals if interval < cutoff_ms]
+        if not intervals:
+            raise ValueError("No frame intervals remain after excluding confirmed pauses")
     frame_count = len(intervals)
     slowest = math.ceil(frame_count * .01)
     print(f"Game average {float(benchmark.find('average').attrib['av_fps']):.2f} FPS")

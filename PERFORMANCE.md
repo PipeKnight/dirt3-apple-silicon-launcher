@@ -201,6 +201,33 @@ python3 experiments/aspen-frame-times.py aspen-metal.trace aspen-metal.xml
 python3 experiments/aspen-frame-times.py aspen-metal-batched.trace aspen-metal-batched.xml
 ```
 
+### Asynchronous pixel readback in Aspen
+
+The Steam binary reads one RGBA half-float pixel per frame. The client-memory call returns to guest address `0x95b974` relative to the Mach-O slide. The same routine has a second path at `0x95ba8a`. It alternates two `GL_PIXEL_PACK_BUFFER` objects, queues the new transfer and maps the preceding buffer. The engine already controls when to use the older result. WineMetalGL can blit this format directly into the pack buffer. [OpenGL pixel-buffer specification](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_pixel_buffer_object.txt)
+
+The routine chooses its path using `UsePBOs` and the engine's pixel-buffer capability bit. The setting belongs in the `HKCU\Software\IndirectX\Direct3D\Config` key of the game's `Preferences Data` XML. For a local experiment, back up the file and add the following entry within that key. Use the original file again for the control.
+
+```xml
+<value name="UsePBOs" type="integer">1</value>
+```
+
+With `WINEMETALGL_STATS=1`, the original batched run reported one synchronous readback in each of 4,072 sampled in-race frames. In the PBO run, each of 4,376 sampled in-race frames reported one asynchronous readback and zero synchronous reads. The sampled mean GPU wait reported by the backend moved from 1.13 ms to 0.00 ms. The selection keeps frames from index 3,200 with at least 450 draws to exclude the menus and most startup work. These samples establish which code path ran. The comparison runs below leave the per-call profiler off.
+
+The submission experiment keeps PBOs enabled and changes `WINEMETALGL_PASS_COMMIT_US` from 1000 to 2500. WineMetalGL uses this threshold when the following draw changes the render target. It submits a command buffer while the CPU is still recording the rest of the frame. A higher threshold can reduce submissions and also delay when the GPU receives work.
+
+These completed runs used the same Steam build, eight Aspen cars and the same graphics settings as the window prototype. Deferred CGL submission was enabled in every Metal case. The reported average comes from the game XML.
+
+| WineMetalGL configuration | Game average FPS | 1% low | p99 interval | Intervals above 33.33 ms |
+| --- | ---: | ---: | ---: | ---: |
+| Earlier batching control, 1000 µs | 47.73 | 25.68 FPS | 31.51 ms | 0.7% |
+| Repeat batching control, 1000 µs | 44.33 | 14.70 FPS | 50.96 ms | 5.7% |
+| PBO, 1000 µs | 49.53 | 24.82 FPS | 33.76 ms | 1.1% |
+| PBO, 2500 µs | 43.26 | 16.58 FPS | 44.20 ms | 4.5% |
+
+DiRT 3 paused when its window lost focus. The 1000 µs PBO trace includes a 72.28-second pause. The 2500 µs trace includes eight multi-second pauses between active segments. The frame-interval columns omit those intervals. Use `aspen-frame-times.py --exclude-confirmed-pauses 10` for the former and `--exclude-confirmed-pauses 5` for the latter. The default analyzer includes every interval in the selected window.
+
+The PBO path removed the synchronous read and averaged 4–12% more FPS than the two controls. Its p99 fell within the range of the controls. That spread limits what this set establishes about frame pacing. The 2500 µs result was worse than the 1000 µs PBO run on both measures and had more focus interruptions. Use the 1000 µs threshold for subsequent WineMetalGL experiments.
+
 ## 4. Evaluate native ARM64 recompilation
 
 Consider a small Mach-O recompilation feasibility test if profiling shows that execution of the original x86 game code accounts for a substantial share of the frame budget. Use a well-bounded CPU function to compare correctness and cost first. A full port would also need to cover C++ and Objective-C calls, framework behavior, threading and Steam integration.
