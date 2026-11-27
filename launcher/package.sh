@@ -34,13 +34,15 @@ GIT_CEILING_DIRECTORIES="$source" git -C "$source/mac32" apply \
     "$project/patches/mac32-gl-buffer-metadata.patch"
 GIT_CEILING_DIRECTORIES="$source" git -C "$source/mac32" apply \
     "$project/patches/mac32-openal-pcm16.patch"
+GIT_CEILING_DIRECTORIES="$source" git -C "$source/mac32" apply \
+    "$project/patches/mac32-steam-connection-poll.patch"
 while IFS= read -r -d '' file; do
     cmp -s "$file" "$runtime/${file#"$source/mac32/"}" || {
         printf 'Runtime source differs from the release patches: %s\n' "${file#"$source/mac32/"}" >&2
         exit 1
     }
 done < <(find "$source/mac32" -type f -print0)
-cp -R "$project/launcher" "$project/patches" "$project/tests" "$source/project/"
+cp -R "$project/launcher" "$project/patches" "$project/tests" "$project/experiments" "$source/project/"
 cp "$project/README.md" "$project/findings.md" "$project/PERFORMANCE.md" "$project/LICENSE" "$project/probe.py" \
     "$project/Play DiRT 3.command" "$source/project/"
 if [[ "$(git -C "$llvm" rev-parse HEAD)" != "$(git -C "$llvm" rev-parse llvmorg-17.0.6^{commit})" ||

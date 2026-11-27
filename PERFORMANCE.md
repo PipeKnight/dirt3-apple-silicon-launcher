@@ -70,6 +70,8 @@ At 1512 × 982 in Steam Aspen, the frame-timestamp-only A/B used the same runtim
 
 Two runs with guest instruction sampling confirmed that the patch moved the work out of the original loop. The sampled section of Aspen contained 227 instruction samples in the original PCM16 loop with the patch off and zero with it on. With the patch off, one 93.56 ms frame included an 80.24 ms update wait with 55 of 63 samples in that loop. With the patch on, another audio-heavy frame included a 15.81 ms update wait, of which three bulk copies accounted for 10.55 ms. The two waits occurred in separate races. The traces reached their capacity late in the run and captured both intervals.
 
+One additional trace recorded three 14,262,272-byte uploads in a 22.10 ms update wait. The three bulk copies took 14.46 ms in total. Moving audio preparation or uploads off the update thread would require confirming when the game starts using each buffer.
+
 Enable the audio experiment for the [built-in benchmark](README.md#run-the-built-in-benchmark) with `MAC32_DIRT3_PCM16_BULK=1`. Leave the variable unset to use the bundled copy routine.
 
 ### Steam connection polling
@@ -77,6 +79,17 @@ Enable the audio experiment for the [built-in benchmark](README.md#run-the-built
 A follow-up trace timed the host bridges called by `Update Task`. The update thread repeatedly called `SteamUser017::BLoggedOn` from Steam guest return address `0xcabed0`. It checks connectivity to Steam's servers. One call took 274.23 ms inside a 290.18 ms `WinMain` wait in a 306.06 ms frame. Two nearby waits overlapped calls that took 90.37 and 76.87 ms. Steam startup, authentication and ownership checks are separate operations. [Valve's ISteamUser documentation](https://partner.steamgames.com/doc/api/isteamuser#BLoggedOn)
 
 The trace kept 8,927 connection polls lasting at least 25 µs from that site. Six exceeded 10 ms. The experiment reuses the latest real result for up to 100 ms at that single site and refreshes after Steam signals a connection change.
+
+| Steam Aspen at 1512 × 982 | Average FPS | 1% low FPS | p99 | Intervals above 33.3 ms | Direct Steam calls |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cache off, pair 1 | 67.22 | 21.81 | 29.83 ms | 48 | 6,235 |
+| Cache on, pair 1 | 66.96 | 29.45 | 26.91 ms | 20 | 912 |
+| Cache on, pair 2 | 66.30 | 34.08 | 23.23 ms | 12 | 950 |
+| Cache off, pair 2 | 67.34 | 29.85 | 26.01 ms | 24 | 6,319 |
+
+All four runs used the same binary, hardware settings and car list, with the PCM16 patch enabled throughout. The trace recorded frame timestamps and the connection poll only. The Steam client stayed connected during these runs. Isolated tests covered cache expiry, changes of interface, invalidation during a query and a false result from the native query. Actual Steam disconnect and reconnect behavior in the game is still unverified.
+
+The [connection poll patch](patches/mac32-steam-connection-poll.patch) reduced direct Steam calls by about 85% and improved the slow-frame percentiles in both pairs. The average FPS was slightly lower in both pairs. Enable it for the [built-in benchmark](README.md#run-the-built-in-benchmark) with `MAC32_DIRT3_STEAM_STATUS_CACHE=1`.
 
 ## 1. Profile the existing renderer
 
@@ -98,8 +111,34 @@ DiRT 3 uses both OpenGL 2.1 and 4.1 contexts, plus Apple buffer-flush behavior. 
 
 - **MobileGL** offers CGL/NSOpenGL entry points and a desktop OpenGL-to-Vulkan path. Use MoltenVK for a spike compatible with the launcher's macOS 15 baseline. Verify that the backend can be built for the x86-64 host and can represent the game's legacy and core contexts. [MobileGL's macOS build notes](https://github.com/MobileGL-Dev/MobileGL#build-for-macos) · [MoltenVK](https://github.com/KhronosGroup/MoltenVK)
 - MobileGL's CGL path requests an EGL 3.3 context at the inspected revision. Its exported `glProgramStringARB`, `glGenProgramsARB`, `glBufferParameteriAPPLE` and `glFlushMappedBufferRangeAPPLE` are stubs. These paths need implementations or a way to route the legacy context to Apple's OpenGL before testing MobileGL in a full DiRT 3 benchmark. [MobileGL CGL source](https://github.com/MobileGL-Dev/MobileGL/blob/9df3600f878b2059012b4057bcb560daba816f06/MobileGL/MG_Impl/CGLImpl/CGLImpl.cpp#L199) · [OpenGL export definitions](https://github.com/MobileGL-Dev/MobileGL/blob/9df3600f878b2059012b4057bcb560daba816f06/MobileGL/MG_Impl/GLImpl/Exporting/Definitions.cpp#L1168)
+- The two Mac game binaries import the same 261 CGL and OpenGL entry points. A comparison against MobileGL's export declarations at that revision found 62 imports declared as stubs, including legacy matrix, lighting and vertex-array functions. Some imports may be unused during Aspen. [OpenGL export definitions](https://github.com/MobileGL-Dev/MobileGL/blob/9df3600f878b2059012b4057bcb560daba816f06/MobileGL/MG_Impl/GLImpl/Exporting/Definitions.cpp)
 - **WineMetalGL** offers desktop OpenGL-to-Metal and implements legacy ARB assembly programs. Its Wine integration creates contexts through WGL. The inspected source has no CGL entry point or implementation of the two Apple buffer-flush calls used by DiRT 3. A mac32 port would need a CGL adapter and equivalent explicit buffer flushing. [WineMetalGL compatibility notes](https://github.com/metalsharp/WineMetalGL/blob/main/docs/unsupported.md#compatibility-profile-opengl-10-to-21) · [Wine context code](https://github.com/metalsharp/WineMetalGL/blob/fac2219f37bbbe132f7d67a530a035ae033aa437/src/wine/unix/unix_wgl.c#L459)
 - Once the fixtures pass, compare menus, cockpit, shadows, mirrors, MSAA and frame pacing with the existing renderer. Run the same Aspen workload before drawing any conclusion about performance. The *Super Mario Sunshine* port has published an OpenGL versus Vulkan/MoltenVK comparison on M4 that illustrates the method. [The port's Vulkan benchmarks](https://github.com/chasem-dev/sms-pc-port/blob/main/docs/VULKAN.md#macos-moltenvk)
+
+### WineMetalGL offscreen prototype
+
+WineMetalGL `fac2219f37bbbe132f7d67a530a035ae033aa437` built as x86-64 with a macOS 15 deployment target and ran under Rosetta on M4. All nine ARB program GPU tests passed, along with the staging-buffer draw and framebuffer readback tests. Through the native driver ABI, requests for 2.1 compatibility and 4.1 core created 4.6 contexts of the correct profile. Both cleared a pbuffer, read back a pixel and mapped a buffer.
+
+The native driver resolved the Apple buffer and fence entry point names. Setting `GL_BUFFER_FLUSHING_UNMAP_APPLE`, flushing a mapped range through the Apple call and generating an Apple fence returned `GL_INVALID_OPERATION`. Changing one word through `glMapBufferRange` with explicit flushing preserved the neighboring words.
+
+The [offscreen adapter](experiments/winemetalgl-offscreen.patch) reproduced the existing `gl_profiles_i386` and `gl_buffer_mapping_i386` fixtures through mac32. It maps a small subset of CGL to the driver ABI, reports the CGL profile version requested by the test, allocates buffer storage in the guest address space and translates explicit buffer flushing to the standard range API. The adapter rejects unsupported guest calls. Window and NSOpenGL integration, shared-context buffer semantics and Apple fences remain open before a game run.
+
+Use a separate patched mac32 checkout from the [build instructions](README.md#build-from-source) to reproduce the offscreen tests. In this example, `wmgl` points to the WineMetalGL checkout at the revision above, and `runtime` points to the separate mac32 checkout in a path without spaces.
+
+```sh
+cmake -S "$wmgl" -B "$wmgl/build" -DCMAKE_BUILD_TYPE=Release -DWMGL_LTO=OFF
+cmake --build "$wmgl/build" --target winemetalgl_core
+git -C "$runtime" apply "$PWD/experiments/winemetalgl-offscreen.patch"
+sdk="$(xcrun --sdk macosx --show-sdk-path)"
+MACOSX_DEPLOYMENT_TARGET=15.0 make -C "$runtime" -j6 \
+  CC="/usr/bin/clang -isysroot $sdk -I$wmgl/include" mac32
+for fixture in gl_profiles_i386 gl_buffer_mapping_i386; do
+  /usr/bin/clang -target i386-apple-macos10.9 -fno-builtin -fno-stack-protector \
+    -nostdlib -Wl,-undefined,dynamic_lookup "tests/$fixture.c" \
+    "$runtime/guest/libSystem.tbd" -o "$runtime/$fixture"
+  MAC32_WMGL_FIXTURE="$wmgl/build/libwinemetalgl.dylib" "$runtime/mac32" "$runtime/$fixture"
+done
+```
 
 ## 4. Evaluate native ARM64 recompilation
 

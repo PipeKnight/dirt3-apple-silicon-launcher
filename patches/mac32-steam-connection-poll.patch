@@ -1,0 +1,124 @@
+diff --git a/patches/dirt3_2015_version.c b/patches/dirt3_2015_version.c
+index fce4e13..d936277 100644
+--- a/patches/dirt3_2015_version.c
++++ b/patches/dirt3_2015_version.c
+@@ -13,6 +13,12 @@ static g32 flash_enter, flash_exit, flash_tick;
+ static g32 mix_rumble;
+ static g32 image_text_start;
+ static uint32_t image_text_size;
++static g32 steam_connection_return;
++
++int dirt3_is_steam_connection_site(g32 return_address)
++{
++    return steam_connection_return && return_address == steam_connection_return;
++}
+ 
+ static void in_image_text(uint32_t *args, struct hres *r)
+ {
+@@ -119,6 +125,7 @@ struct signature {
+ struct profile {
+ 	const char *name;
+ 	struct signature version, version_string, options, videos, json_call, json_parser, storage, motion, rumble;
++	struct signature steam_connection_call;
+ 	struct { g32 table, enter, exit, tick; } flash;
+ };
+ 
+@@ -151,6 +158,8 @@ static const struct profile profiles[] = {
+ 	},
+ 	{
+ 		.name = "Steam 1.0.3 (92701.18470.3)",
++		.steam_connection_call = SIG(0xcabec4, 0xba50,
++			"\x85\xc0\x74\x13\x8b\x08\x89\x04\x24\xff\x51\x04\x88\xc1\xb8\x03\x00\x00\x00"),
+ 		.version = SIG(0x7a3e12, 0xba50,
+ 			"\x8b\x45\xf0\x83\xe0\x0f\x89\xd9\x83\xe1\x10\xc1\xe1\x08\x83\xfb\x0a\xba\x00"
+ 			"\x10\x00\x00\x0f\x45\xd1\x09\xd6\x09\xc6\x89\xb7\xb6\xe9\x2d\x01"),
+@@ -305,6 +314,8 @@ static int apply(struct image *image)
+ 	g32 storage = text + profile->storage.offset;
+ 	*(uint8_t *)G2H(storage) = 0xe9;
+ 	retarget_rel32(storage, &in_image_text_thunk);
++	if (profile->steam_connection_call.length && matches(text, text_size, profile->steam_connection_call))
++		steam_connection_return = text + profile->steam_connection_call.offset + 12;
+ 	version_patch_active = 1;
+ 	fprintf(stderr, "[mac32] DiRT 3 compatibility profile: %s\n", profile->name);
+ 	return 1;
+diff --git a/src/steam.c b/src/steam.c
+index 96e0f98..4fb8956 100644
+--- a/src/steam.c
++++ b/src/steam.c
+@@ -14,6 +14,8 @@
+ #include <string.h>
+ #include <pthread.h>
+ #include <setjmp.h>
++#include <time.h>
++#include <stdatomic.h>
+ #include <Security/Security.h>
+ 
+ void call_sig(void *fn, const char *sig, const char *name, uint32_t *a, struct hres *r);
+@@ -21,6 +23,32 @@ g32 hobj_wrap_block(void *h, uint32_t size, g32 first_word);
+ g32 hfn_stub(struct hfn *f);
+ 
+ static void *steamclient;
++static _Atomic uint32_t connection_generation;
++static int connection_cache_enabled;
++extern int dirt3_is_steam_connection_site(g32 return_address);
++
++// Coalesce the game's repeated connectivity queries at one validated call site.
++static void steam_connection_status(struct hfn *h, void *self, void *fn, uint32_t *args, struct hres *r)
++{
++	static _Thread_local struct {
++		void *user;
++		uint64_t valid_until;
++		uint32_t generation;
++		uint64_t value;
++	} recent;
++	uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++	uint32_t generation = atomic_load_explicit(&connection_generation, memory_order_acquire);
++	if (recent.user == self && recent.generation == generation && now < recent.valid_until) {
++		r->rax = recent.value;
++		return;
++	}
++	const struct smethod *m = h->ctx;
++	call_sig(fn, m->sig, h->name, args, r);
++	recent.user = self;
++	recent.generation = generation;
++	recent.value = r->rax;
++	recent.valid_until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 100000000;
++}
+ static pthread_mutex_t lk = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
+ 
+ // The packaged helper loads Steam's library across signing teams. Validate
+@@ -51,6 +79,8 @@ static void verify_steam_client(const char *path)
+ static void *sc_sym(const char *name)
+ {
+ 	if (!steamclient) {
++		const char *cache = getenv("MAC32_DIRT3_STEAM_STATUS_CACHE");
++		connection_cache_enabled = cache && !strcmp(cache, "1");
+ 		char p[1024];
+ 		snprintf(p, sizeof p, "%s/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steamclient.dylib",
+ 			 getenv("HOME"));
+@@ -551,6 +581,13 @@ static void steam_method(struct hfn *h, uint32_t *args, struct hres *r)
+ 		die("Steam method %s is not bridged yet (signature %s)", h->name, m->sig);
+ 	void *self = hobj_unwrap(args[0]);
+ 	void *fn = (*(void ***)self)[h->size];
++	if (connection_cache_enabled && dirt3_is_steam_connection_site(args[-1]) &&
++		!strcmp(h->name, "steam:SteamUser017::BLoggedOn#1")) {
++		steam_connection_status(h, self, fn, args, r);
++		return;
++	}
++	if (connection_cache_enabled && (!strcmp(m->name, "ReleaseUser") || !strcmp(m->name, "BReleaseSteamPipe")))
++		atomic_fetch_add_explicit(&connection_generation, 1, memory_order_acq_rel);
+ 	if (strstr(h->name, "SteamMatchMakingServers") && server_browser(m, fn, self, args, r)) return;
+ 	if (strchr(m->sig, 'X')) die("Steam method %s is not bridged yet (signature %s)", h->name, m->sig);
+ 	if (getenv("MAC32_STEAMARGS") && strstr(m->name, getenv("MAC32_STEAMARGS")))
+@@ -585,6 +622,11 @@ static void t_Steam_BGetCallback(uint32_t *args, struct hres *r)
+ 	struct host_msg m;
+ 	int ok = f((int32_t)A(0), &m) & 0xff;
+ 	if (ok) {
++		// Connection events and IPC failure invalidate the last observed result.
++		enum { servers_connected = 101, servers_disconnected = 103, ipc_failure = 117 };
++		if (connection_cache_enabled && ((m.id >= servers_connected && m.id <= servers_disconnected) ||
++			m.id == ipc_failure))
++			atomic_fetch_add_explicit(&connection_generation, 1, memory_order_acq_rel);
+ 		if ((uint32_t)m.size > cb_cap) {
+ 			gfree(cb_buf);
+ 			cb_cap = (uint32_t)m.size + 256;

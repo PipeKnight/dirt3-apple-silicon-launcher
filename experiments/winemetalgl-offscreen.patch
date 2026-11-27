@@ -1,0 +1,267 @@
+diff --git a/Makefile b/Makefile
+index c998dea..1d3173d 100644
+--- a/Makefile
++++ b/Makefile
+@@ -5,7 +5,7 @@ CFLAGS = -arch x86_64 -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-deprecated
+ LDFLAGS = -arch x86_64 -lffi -lcurl -liconv -lz -framework Foundation -framework AppKit -framework WebKit -framework Carbon -framework AVFoundation -framework CoreMedia \
+           -framework IOKit -framework GameController -framework CoreHaptics -framework OpenGL -framework OpenCL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
+           -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
+-SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c src/media_bridge.c \
++SRC = src/wmgl_fixture.c src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c src/media_bridge.c \
+       src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/dirt3_gamepad.m src/dirt3_window_mode.c src/dirt3_bluetooth_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/dirt3_adaptive_triggers.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
+ OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
+ 
+diff --git a/src/thunks.c b/src/thunks.c
+index 5b0de7d..6b00215 100644
+--- a/src/thunks.c
++++ b/src/thunks.c
+@@ -73,8 +73,13 @@ static g32 bind_entry(struct hfn *f)
+ 	return f->addr;
+ }
+ 
++g32 wmgl_fixture_lookup(const char *name);
++
+ g32 host_lookup(const char *name)
+ {
++	g32 override = wmgl_fixture_lookup(name);
++	if (override)
++		return override;
+ 	os_unfair_lock_lock(&tlock);
+ 	struct hfn *f = hfind(name);
+ 	if (!f) {
+diff --git a/src/wmgl_fixture.c b/src/wmgl_fixture.c
+new file mode 100644
+index 0000000..f23d3a6
+--- /dev/null
++++ b/src/wmgl_fixture.c
+@@ -0,0 +1,230 @@
++#include "thunks.h"
++#include <dlfcn.h>
++#include <string.h>
++#include <OpenGL/gl.h>
++#include <OpenGL/glext.h>
++#include <winemetalgl/driver.h>
++
++#define ANSWER(value) (r->rax = (uint64_t)(value))
++enum { access_read = 0x0001, access_write = 0x0002, access_explicit_flush = 0x0010 };
++static void *driver;
++static void *(*gl_proc)(const char *);
++static wmgl_context *(*make_context)(int, wmgl_context *, const int *, int *);
++static wmgl_surface *(*make_surface)(int, int, int);
++static int (*make_current)(wmgl_context *, wmgl_surface *, wmgl_surface *);
++static void (*destroy_context)(wmgl_context *);
++static void (*destroy_surface)(wmgl_surface *);
++static int format_index;
++
++// This fixture exercises one explicitly flushed array buffer per context.
++struct probe_context {
++    wmgl_context *gl;
++    wmgl_surface *surface;
++    int legacy;
++    GLuint explicit_buffer;
++};
++
++static _Thread_local struct probe_context *current;
++static void *allocate_buffer(size_t size)
++{
++    return size <= UINT32_MAX ? G2H(gmemalign(65536, (uint32_t)size)) : NULL;
++}
++
++static void release_buffer(void *memory)
++{
++    gfree((g32)(uintptr_t)memory);
++}
++
++static void wmgl_probe_init(void)
++{
++    const char *library = getenv("MAC32_WMGL_FIXTURE");
++    driver = dlopen(library, RTLD_NOW | RTLD_LOCAL);
++    if (!driver)
++        die("WineMetalGL fixture library: %s", dlerror());
++
++    int (*initialize)(unsigned) = dlsym(driver, "wmgl_initialize");
++    unsigned (*pixel_formats)(struct wmgl_pixel_format *, unsigned, unsigned *) =
++        dlsym(driver, "wmgl_get_pixel_formats");
++    void (*set_memory)(void *(*)(size_t), void (*)(void *)) = dlsym(driver, "wmgl_set_buffer_memory");
++    gl_proc = dlsym(driver, "wmgl_get_proc_address");
++    make_context = dlsym(driver, "wmgl_context_create");
++    make_surface = dlsym(driver, "wmgl_surface_create_pbuffer");
++    make_current = dlsym(driver, "wmgl_make_current");
++    destroy_context = dlsym(driver, "wmgl_context_destroy");
++    destroy_surface = dlsym(driver, "wmgl_surface_destroy");
++    if (!initialize || !pixel_formats || !set_memory || !gl_proc || !make_context || !make_surface ||
++        !make_current || !destroy_context || !destroy_surface || initialize(WMGL_DRIVER_ABI_VERSION))
++        die("WineMetalGL fixture driver ABI unavailable");
++
++    set_memory(allocate_buffer, release_buffer);
++    struct wmgl_pixel_format formats[256];
++    unsigned n = pixel_formats(formats, 256, NULL);
++    for (unsigned i = 0; i < n && i < 256; i++) {
++        const struct wmgl_pixel_format *f = &formats[i];
++        if (f->draw_to_pbuffer && f->red_bits == 8 && f->alpha_bits == 8 &&
++            f->depth_bits == 24 && f->stencil_bits == 8 && f->samples <= 1 && !f->srgb_capable) {
++            format_index = (int)i + 1;
++            return;
++        }
++    }
++    die("WineMetalGL fixture has no matching pbuffer");
++}
++
++static void choose_format(uint32_t *args, struct hres *r)
++{
++    const int *attrs = G2H(args[0]);
++    int profile = attrs && attrs[0] == 99 ? attrs[1] : 0;
++    *(g32 *)G2H(args[1]) = (g32)profile;
++    *(int *)G2H(args[2]) = !!profile;
++    ANSWER(profile ? 0 : 1);
++}
++
++static void create_context(uint32_t *args, struct hres *r)
++{
++    int legacy = args[0] == 0x1000;
++    const int attrs[] = {0x2091, legacy ? 2 : 4, 0x2092, 1, 0x9126, legacy ? 2 : 1, 0};
++    struct probe_context *share = args[1] ? hobj_unwrap(args[1]) : NULL;
++    struct probe_context *ctx = calloc(1, sizeof *ctx);
++    ctx->legacy = legacy;
++    ctx->gl = make_context(format_index, share ? share->gl : NULL, attrs, NULL);
++    ctx->surface = make_surface(format_index, 32, 32);
++    if (!ctx->gl || !ctx->surface)
++        die("WineMetalGL fixture context creation failed");
++    *(g32 *)G2H(args[2]) = hobj_wrap(ctx);
++    ANSWER(0);
++}
++
++static void destroy_format(uint32_t *args, struct hres *r)
++{
++    (void)args;
++    ANSWER(0);
++}
++
++static void change_context(uint32_t *args, struct hres *r)
++{
++    struct probe_context *next = args[0] ? hobj_unwrap(args[0]) : NULL;
++    wmgl_surface *surface = next ? next->surface : NULL;
++    if (!make_current(next ? next->gl : NULL, surface, surface)) {
++        ANSWER(1);
++        return;
++    }
++    current = next;
++    ANSWER(0);
++}
++
++static void delete_context(uint32_t *args, struct hres *r)
++{
++    struct probe_context *ctx = hobj_unwrap(args[0]);
++    destroy_context(ctx->gl);
++    destroy_surface(ctx->surface);
++    free(ctx);
++    ANSWER(0);
++}
++
++static void get_string(uint32_t *args, struct hres *r)
++{
++    static g32 version[2];
++    if (args[0] == GL_VERSION) {
++        // Report the version requested by the guest's CGL context. The backend
++        // itself exposes a larger profile, checked by the native probe.
++        int i = current->legacy;
++        if (!version[i])
++            version[i] = gstrdup(i ? "2.1 WineMetalGL CGL fixture" : "4.1 WineMetalGL CGL fixture");
++        ANSWER(version[i]);
++        return;
++    }
++    const char *(*lookup)(GLenum) = gl_proc("glGetString");
++    const char *value = lookup(args[0]);
++    ANSWER(value ? gstrdup(value) : 0);
++}
++
++static void get_string_i(uint32_t *args, struct hres *r)
++{
++    const char *(*lookup)(GLenum, GLuint) = gl_proc("glGetStringi");
++    const char *value = lookup(args[0], args[1]);
++    ANSWER(value ? gstrdup(value) : 0);
++}
++
++static GLuint array_buffer(void)
++{
++    void (*get_integer)(GLenum, GLint *) = gl_proc("glGetIntegerv");
++    GLint buffer = 0;
++    get_integer(GL_ARRAY_BUFFER_BINDING, &buffer);
++    return (GLuint)buffer;
++}
++
++static void set_apple_buffer_parameter(uint32_t *args, struct hres *r)
++{
++    (void)r;
++    if (args[0] != GL_ARRAY_BUFFER || args[1] != GL_BUFFER_FLUSHING_UNMAP_APPLE)
++        die("WineMetalGL fixture only handles explicit flushing on GL_ARRAY_BUFFER");
++    current->explicit_buffer = args[2] == GL_FALSE ? array_buffer() : 0;
++}
++
++static void map_buffer(uint32_t *args, struct hres *r)
++{
++    void *result;
++    if (args[0] == GL_ARRAY_BUFFER && current->explicit_buffer &&
++        array_buffer() == current->explicit_buffer && args[1] != GL_READ_ONLY) {
++        void (*get_parameter)(GLenum, GLenum, GLint *) = gl_proc("glGetBufferParameteriv");
++        void *(*map_range)(GLenum, GLintptr, GLsizeiptr, GLbitfield) = gl_proc("glMapBufferRange");
++        GLint size = 0;
++        get_parameter(args[0], GL_BUFFER_SIZE, &size);
++        GLbitfield flags = access_write | access_explicit_flush;
++        if (args[1] == GL_READ_WRITE)
++            flags |= access_read;
++        result = map_range(args[0], 0, size, flags);
++    } else {
++        void *(*map_whole)(GLenum, GLenum) = gl_proc("glMapBuffer");
++        result = map_whole(args[0], args[1]);
++    }
++    if ((uintptr_t)result > UINT32_MAX)
++        die("WineMetalGL fixture buffer mapping is outside the guest address space");
++    ANSWER((uintptr_t)result);
++}
++
++static void flush_apple_range(uint32_t *args, struct hres *r)
++{
++    (void)r;
++    void (*flush_range)(GLenum, GLintptr, GLsizeiptr) = gl_proc("glFlushMappedBufferRange");
++    flush_range(args[0], args[1], args[2]);
++}
++
++static struct hfn overrides[] = {
++    R("_CGLChoosePixelFormat", choose_format), R("_CGLCreateContext", create_context),
++    R("_CGLDestroyPixelFormat", destroy_format), R("_CGLSetCurrentContext", change_context),
++    R("_CGLDestroyContext", delete_context), R("_glGetString", get_string), R("_glGetStringi", get_string_i),
++    R("_glBufferParameteriAPPLE", set_apple_buffer_parameter), R("_glMapBuffer", map_buffer),
++    R("_glFlushMappedBufferRangeAPPLE", flush_apple_range),
++    G("_glGetIntegerv", NULL, "v:up"), G("_glGetError", NULL, "u:"),
++    G("_glGenVertexArrays", NULL, "v:ip"), G("_glBindVertexArray", NULL, "v:u"),
++    G("_glIsVertexArray", NULL, "b:u"), G("_glDeleteVertexArrays", NULL, "v:ip"),
++    G("_glGenBuffers", NULL, "v:ip"), G("_glBindBuffer", NULL, "v:uu"),
++    G("_glBufferData", NULL, "v:uipu"), G("_glBufferDataARB", NULL, "v:uipu"),
++    G("_glUnmapBuffer", NULL, "b:u"), G("_glDeleteBuffers", NULL, "v:ip"),
++};
++
++g32 wmgl_fixture_lookup(const char *name)
++{
++    if (!getenv("MAC32_WMGL_FIXTURE") || !g_progname ||
++        (strncmp(name, "_gl", 3) && strncmp(name, "_CGL", 4)))
++        return 0;
++    const char *program = G2H(g_progname);
++    if (strcmp(program, "gl_profiles_i386") && strcmp(program, "gl_buffer_mapping_i386"))
++        die("WineMetalGL adapter is an offscreen fixture runner");
++    for (size_t i = 0; i < sizeof overrides / sizeof overrides[0]; i++) {
++        struct hfn *entry = &overrides[i];
++        if (strcmp(name, entry->name))
++            continue;
++        if (!driver)
++            wmgl_probe_init();
++        if (!entry->fn) {
++            const char *proc = !strcmp(name, "_glBufferDataARB") ? "glBufferData" : name + 1;
++            entry->fn = gl_proc(proc);
++            if (!entry->fn)
++                die("WineMetalGL fixture entry %s unavailable", proc);
++        }
++        return hfn_stub(entry);
++    }
++    die("OpenGL entry %s is outside the WineMetalGL fixture adapter", name);
++}
