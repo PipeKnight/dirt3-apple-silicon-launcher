@@ -49,9 +49,34 @@ An optimized 1512 × 982 run with focused tracing sampled 103 frames with an asy
 
 A separate run sampled the update thread's Mach state and cumulative CPU time about every millisecond. In a 67.85 ms frame, `WinMain` waited 54.66 ms for `Update Task`. Between the first and last sample within that wait, `Update Task` accumulated about 52.5 ms of CPU time over 54.2 ms of elapsed time. During a second 11.82 ms wait at the same site, both measurements were about 10.1 ms across the sampled portion. These stalls warrant profiling work inside the update task before changes to thread priority or the worker map. The macOS Time Profiler capture covered a later part of the same run and recovered a guest game address in only 39 of 31,602 update-thread samples. For the stalls, target the benchmark interval around the wait and collect guest call sites through mac32.
 
-The synchronous 1 × 1 readback ran once per measured frame from Steam guest return address `0x95b974`. Its call site can unbind a pixel pack buffer after the read. Check the actual destination and the first consumer before testing a deferred result.
+The synchronous 1 × 1 readback ran once per measured frame from Steam guest return address `0x95b974`. In a follow-up trace, all 83 sampled calls had no pixel pack buffer bound. The game receives the result in client memory. A deferred implementation needs evidence that the first reader accepts a delayed result.
 
 The OpenGL buffer fixture covers storage replacement through the ARB alias and explicit flushing at a nonzero offset. The normal runtime tests and the buffer fixture passed with the cache enabled. The buffer fixture also passed with the original query path. [Apple's buffer-flush extension](https://registry.khronos.org/OpenGL/extensions/APPLE/APPLE_flush_buffer_range.txt)
+
+### Update Task and audio buffers
+
+Sampling the emulated x86 thread state from mac32 recovered instruction pointers inside the original binaries. In one 86.07 ms frame, the presenting thread waited 72.89 ms on the update thread. Its CPU counter advanced 70.73 ms over the 72.29 ms sampled interval. Of 58 instruction samples during the wait, 50 were in the bundled i386 OpenAL Soft library and six were in the game's byte-to-PCM16 conversion loop before `alBufferData`.
+
+The OpenAL samples cluster at `0x1e206–0x1e2e6` within `ConvertData` in the Steam library, with the image slide removed. That branch copies matching signed 16-bit samples and repeats its inner loop for each frame of audio. A bulk copy to the same destination can preserve the sample values and remove the per-frame loop. Other long waits had little update-thread CPU time, so this optimization addresses one source of stutter.
+
+The [OpenAL patch](patches/mac32-openal-pcm16.patch) checks the copy branch and return instructions in each of the two known i386 libraries. It changes the loaded image in memory. Other formats use the original conversion. Audio buffers read back byte for byte in a [loopback fixture](tests/openal_pcm16.c) with both Steam and standalone OpenAL. The fixture covers mono, stereo, zero-length uploads and frame counts on either side of the original vector loop boundary. A separate loopback playback check produced matching rendered samples. The standalone game completed Aspen at 64.49 average FPS with the patch enabled in a compatibility run. [OpenAL Soft buffer sample API](https://github.com/kcat/openal-soft/blob/master/include/AL/alext.h)
+
+| 120 stereo uploads of 4,000,012 bytes each, two runs per setting | Original total | Bulk copy total |
+| --- | ---: | ---: |
+| Steam OpenAL | 250.9–291.2 ms | 11.92–11.99 ms |
+| Standalone OpenAL | 218.7–219.4 ms | 12.06–12.12 ms |
+
+At 1512 × 982 in Steam Aspen, the frame-timestamp-only A/B used the same runtime and effective settings. Average FPS was 69.77 with the patch off and 69.69 with it on. The 1% low was 34.87 → 35.15 FPS, p99 was 21.48 → 21.40 ms, and there were 11 → 10 intervals above 33.3 ms. The copy is substantially faster in isolation. This pair shows little change in overall frame pacing.
+
+Two runs with guest instruction sampling confirmed that the patch moved the work out of the original loop. The sampled section of Aspen contained 227 instruction samples in the original PCM16 loop with the patch off and zero with it on. With the patch off, one 93.56 ms frame included an 80.24 ms update wait with 55 of 63 samples in that loop. With the patch on, another audio-heavy frame included a 15.81 ms update wait, of which three bulk copies accounted for 10.55 ms. The two waits occurred in separate races. The traces reached their capacity late in the run and captured both intervals.
+
+Enable the audio experiment for the [built-in benchmark](README.md#run-the-built-in-benchmark) with `MAC32_DIRT3_PCM16_BULK=1`. Leave the variable unset to use the bundled copy routine.
+
+### Steam connection polling
+
+A follow-up trace timed the host bridges called by `Update Task`. The update thread repeatedly called `SteamUser017::BLoggedOn` from Steam guest return address `0xcabed0`. It checks connectivity to Steam's servers. One call took 274.23 ms inside a 290.18 ms `WinMain` wait in a 306.06 ms frame. Two nearby waits overlapped calls that took 90.37 and 76.87 ms. Steam startup, authentication and ownership checks are separate operations. [Valve's ISteamUser documentation](https://partner.steamgames.com/doc/api/isteamuser#BLoggedOn)
+
+The trace kept 8,927 connection polls lasting at least 25 µs from that site. Six exceeded 10 ms. The experiment reuses the latest real result for up to 100 ms at that single site and refreshes after Steam signals a connection change.
 
 ## 1. Profile the existing renderer
 
@@ -64,7 +89,7 @@ The OpenGL buffer fixture covers storage replacement through the ARB alias and e
 
 - **Buffer uploads.** Measure which buffer targets still incur waits and how often the guest shadow buffer is copied. Test a streaming path for verified write-only workloads if the traces show repeated stalls. Preserve read mappings, offsets, explicit flushes, unmap return values and buffer lifetimes. The staging-upload and metadata-cache trials have yet to show a repeatable improvement. [Earlier experiments](findings.md#graphics-settings-and-follow-up-runtime-trials)
 - **Synchronous readbacks.** Trace the engine call sites behind `glReadPixels`. Determine whether the result is needed immediately or on a later frame. A delayed readback is a candidate only where the engine tolerates that timing. Check rendering effects and menu behavior against the existing path.
-- **Thread scheduling.** Start with CPU samples from `Update Task` around the long `WinMain` stalls. Distinguish time runnable from time blocked on a lock, another thread or the GPU. If the main or render thread spends meaningful time runnable, test narrowly scoped QoS changes. Revisit the worker map only if the profile shows engine tasks waiting for available workers. [Apple's guidance for performance and efficiency cores](https://developer.apple.com/documentation/apple-silicon/tuning-your-code-s-performance-for-apple-silicon/)
+- **Thread scheduling.** Trace the blocked portions of `Update Task` around the long `WinMain` waits. Attribute waits to the specific lock, I/O call, producer or GPU operation. If the main or render thread spends meaningful time runnable, test narrowly scoped QoS changes. Revisit the worker map only if the profile shows engine tasks waiting for available workers. [Apple's guidance for performance and efficiency cores](https://developer.apple.com/documentation/apple-silicon/tuning-your-code-s-performance-for-apple-silicon/)
 - **Acceptance.** Prefer a repeatable gain in frame intervals at the same effective graphics settings. Test both supported Mac builds, including gameplay and menus at the supported resolutions and MSAA settings. Keep build-specific in-memory patches gated on matching instructions.
 
 ## 3. Prototype an alternate graphics backend

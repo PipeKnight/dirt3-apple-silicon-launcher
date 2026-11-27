@@ -32,6 +32,8 @@ GIT_CEILING_DIRECTORIES="$source" git -C "$source/mac32" apply \
     "$project/patches/mac32-stadia-rumble.patch"
 GIT_CEILING_DIRECTORIES="$source" git -C "$source/mac32" apply \
     "$project/patches/mac32-gl-buffer-metadata.patch"
+GIT_CEILING_DIRECTORIES="$source" git -C "$source/mac32" apply \
+    "$project/patches/mac32-openal-pcm16.patch"
 while IFS= read -r -d '' file; do
     cmp -s "$file" "$runtime/${file#"$source/mac32/"}" || {
         printf 'Runtime source differs from the release patches: %s\n' "${file#"$source/mac32/"}" >&2
