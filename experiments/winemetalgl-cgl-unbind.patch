@@ -1,0 +1,52 @@
+diff --git a/include/winemetalgl/driver.h b/include/winemetalgl/driver.h
+index 0896ffd..ba8c022 100644
+--- a/include/winemetalgl/driver.h
++++ b/include/winemetalgl/driver.h
+@@ -80,6 +80,8 @@ wmgl_context *wmgl_context_create(int format, wmgl_context *share, const int *at
+ void wmgl_context_destroy(wmgl_context *context);
+ /* Makes the context current on the calling thread (NULL releases). */
+ int wmgl_make_current(wmgl_context *context, wmgl_surface *draw, wmgl_surface *read);
++/* Temporary CGL unbinding leaves submitted GL work queued on the context. */
++int wmgl_make_current_cgl(wmgl_context *context, wmgl_surface *draw, wmgl_surface *read);
+ 
+ void *wmgl_get_proc_address(const char *name);
+ 
+diff --git a/src/core/driver.mm b/src/core/driver.mm
+index 6b7e658..2af6acd 100644
+--- a/src/core/driver.mm
++++ b/src/core/driver.mm
+@@ -354,15 +354,16 @@ WMGL_EXPORT void wmgl_context_destroy(wmgl_context* handle) {
+     delete ctx;
+ }
+ 
+-WMGL_EXPORT int wmgl_make_current(wmgl_context* handle, wmgl_surface* draw, wmgl_surface* read) {
++static int makeCurrent(wmgl_context* handle, wmgl_surface* draw, wmgl_surface* read, bool flushOnUnbind) {
+     CallPool pool;  // see CallPool (context.h)
+     if (handle) raiseThreadQos("render");  // see thread_qos.h
+     Context* previous = currentContext();
+     Context* ctx = asContext(handle);
+     WMGL_TRACE(Driver, "make current: context %p, draw %p, read %p (was %p)", ctx, draw, read, previous);
+-    // Switching contexts flushes the previous one (WGL requires an implicit glFlush).
+     if (previous && previous != ctx) {
+-        previous->stream().flush();
++        // WGL requires an implicit flush. A mac32 CGL caller can keep a
++        // temporarily unbound context's commands queued until it is rebound.
++        if (ctx || flushOnUnbind) previous->stream().flush();
+         if (previous->current) {
+             previous->current = false;
+             --previous->share().currentContexts;
+@@ -377,6 +378,14 @@ WMGL_EXPORT int wmgl_make_current(wmgl_context* handle, wmgl_surface* draw, wmgl
+     return 1;
+ }
+ 
++WMGL_EXPORT int wmgl_make_current(wmgl_context* handle, wmgl_surface* draw, wmgl_surface* read) {
++    return makeCurrent(handle, draw, read, true);
++}
++
++WMGL_EXPORT int wmgl_make_current_cgl(wmgl_context* handle, wmgl_surface* draw, wmgl_surface* read) {
++    return makeCurrent(handle, draw, read, false);
++}
++
+ WMGL_EXPORT void* wmgl_get_proc_address(const char* name) { return lookupProc(name); }
+ 
+ namespace {

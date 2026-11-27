@@ -121,7 +121,7 @@ WineMetalGL `fac2219f37bbbe132f7d67a530a035ae033aa437` built as x86-64 with a ma
 
 The native driver resolved the Apple buffer and fence entry point names. Setting `GL_BUFFER_FLUSHING_UNMAP_APPLE`, flushing a mapped range through the Apple call and generating an Apple fence returned `GL_INVALID_OPERATION`. Changing one word through `glMapBufferRange` with explicit flushing preserved the neighboring words.
 
-The [offscreen adapter](experiments/winemetalgl-offscreen.patch) reproduced the existing `gl_profiles_i386` and `gl_buffer_mapping_i386` fixtures through mac32. It maps a small subset of CGL to the driver ABI, reports the CGL profile version requested by the test, allocates buffer storage in the guest address space and translates explicit buffer flushing to the standard range API. The adapter rejects unsupported guest calls. Window and NSOpenGL integration, shared-context buffer semantics and Apple fences remain open before a game run.
+The [offscreen adapter](experiments/winemetalgl-offscreen.patch) reproduced the existing `gl_profiles_i386` and `gl_buffer_mapping_i386` fixtures through mac32. It maps a small subset of CGL to the driver ABI, reports the CGL profile version requested by the test, allocates buffer storage in the guest address space and translates explicit buffer flushing to the standard range API. The adapter rejects unsupported guest calls. The later window prototype covers Cocoa presentation, shared buffers and Apple fences.
 
 Use a separate patched mac32 checkout from the [build instructions](README.md#build-from-source) to reproduce the offscreen tests. In this example, `wmgl` points to the WineMetalGL checkout at the revision above, and `runtime` points to the separate mac32 checkout in a path without spaces.
 
@@ -138,6 +138,67 @@ for fixture in gl_profiles_i386 gl_buffer_mapping_i386; do
     "$runtime/guest/libSystem.tbd" -o "$runtime/$fixture"
   MAC32_WMGL_FIXTURE="$wmgl/build/libwinemetalgl.dylib" "$runtime/mac32" "$runtime/$fixture"
 done
+```
+
+### WineMetalGL window prototype
+
+The window adapter uses the game's CGL contexts for pixel format, share group and capability queries. It gives each context a Metal counterpart and presents the game on a `CAMetalLayer` in the existing Cocoa window. Backing-size changes and swap interval follow the game's CGL calls. Only guest calls select the Metal context. A captured thread sample showed why this matters: AppKit's OpenGL layer could wait for the game's CGL lock while the game waited for the adapter's context registry.
+
+The adapter uses GL sync objects for Apple fences and implements explicitly flushed mapped buffers with range mapping. On M4 an isolated test verified fence completion, isolation across two contexts and visibility of a flushed write from a shared context. Texture and vertex-array object waits conservatively cover all prior work in the current context. Purgeable objects keep their storage. GPU milliseconds in the overlay are unavailable in this mode.
+
+WineMetalGL's ARB translator needed the NVIDIA assembly options emitted by this game. The backend patch implements the observed instruction syntax, including texture LOD, derivatives, fragment facing, condition codes and structured repetition. The host suite passed all eight ARB tests. The Steam build rendered the Aspen race in the game window and completed its eight-car benchmark through Metal. The changes remain experimental and opt-in.
+
+Aspen ran on an Apple M4 with macOS 15.7.7 and the Steam Mac build `92701.18470.3`. Both renderers used Aspen route 0 with eight cars, 1512 × 982 windowed, VSync off and MSAA off. The game XML records identical track and hardware settings. The PCM16, Steam status and OpenGL buffer cache experiments were disabled. The timed runs recorded present timestamps only.
+
+| Renderer | Game average FPS | 1% low | p95 interval | p99 interval | Intervals above 33.33 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Apple OpenGL | 70.87 | 25.63 FPS | 20.60 ms | 27.14 ms | 27 of 6,332 (0.4%) |
+| WineMetalGL | 25.44 | 7.00 FPS | 70.75 ms | 104.93 ms | 1,423 of 1,987 (71.6%) |
+| WineMetalGL with deferred CGL submission | 47.73 | 25.68 FPS | 27.82 ms | 31.51 ms | 29 of 4,431 (0.7%) |
+
+The game reports the average FPS for the benchmark. The trace statistics use the dominant presenting context and trim eight seconds from each end of the trailing benchmark sample count. They measure intervals between calls that submit frames, including CPU and synchronization delays. On WineMetalGL with VSync off, its mailbox may drop submitted frames before the display presents them.
+
+A separate Metal run with sparse back-buffer captures averaged 28.35 FPS. The captured frames show the track, cars, shadows, particles and HUD. The comparison covers this Aspen configuration on the Steam edition. The released launcher uses Apple OpenGL.
+
+The first Metal profile showed a strong source of overhead. WineMetalGL's WGL path flushes the outgoing context on each release. DiRT 3 temporarily releases its window's CGL context around draw work. Over an in-race sample, the median frame had 789 draws and 803 Metal command-buffer commits. The optional CGL unbind patch leaves commands pending on that window context during temporary release. Explicit synchronization and presentation still submit work. The profiled run with this patch showed a median of 9 commits in an in-race sample. These counters guide optimization and are omitted from the timed runs.
+
+Deferred CGL submission raised the Metal run's average FPS by 88%. Apple OpenGL remained 48% faster than the tuned Metal run. The batching option has been tested on the Steam Aspen workload. Shared-context handoff across other scenes and the standalone edition still need validation.
+
+Apply the [window adapter](experiments/winemetalgl-window.patch) after the launcher runtime patches, in place of the offscreen experiment. Apply the [NVIDIA shader patch](experiments/winemetalgl-nv-programs.patch) to WineMetalGL at the revision above. The [CGL unbind patch](experiments/winemetalgl-cgl-unbind.patch) is required for the optional batching mode. Build for the x86-64 Rosetta host.
+
+```sh
+git -C "$wmgl" apply "$PWD/experiments/winemetalgl-nv-programs.patch" \
+  "$PWD/experiments/winemetalgl-cgl-unbind.patch"
+cmake -S "$wmgl" -B "$wmgl/build" -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DWMGL_LTO=OFF
+cmake --build "$wmgl/build" --target winemetalgl_core
+
+git -C "$runtime" apply "$PWD/experiments/winemetalgl-window.patch"
+sdk="$(xcrun --sdk macosx --show-sdk-path)"
+MACOSX_DEPLOYMENT_TARGET=15.0 make -C "$runtime" -j6 \
+  CC="/usr/bin/clang -isysroot $sdk -I$wmgl/include" mac32
+```
+
+Set `game` to the Steam game bundle. Run all cases from a logged-in session with the same installation and graphics settings. Use a new trace path for each run. Copy each run's game-generated benchmark XML from `~/Library/Application Support/Feral Interactive/DiRT 3 Complete Edition/benchmarks/`. Compare the complete `hardware_settings_config` and `track/settings` sections before interpreting the timings.
+
+```sh
+MAC32_GL_TRACE_PATH="$PWD/aspen-opengl.trace" MAC32_GL_TRACE_FRAMES_ONLY=1 \
+  MAC32_DIRT3_WINDOW_MODE=windowed python3 probe.py run \
+  --engine "$runtime/mac32" --app "$game" --benchmark --timeout 300
+
+MAC32_GL_TRACE_PATH="$PWD/aspen-metal.trace" MAC32_GL_TRACE_FRAMES_ONLY=1 \
+  MAC32_DIRT3_WINEMETALGL="$wmgl/build/libwinemetalgl.dylib" \
+  MAC32_DIRT3_WINDOW_MODE=windowed python3 probe.py run \
+  --engine "$runtime/mac32" --app "$game" --benchmark --timeout 300
+
+MAC32_GL_TRACE_PATH="$PWD/aspen-metal-batched.trace" MAC32_GL_TRACE_FRAMES_ONLY=1 \
+  MAC32_DIRT3_WINEMETALGL="$wmgl/build/libwinemetalgl.dylib" \
+  MAC32_DIRT3_WMGL_BATCH_UNBIND=1 MAC32_DIRT3_WINDOW_MODE=windowed python3 probe.py run \
+  --engine "$runtime/mac32" --app "$game" --benchmark --timeout 300
+
+python3 experiments/aspen-frame-times.py aspen-opengl.trace aspen-opengl.xml
+python3 experiments/aspen-frame-times.py aspen-metal.trace aspen-metal.xml
+python3 experiments/aspen-frame-times.py aspen-metal-batched.trace aspen-metal-batched.xml
 ```
 
 ## 4. Evaluate native ARM64 recompilation

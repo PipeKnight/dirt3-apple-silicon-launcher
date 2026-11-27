@@ -1,0 +1,1731 @@
+diff --git a/Makefile b/Makefile
+index c998dea..d1e1225 100644
+--- a/Makefile
++++ b/Makefile
+@@ -5,7 +5,7 @@ CFLAGS = -arch x86_64 -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-deprecated
+ LDFLAGS = -arch x86_64 -lffi -lcurl -liconv -lz -framework Foundation -framework AppKit -framework WebKit -framework Carbon -framework AVFoundation -framework CoreMedia \
+           -framework IOKit -framework GameController -framework CoreHaptics -framework OpenGL -framework OpenCL -framework ApplicationServices -framework ImageIO -framework CFNetwork -framework SystemConfiguration -framework CoreText -framework AudioToolbox -framework CoreAudio -framework OpenAL -framework CoreVideo -framework UniformTypeIdentifiers -framework Carbon -framework Security -framework QuartzCore -framework CoreMIDI -framework AudioUnit -Wl,-pagezero_size,0x1000 -Wl,-no_pie -Wl,-image_base,0x200000000 \
+           -Wl,-segaddr,__RESERVE,0x1000 -Wl,-segprot,__RESERVE,rwx,---
+-SRC = src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c src/media_bridge.c \
++SRC = src/dirt3_wmgl.m src/dirt3_wmgl_apple.c src/main.c src/lowmem.c src/cpu.c src/thunks.c src/libc.c src/malloc_zones.c src/format.c src/aio_bridge.c src/media_bridge.c \
+       src/pthread.c src/cxx.c src/libc2.c src/objc.m src/apple.m src/apple2.m src/dirt3_input.m src/dirt3_gamepad.m src/dirt3_window_mode.c src/dirt3_bluetooth_input.m src/legacy.m src/legacy_crypto.c src/cg_thunks.c src/cf_thunks.c src/cf_streams.c src/apple_events.c src/carbon_windows.m src/carbon_thunks.c src/patches.c src/srcfont.m src/quickdraw.m src/launcher.m src/gl_thunks.c src/gl_special.c src/dirt3_overlay.m src/dirt3_force_feedback.m src/dirt3_adaptive_triggers.m src/libc3.c src/ats.m src/steam.c src/steam_ifaces.c src/zlib.c src/audio.c src/opencl_bridge.c src/sndmgr.c src/openal.c src/macho.c $(wildcard patches/*.c) src/tramp.s src/invoke.s src/reserve.s
+ OBJ = $(patsubst patches/%,build/patches/%.o,$(patsubst src/%,build/%.o,$(SRC)))
+ 
+diff --git a/src/apple.m b/src/apple.m
+index a6321a7..61e122d 100644
+--- a/src/apple.m
++++ b/src/apple.m
+@@ -12,6 +12,7 @@
+ #import <SystemConfiguration/SystemConfiguration.h>
+ #include <Security/SecRandom.h>
+ #include "thunks.h"
++#include "dirt3_wmgl.h"
+ #include <pthread.h>
+ 
+ // Boolean / OSErr results: the host leaves junk above the low byte/half
+@@ -710,7 +711,7 @@ KEY(kCFProxyTypeKey) KEY(kCFProxyTypeNone) KEY(kCFProxyUsernameKey)
+ extern CGLError dirt3_flush_drawable(CGLContextObj context);
+ extern CGLError dirt3_destroy_cgl_context(CGLContextObj context);
+ 
+-static int w_CGLSetCurrentContext(CGLContextObj c) { if (c) gl_last_context = c; return CGLSetCurrentContext(c); }
++static int w_CGLSetCurrentContext(CGLContextObj c) { if (c) gl_last_context = c; return dirt3_wmgl_set_current(c); }
+ 
+ static const CGAffineTransform *host_font_matrix(const float *guest, CGAffineTransform *matrix)
+ {
+@@ -929,15 +930,15 @@ static struct hfn apple[] = {
+ 	R("_CGLCreateContext", t_CGLCreateContext),
+ 	R("_CGLQueryRendererInfo", t_CGLQueryRendererInfo),
+ 	G("_CGLDestroyContext", dirt3_destroy_cgl_context, "i:o"),
+-	G("_CGLClearDrawable", CGLClearDrawable, "i:o"),
++	G("_CGLClearDrawable", dirt3_wmgl_clear_drawable, "i:o"),
+ 	G("_CGLGetShareGroup", CGLGetShareGroup, "o:o"),
+ 	G("_CGLDestroyPixelFormat", CGLDestroyPixelFormat, "i:o"),
+ 	G("_CGLDestroyRendererInfo", CGLDestroyRendererInfo, "i:o"),
+ 	G("_CGLSetCurrentContext", w_CGLSetCurrentContext, "i:o"),
+ 	G("_CGLGetCurrentContext", CGLGetCurrentContext, "o:"),
+-	G("_CGLEnable", CGLEnable, "i:ou"),
+-	G("_CGLDisable", CGLDisable, "i:ou"),
+-	G("_CGLSetParameter", CGLSetParameter, "i:oup"),
++	G("_CGLEnable", dirt3_wmgl_enable, "i:ou"),
++	G("_CGLDisable", dirt3_wmgl_disable, "i:ou"),
++	G("_CGLSetParameter", dirt3_wmgl_set_parameter, "i:oup"),
+ 	G("_CGLGetParameter", CGLGetParameter, "i:oup"),
+ 	G("_CGLDescribeRenderer", CGLDescribeRenderer, "i:oiup"),
+ 	G("_CGLFlushDrawable", dirt3_flush_drawable, "i:o"),
+diff --git a/src/dirt3_gl_trace.h b/src/dirt3_gl_trace.h
+new file mode 100644
+index 0000000..a39724b
+--- /dev/null
++++ b/src/dirt3_gl_trace.h
+@@ -0,0 +1,17 @@
++#pragma once
++#include <stdint.h>
++
++enum {
++    gl_trace_present = 16384,
++    gl_trace_native_map,
++    gl_trace_map_size,
++    gl_trace_map_flush_mode,
++    gl_trace_map_binding,
++    gl_trace_shadow_copy,
++    gl_trace_native_unmap,
++};
++
++uint64_t dirt3_gl_trace_begin(void);
++void dirt3_gl_trace_end(uint32_t operation, uint64_t begin, uint32_t site,
++                        uint32_t arg0, uint32_t arg1, uint64_t detail);
++uint64_t dirt3_gl_trace_present_begin(void);
+diff --git a/src/dirt3_overlay.m b/src/dirt3_overlay.m
+index e57816a..b4a8956 100644
+--- a/src/dirt3_overlay.m
++++ b/src/dirt3_overlay.m
+@@ -1,3 +1,5 @@
++#include "dirt3_wmgl.h"
++#include "dirt3_gl_trace.h"
+ #import <AppKit/AppKit.h>
+ #import <Carbon/Carbon.h>
+ #import <IOKit/IOKitLib.h>
+@@ -156,6 +158,7 @@ CGLError dirt3_destroy_cgl_context(CGLContextObj context)
+ 		atomic_store_explicit(&gpu_query_active, false, memory_order_relaxed);
+ 	}
+ 	os_unfair_lock_unlock(&gpu_query_lock);
++	dirt3_wmgl_forget(context);
+ 	return CGLDestroyContext(context);
+ }
+ 
+@@ -421,12 +424,14 @@ static void install_overlay_monitor(void)
+ CGLError dirt3_flush_drawable(CGLContextObj context)
+ {
+ 	finish_gpu_query(context, atomic_load_explicit(&recording, memory_order_relaxed));
+-	CGLError result = CGLFlushDrawable(context);
++	uint64_t trace_start = dirt3_gl_trace_present_begin();
++	CGLError result = dirt3_wmgl_flush(context);
+ 	if (result != kCGLNoError) return result;
++	dirt3_gl_trace_end(gl_trace_present, trace_start, 0, 0, 0, (uintptr_t)context);
+ 	if (atomic_load_explicit(&recording, memory_order_relaxed)) {
+ 		uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+ 		uint64_t generation = record_present(context, now);
+-		if (generation && CGLGetCurrentContext() == context) sample_gpu_frame(context, generation, now);
++		if (!dirt3_wmgl_enabled() && generation && CGLGetCurrentContext() == context) sample_gpu_frame(context, generation, now);
+ 	} else if (!atomic_load_explicit(&monitor_installed, memory_order_relaxed) &&
+ 		dirt3_version_patch_active() &&
+ 		!atomic_exchange_explicit(&monitor_installed, true, memory_order_relaxed)) {
+diff --git a/src/dirt3_wmgl.h b/src/dirt3_wmgl.h
+new file mode 100644
+index 0000000..9475ccc
+--- /dev/null
++++ b/src/dirt3_wmgl.h
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include <OpenGL/OpenGL.h>
++
++int dirt3_wmgl_enabled(void);
++void dirt3_wmgl_install(void);
++void *dirt3_wmgl_native_proc(const char *name);
++void *dirt3_wmgl_proc(const char *name);
++void *dirt3_wmgl_context_key(void);
++void *dirt3_wmgl_share_key(void);
++void dirt3_wmgl_adopt_current(void);
++CGLError dirt3_wmgl_set_current(CGLContextObj context);
++CGLError dirt3_wmgl_flush(CGLContextObj context);
++CGLError dirt3_wmgl_set_parameter(CGLContextObj context, CGLContextParameter name, const GLint *value);
++CGLError dirt3_wmgl_enable(CGLContextObj context, CGLContextEnable name);
++CGLError dirt3_wmgl_disable(CGLContextObj context, CGLContextEnable name);
++CGLError dirt3_wmgl_clear_drawable(CGLContextObj context);
++void dirt3_wmgl_forget(CGLContextObj context);
++
++#define DIRT3_GL(function) ({ \
++    static __typeof__(&function) metal_function; \
++    __typeof__(&function) selected = &function; \
++    if (dirt3_wmgl_enabled()) { \
++        selected = __atomic_load_n(&metal_function, __ATOMIC_RELAXED); \
++        if (!selected) { \
++            selected = (__typeof__(&function))dirt3_wmgl_proc(#function); \
++            __atomic_store_n(&metal_function, selected, __ATOMIC_RELAXED); \
++        } \
++    } \
++    selected; \
++})
+diff --git a/src/dirt3_wmgl.m b/src/dirt3_wmgl.m
+new file mode 100644
+index 0000000..7523f2f
+--- /dev/null
++++ b/src/dirt3_wmgl.m
+@@ -0,0 +1,516 @@
++#import <AppKit/AppKit.h>
++#import <QuartzCore/CAMetalLayer.h>
++#import <objc/runtime.h>
++#include <OpenGL/gl.h>
++#include <dlfcn.h>
++#include <pthread.h>
++#include <winemetalgl/driver.h>
++#include "dirt3_wmgl.h"
++#include "mac32.h"
++
++#define API(name) static __typeof__(&wmgl_ ## name) metal_ ## name
++API(initialize);
++API(get_pixel_formats);
++API(surface_create_window);
++API(surface_create_pbuffer);
++API(surface_destroy);
++API(surface_flush);
++API(surface_swap);
++API(context_create);
++API(context_destroy);
++API(make_current);
++API(make_current_cgl);
++API(get_proc_address);
++API(set_buffer_memory);
++API(renderer_string);
++#undef API
++
++extern void *dirt3_wmgl_apple_proc(const char *);
++extern void dirt3_wmgl_apple_forget_context(void *);
++extern void dirt3_wmgl_apple_forget_share(void *);
++
++struct retired_surface {
++    wmgl_surface *surface;
++    struct retired_surface *next;
++};
++
++struct metal_context {
++    CGLContextObj cgl;
++    CGLShareGroupObj share;
++    wmgl_context *context;
++    wmgl_surface *surface;
++    wmgl_surface *pbuffer;
++    struct retired_surface *retired;
++    NSView *view;
++    NSView *metal_view;
++    int format, width, height, interval, legacy;
++    int backing_width, backing_height;
++    bool has_window, uses_backing_size;
++    struct metal_context *next;
++};
++
++static struct metal_context *contexts;
++static pthread_mutex_t contexts_lock = PTHREAD_MUTEX_INITIALIZER;
++static _Thread_local struct metal_context *active;
++static _Thread_local wmgl_surface *active_surface;
++static const char *library_path;
++static struct wmgl_pixel_format formats[256];
++static unsigned format_count;
++
++@interface Dirt3MetalView : NSView
++@end
++@implementation Dirt3MetalView
++- (NSView *)hitTest:(NSPoint)point { return nil; }
++@end
++
++int dirt3_wmgl_enabled(void) { return library_path != NULL; }
++
++static void *allocate_guest_buffer(size_t size)
++{
++    return size <= UINT32_MAX ? G2H(gmemalign(65536, (uint32_t)size)) : NULL;
++}
++
++static void release_guest_buffer(void *address, size_t size)
++{
++    gfree((g32)(uintptr_t)address);
++}
++
++static int choose_format(CGLPixelFormatObj pixel)
++{
++    GLint samples = 0, depth = 0, stencil = 0;
++    CGLDescribePixelFormat(pixel, 0, kCGLPFASamples, &samples);
++    CGLDescribePixelFormat(pixel, 0, kCGLPFADepthSize, &depth);
++    CGLDescribePixelFormat(pixel, 0, kCGLPFAStencilSize, &stencil);
++    unsigned best_score = UINT_MAX;
++    int selected = 0;
++    for (unsigned i = 0; i < format_count; i++) {
++        const struct wmgl_pixel_format *f = &formats[i];
++        if (!f->draw_to_window || !f->double_buffer ||
++            f->red_bits != 8 || f->alpha_bits != 8 || f->float_components || f->srgb_capable)
++            continue;
++        unsigned score = 16 * abs(MAX(1, f->samples) - MAX(1, samples)) +
++            abs(f->depth_bits - depth) + 2 * abs(f->stencil_bits - stencil);
++        if (score < best_score) {
++            selected = i + 1;
++            best_score = score;
++        }
++    }
++    if (!selected) die("WineMetalGL has no usable color format");
++    return selected;
++}
++
++static struct metal_context *lookup_context(CGLContextObj cgl)
++{
++    if (!cgl) return NULL;
++    pthread_mutex_lock(&contexts_lock);
++    for (struct metal_context *item = contexts; item; item = item->next) {
++        if (item->cgl == cgl) {
++            pthread_mutex_unlock(&contexts_lock);
++            return item;
++        }
++    }
++    pthread_mutex_unlock(&contexts_lock);
++
++    // Never take a native CGL lock while holding the context registry lock.
++    CGLShareGroupObj share = CGLGetShareGroup(cgl);
++    CGLPixelFormatObj pixel = CGLGetPixelFormat(cgl);
++    GLint profile = 0;
++    CGLDescribePixelFormat(pixel, 0, kCGLPFAOpenGLProfile, &profile);
++    int format = choose_format(pixel);
++
++    pthread_mutex_lock(&contexts_lock);
++    wmgl_context *shared = NULL;
++    for (struct metal_context *item = contexts; item; item = item->next) {
++        if (item->cgl == cgl) {
++            pthread_mutex_unlock(&contexts_lock);
++            return item;
++        }
++        if (item->share == share) shared = item->context;
++    }
++    struct metal_context *item = calloc(1, sizeof *item);
++    if (!item) die("WineMetalGL could not allocate a context");
++    item->cgl = cgl;
++    item->share = share;
++    item->legacy = profile == 0 || profile == kCGLOGLPVersion_Legacy;
++    item->format = format;
++    const int attrs[] = {0x2091, item->legacy ? 2 : 4, 0x2092, 1, 0x9126, item->legacy ? 2 : 1, 0};
++    int error = 0;
++    item->context = metal_context_create(item->format, shared, attrs, &error);
++    item->surface = item->pbuffer = metal_surface_create_pbuffer(item->format, 32, 32);
++    if (!item->context || !item->surface) die("WineMetalGL context creation failed (%d)", error);
++    item->next = contexts;
++    contexts = item;
++    LOG("Metal context %p for CGL %p, profile %#x, shared %p, samples %d\n",
++        item->context, cgl, profile, shared, formats[item->format - 1].samples);
++    pthread_mutex_unlock(&contexts_lock);
++    return item;
++}
++
++static void select_context(struct metal_context *item)
++{
++    wmgl_surface *surface = item ? __atomic_load_n(&item->surface, __ATOMIC_ACQUIRE) : NULL;
++    if (active == item && active_surface == surface) return;
++    // Preserve the default on offscreen contexts and actual context switches.
++    __typeof__(metal_make_current) make_current =
++        !item && active && active->has_window && metal_make_current_cgl
++        ? metal_make_current_cgl : metal_make_current;
++    if (!make_current(item ? item->context : NULL, surface, surface))
++        die("WineMetalGL could not select the guest context");
++    active = item;
++    active_surface = surface;
++}
++
++void *dirt3_wmgl_context_key(void) { return active; }
++void *dirt3_wmgl_share_key(void) { return active ? active->share : NULL; }
++
++void dirt3_wmgl_adopt_current(void)
++{
++    if (!dirt3_wmgl_enabled()) return;
++    if (active) {
++        select_context(active);
++        return;
++    }
++    CGLContextObj cgl = CGLGetCurrentContext();
++    if (cgl) select_context(lookup_context(cgl));
++}
++
++CGLError dirt3_wmgl_set_current(CGLContextObj cgl)
++{
++    if (!dirt3_wmgl_enabled()) return CGLSetCurrentContext(cgl);
++    if (active && active->cgl == cgl && CGLGetCurrentContext() == cgl) {
++        select_context(active);
++        return kCGLNoError;
++    }
++    CGLError result = CGLSetCurrentContext(cgl);
++    if (result == kCGLNoError) select_context(lookup_context(cgl));
++    return result;
++}
++
++static void attach_metal_view(struct metal_context *item)
++{
++    NSView *view = item->view;
++    if (!view || ![view window]) return;
++    NSSize size = [view bounds].size;
++    if (size.width < 1 || size.height < 1) return;
++    const bool game_backing = item->uses_backing_size && item->backing_width > 0 && item->backing_height > 0;
++    int width = game_backing ? item->backing_width : (int)lround(size.width);
++    int height = game_backing ? item->backing_height : (int)lround(size.height);
++    if (item->metal_view) {
++        if (width != item->width || height != item->height) {
++            item->width = width;
++            item->height = height;
++            metal_surface_flush(item->surface, WMGL_FLUSH_UPDATED, width, height, item->interval);
++        }
++        return;
++    }
++
++    NSView *child = [[Dirt3MetalView alloc] initWithFrame:[view bounds]];
++    [child setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
++    CAMetalLayer *layer = [CAMetalLayer layer];
++    [layer setOpaque:YES];
++    [layer setContentsScale:1];
++    [child setLayer:layer];
++    [child setWantsLayer:YES];
++    [view addSubview:child positioned:NSWindowAbove relativeTo:nil];
++    wmgl_surface *surface = metal_surface_create_window(layer, item->format, width, height);
++    if (!surface) die("WineMetalGL could not create the game window's surface");
++    item->metal_view = child;
++    item->width = width;
++    item->height = height;
++    item->has_window = true;
++    metal_surface_flush(surface, WMGL_FLUSH_INTERVAL, width, height, item->interval);
++    __atomic_store_n(&item->surface, surface, __ATOMIC_RELEASE);
++    LOG("Metal drawable %dx%d on %s (%p)\n", width, height, object_getClassName(view), item->cgl);
++}
++
++static void resize_backing_surface(struct metal_context *item)
++{
++    if ([NSThread isMainThread]) {
++        attach_metal_view(item);
++    } else if (item->uses_backing_size && item->backing_width > 0 && item->backing_height > 0) {
++        item->width = item->backing_width;
++        item->height = item->backing_height;
++        metal_surface_flush(item->surface, WMGL_FLUSH_UPDATED, item->width, item->height, item->interval);
++    }
++}
++
++CGLError dirt3_wmgl_flush(CGLContextObj cgl)
++{
++    if (!dirt3_wmgl_enabled()) return CGLFlushDrawable(cgl);
++    struct metal_context *item = lookup_context(cgl);
++    if (!item) return kCGLBadContext;
++    if (!item->has_window && item->view && [NSThread isMainThread])
++        attach_metal_view(item);
++    select_context(item);
++    return metal_surface_swap(active_surface) ? kCGLNoError : kCGLBadDrawable;
++}
++
++CGLError dirt3_wmgl_set_parameter(CGLContextObj cgl, CGLContextParameter parameter, const GLint *value)
++{
++    CGLError result = CGLSetParameter(cgl, parameter, value);
++    if (!dirt3_wmgl_enabled() || !cgl || !value) return result;
++    if (parameter == kCGLCPSwapInterval) {
++        struct metal_context *item = lookup_context(cgl);
++        item->interval = *value;
++        metal_surface_flush(item->surface, WMGL_FLUSH_INTERVAL, item->width, item->height, *value);
++    } else if (parameter == kCGLCPSurfaceBackingSize) {
++        struct metal_context *item = lookup_context(cgl);
++        item->backing_width = value[0];
++        item->backing_height = value[1];
++        LOG("Metal requested backing size %dx%d for CGL %p\n", value[0], value[1], cgl);
++        if (item->has_window && item->uses_backing_size)
++            resize_backing_surface(item);
++    }
++    return result;
++}
++
++static void set_backing_size_enabled(CGLContextObj cgl, CGLContextEnable name, bool enabled)
++{
++    if (!dirt3_wmgl_enabled() || !cgl || name != kCGLCESurfaceBackingSize) return;
++    struct metal_context *item = lookup_context(cgl);
++    item->uses_backing_size = enabled;
++    if (item->has_window) resize_backing_surface(item);
++}
++
++CGLError dirt3_wmgl_enable(CGLContextObj cgl, CGLContextEnable name)
++{
++    CGLError result = CGLEnable(cgl, name);
++    set_backing_size_enabled(cgl, name, true);
++    return result;
++}
++
++CGLError dirt3_wmgl_disable(CGLContextObj cgl, CGLContextEnable name)
++{
++    CGLError result = CGLDisable(cgl, name);
++    set_backing_size_enabled(cgl, name, false);
++    return result;
++}
++
++static void detach_metal_view(CGLContextObj cgl)
++{
++    if (dirt3_wmgl_enabled() && cgl) {
++        struct metal_context *item = lookup_context(cgl);
++        if (item->metal_view) {
++            NSView *child = item->metal_view;
++            struct retired_surface *old = malloc(sizeof *old);
++            if (!old) die("WineMetalGL could not retain detached drawable");
++            old->surface = __atomic_exchange_n(&item->surface, item->pbuffer, __ATOMIC_ACQ_REL);
++            old->next = item->retired;
++            item->retired = old;
++            item->metal_view = nil;
++            item->has_window = false;
++            if (active == item) select_context(item);
++            if ([NSThread isMainThread]) {
++                [child removeFromSuperview];
++                [child release];
++            } else {
++                dispatch_async(dispatch_get_main_queue(), ^{
++                    [child removeFromSuperview];
++                    [child release];
++                });
++            }
++        }
++        item->view = nil;
++    }
++}
++
++CGLError dirt3_wmgl_clear_drawable(CGLContextObj cgl)
++{
++    detach_metal_view(cgl);
++    return CGLClearDrawable(cgl);
++}
++
++void dirt3_wmgl_forget(CGLContextObj cgl)
++{
++    if (!dirt3_wmgl_enabled() || !cgl) return;
++    pthread_mutex_lock(&contexts_lock);
++    struct metal_context **link = &contexts;
++    while (*link && (*link)->cgl != cgl) link = &(*link)->next;
++    struct metal_context *item = *link;
++    if (item) *link = item->next;
++    bool last = true;
++    if (item)
++        for (struct metal_context *peer = contexts; peer; peer = peer->next)
++            if (peer->share == item->share) last = false;
++    pthread_mutex_unlock(&contexts_lock);
++    if (!item) return;
++    dirt3_wmgl_apple_forget_context(item);
++    if (active == item) select_context(NULL);
++    if (last) dirt3_wmgl_apple_forget_share(item->share);
++    NSView *child = item->metal_view;
++    if (child)
++        dispatch_async(dispatch_get_main_queue(), ^{
++            [child removeFromSuperview];
++            [child release];
++        });
++    metal_context_destroy(item->context);
++    if (item->surface != item->pbuffer) metal_surface_destroy(item->surface);
++    // The driver holds raw drawable pointers. Keep detached surfaces until the
++    // context that may still have one bound is gone.
++    while (item->retired) {
++        struct retired_surface *old = item->retired;
++        item->retired = old->next;
++        metal_surface_destroy(old->surface);
++        free(old);
++    }
++    metal_surface_destroy(item->pbuffer);
++    free(item);
++}
++
++static NSView *(*original_view)(id, SEL);
++static void (*original_dealloc)(id, SEL);
++
++static void appkit_set_view(NSOpenGLContext *self, SEL sel, NSView *view)
++{
++    CGLContextObj cgl = [self CGLContextObj];
++    struct metal_context *item = lookup_context(cgl);
++    if (!item) return;
++    if (item->view != view) detach_metal_view(cgl);
++    item->view = view;
++    if (view && [NSThread isMainThread]) attach_metal_view(item);
++}
++
++static NSView *appkit_view(NSOpenGLContext *self, SEL sel)
++{
++    struct metal_context *item = lookup_context([self CGLContextObj]);
++    return item ? item->view : original_view(self, sel);
++}
++
++static void appkit_update(NSOpenGLContext *self, SEL sel)
++{
++    struct metal_context *item = lookup_context([self CGLContextObj]);
++    if (item && [NSThread isMainThread]) attach_metal_view(item);
++}
++
++static void appkit_clear(NSOpenGLContext *self, SEL sel)
++{
++    detach_metal_view([self CGLContextObj]);
++    CGLClearDrawable([self CGLContextObj]);
++}
++
++static void appkit_flush(NSOpenGLContext *self, SEL sel)
++{
++    (void)sel;
++    extern CGLError dirt3_flush_drawable(CGLContextObj);
++    dirt3_flush_drawable([self CGLContextObj]);
++}
++
++static void appkit_dealloc(NSOpenGLContext *self, SEL sel)
++{
++    dirt3_wmgl_forget([self CGLContextObj]);
++    original_dealloc(self, sel);
++}
++
++void *dirt3_wmgl_native_proc(const char *name) { return metal_get_proc_address(name); }
++
++static const GLubyte *compatibility_string(GLenum name)
++{
++    // The game sizes its legacy extension parser for Apple's CGL capabilities.
++    if (name == GL_EXTENSIONS || name == GL_VERSION || name == GL_VENDOR ||
++        name == GL_RENDERER || name == GL_SHADING_LANGUAGE_VERSION)
++        return glGetString(name);
++    const GLubyte *(*next)(GLenum) = dirt3_wmgl_native_proc("glGetString");
++    return next(name);
++}
++
++static void log_arb_errors(GLenum target, GLenum format, GLsizei length, const void *source)
++{
++    static void (*program_string)(GLenum, GLenum, GLsizei, const void *);
++    static void (*get_integer)(GLenum, GLint *);
++    static const GLubyte *(*get_string)(GLenum);
++    static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
++    static struct { GLenum target; char message[120]; } errors[48];
++    static unsigned error_count;
++    if (!program_string) {
++        program_string = dirt3_wmgl_native_proc("glProgramStringARB");
++        get_integer = dirt3_wmgl_native_proc("glGetIntegerv");
++        get_string = dirt3_wmgl_native_proc("glGetString");
++    }
++    program_string(target, format, length, source);
++    GLint position = -1;
++    get_integer(GL_PROGRAM_ERROR_POSITION_ARB, &position);
++    if (position < 0) return;
++    const char *message = (const char *)get_string(GL_PROGRAM_ERROR_STRING_ARB);
++    if (!message) return;
++    pthread_mutex_lock(&log_lock);
++    unsigned i = 0;
++    for (; i < error_count; i++)
++        if (errors[i].target == target && !strncmp(errors[i].message, message, sizeof errors[i].message - 1))
++            break;
++    if (i == error_count && error_count < sizeof errors / sizeof *errors) {
++        errors[i].target = target;
++        snprintf(errors[i].message, sizeof errors[i].message, "%s", message);
++        error_count++;
++        fprintf(stderr, "[mac32] rejected ARB program %#x byte %d: %s\n%.*s\n",
++            target, position, message, length, (const char *)source);
++    }
++    pthread_mutex_unlock(&log_lock);
++}
++
++void *dirt3_wmgl_proc(const char *name)
++{
++    void *apple = dirt3_wmgl_apple_proc(name);
++    if (apple) return apple;
++    if (!strcmp(name, "glGetString")) return compatibility_string;
++    if (!strcmp(name, "glProgramStringARB") && getenv("MAC32_DIRT3_WMGL_SHADER_DIAGNOSTICS"))
++        return log_arb_errors;
++    if (!strcmp(name, "glTextureBarrierNV")) name = "glTextureBarrier";
++    void *fn = dirt3_wmgl_native_proc(name);
++    if (!fn) die("WineMetalGL has no entry point for %s", name);
++    return fn;
++}
++
++static IMP hook_method(Class cls, SEL selector, IMP replacement)
++{
++    Method method = class_getInstanceMethod(cls, selector);
++    if (!method) die("Missing NSOpenGLContext method %s", sel_getName(selector));
++    IMP original = method_getImplementation(method);
++    if (!class_addMethod(cls, selector, replacement, method_getTypeEncoding(method)))
++        method_setImplementation(method, replacement);
++    return original;
++}
++
++void dirt3_wmgl_install(void)
++{
++    const char *path = getenv("MAC32_DIRT3_WINEMETALGL");
++    if (!path || !*path) return;
++    void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++    if (!lib) die("WineMetalGL: %s", dlerror());
++#define LOAD(name) do { \
++    metal_ ## name = dlsym(lib, "wmgl_" #name); \
++    if (!metal_ ## name) die("WineMetalGL has no wmgl_%s", #name); \
++} while (0)
++    LOAD(initialize);
++    LOAD(get_pixel_formats);
++    LOAD(surface_create_window);
++    LOAD(surface_create_pbuffer);
++    LOAD(surface_destroy);
++    LOAD(surface_flush);
++    LOAD(surface_swap);
++    LOAD(context_create);
++    LOAD(context_destroy);
++    LOAD(make_current);
++    const char *batch = getenv("MAC32_DIRT3_WMGL_BATCH_UNBIND");
++    if (batch && !strcmp(batch, "1")) LOAD(make_current_cgl);
++    LOAD(get_proc_address);
++    LOAD(set_buffer_memory);
++    LOAD(renderer_string);
++#undef LOAD
++    if (metal_initialize(WMGL_DRIVER_ABI_VERSION)) die("WineMetalGL initialization failed");
++    metal_set_buffer_memory(allocate_guest_buffer, release_guest_buffer);
++    format_count = MIN(metal_get_pixel_formats(formats, 256, NULL), 256);
++    library_path = path;
++    Class cls = [NSOpenGLContext class];
++#define HOOK(selector, replacement) \
++    hook_method(cls, selector, (IMP)replacement)
++    // Keep the CGL carrier detached. Its backing layer would otherwise share
++    // the game's window with the CAMetalLayer and can lock the render context.
++    original_view = (__typeof__(original_view))HOOK(@selector(view), appkit_view);
++    HOOK(@selector(setView:), appkit_set_view);
++    HOOK(@selector(update), appkit_update);
++    HOOK(@selector(clearDrawable), appkit_clear);
++    original_dealloc = (__typeof__(original_dealloc))HOOK(sel_registerName("dealloc"), appkit_dealloc);
++    HOOK(@selector(flushBuffer), appkit_flush);
++#undef HOOK
++    fprintf(stderr, "[mac32] WineMetalGL active: %s\n", metal_renderer_string());
++}
+diff --git a/src/dirt3_wmgl_apple.c b/src/dirt3_wmgl_apple.c
+new file mode 100644
+index 0000000..361151e
+--- /dev/null
++++ b/src/dirt3_wmgl_apple.c
+@@ -0,0 +1,646 @@
++// Adapts the macOS GL extensions imported by DiRT 3 to WineMetalGL.
++#include <OpenGL/gl.h>
++#include <OpenGL/glext.h>
++#include <pthread.h>
++#include <stdbool.h>
++#include <stdlib.h>
++#include <string.h>
++
++#ifndef GL_MAP_WRITE_BIT
++#define GL_MAP_READ_BIT 0x0001
++#define GL_MAP_WRITE_BIT 0x0002
++#define GL_MAP_FLUSH_EXPLICIT_BIT 0x0010
++#define GL_MAP_UNSYNCHRONIZED_BIT 0x0020
++#define GL_BUFFER_ACCESS_FLAGS 0x911F
++#endif
++
++extern void *dirt3_wmgl_native_proc(const char *name);
++extern void *dirt3_wmgl_context_key(void);
++extern void *dirt3_wmgl_share_key(void);
++
++typedef struct {
++    GLenum (*get_error)(void);
++    void (*get_integer)(GLenum, GLint *);
++    void (*get_buffer_parameter)(GLenum, GLenum, GLint *);
++    void (*get_buffer_parameter64)(GLenum, GLenum, GLint64 *);
++    void *(*map_buffer)(GLenum, GLenum);
++    void *(*map_buffer_range)(GLenum, GLintptr, GLsizeiptr, GLbitfield);
++    void (*flush_buffer_range)(GLenum, GLintptr, GLsizeiptr);
++    void (*delete_buffers)(GLsizei, const GLuint *);
++    void (*delete_textures)(GLsizei, const GLuint *);
++    void (*delete_renderbuffers)(GLsizei, const GLuint *);
++    GLboolean (*is_buffer)(GLuint);
++    GLboolean (*is_texture)(GLuint);
++    GLboolean (*is_renderbuffer)(GLuint);
++    GLboolean (*is_vertex_array)(GLuint);
++    GLsync (*fence_sync)(GLenum, GLbitfield);
++    GLenum (*client_wait)(GLsync, GLbitfield, GLuint64);
++    void (*delete_sync)(GLsync);
++    void (*finish)(void);
++} GL;
++
++static GL gl;
++static pthread_once_t init = PTHREAD_ONCE_INIT;
++
++static void load_gl(void) {
++#define LOAD(field, symbol) gl.field = (__typeof__(gl.field))dirt3_wmgl_native_proc(#symbol)
++    LOAD(get_error, glGetError);
++    LOAD(get_integer, glGetIntegerv);
++    LOAD(get_buffer_parameter, glGetBufferParameteriv);
++    LOAD(get_buffer_parameter64, glGetBufferParameteri64v);
++    LOAD(map_buffer, glMapBuffer);
++    LOAD(map_buffer_range, glMapBufferRange);
++    LOAD(flush_buffer_range, glFlushMappedBufferRange);
++    LOAD(delete_buffers, glDeleteBuffers);
++    LOAD(delete_textures, glDeleteTextures);
++    LOAD(delete_renderbuffers, glDeleteRenderbuffers);
++    LOAD(is_buffer, glIsBuffer);
++    LOAD(is_texture, glIsTexture);
++    LOAD(is_renderbuffer, glIsRenderbuffer);
++    LOAD(is_vertex_array, glIsVertexArray);
++    LOAD(fence_sync, glFenceSync);
++    LOAD(client_wait, glClientWaitSync);
++    LOAD(delete_sync, glDeleteSync);
++    LOAD(finish, glFinish);
++#undef LOAD
++}
++
++typedef struct {
++    GLsync sync;
++    bool reserved;
++} Fence;
++
++typedef struct ContextState {
++    void *key;
++    void *share_key;
++    GLenum error;
++    Fence *fences;
++    size_t capacity;
++    struct ContextState *next;
++} ContextState;
++
++typedef struct ObjectState {
++    GLenum type;
++    GLuint name;
++    bool unmap_explicitly;
++    bool map_unsynchronized;
++    bool purgeable;
++    struct ObjectState *next;
++} ObjectState;
++
++typedef struct ShareState {
++    void *key;
++    ObjectState *objects;
++    struct ShareState *next;
++} ShareState;
++
++static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
++static ContextState *contexts;
++static ShareState *shares;
++
++// State lookups and metadata updates require state_lock. Driver calls,
++// especially waits, are made outside it to leave shared contexts runnable.
++static ContextState *context_state(void *key, bool create) {
++    if (!key) return NULL;
++    for (ContextState *state = contexts; state; state = state->next) {
++        if (state->key == key) return state;
++    }
++    if (!create) return NULL;
++    ContextState *state = calloc(1, sizeof(*state));
++    if (state) {
++        state->key = key;
++        state->share_key = dirt3_wmgl_share_key();
++        state->next = contexts;
++        contexts = state;
++    }
++    return state;
++}
++
++static ShareState *share_state(void *key, bool create) {
++    if (!key) return NULL;
++    for (ShareState *state = shares; state; state = state->next) {
++        if (state->key == key) return state;
++    }
++    if (!create) return NULL;
++    ShareState *state = calloc(1, sizeof(*state));
++    if (state) {
++        state->key = key;
++        state->next = shares;
++        shares = state;
++    }
++    return state;
++}
++
++static ObjectState **object_slot(ShareState *state, GLenum type, GLuint name) {
++    ObjectState **slot = &state->objects;
++    while (*slot && ((*slot)->type != type || (*slot)->name != name)) {
++        slot = &(*slot)->next;
++    }
++    return slot;
++}
++
++static ObjectState *object_state(ObjectState **slot, GLenum type, GLuint name,
++                                 bool create) {
++    if (!*slot && create) {
++        *slot = calloc(1, sizeof(**slot));
++        if (*slot) {
++            (*slot)->type = type;
++            (*slot)->name = name;
++        }
++    }
++    return *slot;
++}
++
++static void remove_object(ObjectState **slot) {
++    ObjectState *object = *slot;
++    if (object) {
++        *slot = object->next;
++        free(object);
++    }
++}
++
++static void set_error(GLenum error) {
++    void *key = dirt3_wmgl_context_key();
++    pthread_mutex_lock(&state_lock);
++    ContextState *state = context_state(key, true);
++    if (state && state->error == GL_NO_ERROR) state->error = error;
++    pthread_mutex_unlock(&state_lock);
++}
++
++static GLenum get_error(void) {
++    void *key = dirt3_wmgl_context_key();
++    GLenum error = gl.get_error();
++    if (error != GL_NO_ERROR) return error;
++
++    pthread_mutex_lock(&state_lock);
++    ContextState *state = context_state(key, false);
++    if (state) {
++        error = state->error;
++        state->error = GL_NO_ERROR;
++    }
++    pthread_mutex_unlock(&state_lock);
++    return error;
++}
++
++void dirt3_wmgl_apple_forget_context(void *key) {
++    pthread_mutex_lock(&state_lock);
++    ContextState **slot = &contexts;
++    while (*slot && (*slot)->key != key) slot = &(*slot)->next;
++    ContextState *state = *slot;
++    if (state) *slot = state->next;
++    pthread_mutex_unlock(&state_lock);
++    if (!state) return;
++
++    // GLsync objects can be deleted from any current context in their share group.
++    // Otherwise WineMetalGL releases them when the share group is destroyed.
++    if (dirt3_wmgl_context_key() && dirt3_wmgl_share_key() == state->share_key) {
++        for (size_t i = 0; i < state->capacity; ++i) {
++            if (state->fences[i].sync) gl.delete_sync(state->fences[i].sync);
++        }
++    }
++    free(state->fences);
++    free(state);
++}
++
++void dirt3_wmgl_apple_forget_share(void *key) {
++    pthread_mutex_lock(&state_lock);
++    ShareState **slot = &shares;
++    while (*slot && (*slot)->key != key) slot = &(*slot)->next;
++    ShareState *state = *slot;
++    if (state) *slot = state->next;
++    pthread_mutex_unlock(&state_lock);
++    if (!state) return;
++    while (state->objects) remove_object(&state->objects);
++    free(state);
++}
++
++static void gen_fences(GLsizei count, GLuint *names) {
++    if (count < 0) {
++        set_error(GL_INVALID_VALUE);
++        return;
++    }
++    if (!count || !names) return;
++    void *key = dirt3_wmgl_context_key();
++
++    pthread_mutex_lock(&state_lock);
++    ContextState *state = context_state(key, true);
++    if (!state) {
++        pthread_mutex_unlock(&state_lock);
++        set_error(GL_OUT_OF_MEMORY);
++        return;
++    }
++    size_t available = 0;
++    for (size_t i = 0; i < state->capacity; ++i) {
++        available += !state->fences[i].reserved;
++    }
++    if (available < (size_t)count) {
++        size_t required = state->capacity + (size_t)count - available;
++        size_t capacity = state->capacity ? state->capacity * 2 : 16;
++        if (capacity < required) capacity = required;
++        if (capacity > UINT32_MAX) capacity = UINT32_MAX;
++        Fence *fences = capacity >= required
++            ? realloc(state->fences, capacity * sizeof(*fences))
++            : NULL;
++        if (!fences) {
++            pthread_mutex_unlock(&state_lock);
++            set_error(GL_OUT_OF_MEMORY);
++            return;
++        }
++        memset(fences + state->capacity, 0,
++               (capacity - state->capacity) * sizeof(*fences));
++        state->fences = fences;
++        state->capacity = capacity;
++    }
++    size_t index = 0;
++    for (GLsizei i = 0; i < count; ++i) {
++        while (state->fences[index].reserved) ++index;
++        state->fences[index].reserved = true;
++        names[i] = (GLuint)++index;
++    }
++    pthread_mutex_unlock(&state_lock);
++}
++
++static Fence *find_fence(void *key, GLuint name) {
++    ContextState *state = context_state(key, false);
++    if (!state || !name || name > state->capacity) return NULL;
++    Fence *fence = &state->fences[name - 1];
++    return fence->reserved ? fence : NULL;
++}
++
++static void delete_fences(GLsizei count, const GLuint *names) {
++    if (count < 0) {
++        set_error(GL_INVALID_VALUE);
++        return;
++    }
++    if (!count || !names) return;
++    void *key = dirt3_wmgl_context_key();
++    for (GLsizei i = 0; i < count; ++i) {
++        pthread_mutex_lock(&state_lock);
++        Fence *fence = find_fence(key, names[i]);
++        GLsync sync = fence ? fence->sync : NULL;
++        if (fence) *fence = (Fence){0};
++        pthread_mutex_unlock(&state_lock);
++        if (sync) gl.delete_sync(sync);
++    }
++}
++
++static void set_fence(GLuint name) {
++    void *key = dirt3_wmgl_context_key();
++    pthread_mutex_lock(&state_lock);
++    Fence *fence = find_fence(key, name);
++    pthread_mutex_unlock(&state_lock);
++    if (!fence) {
++        set_error(GL_INVALID_OPERATION);
++        return;
++    }
++    GLsync sync = gl.fence_sync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
++    if (!sync) return;
++    // OpenGL permits only one thread to use a context at a time.
++    pthread_mutex_lock(&state_lock);
++    GLsync old = fence->sync;
++    fence->sync = sync;
++    pthread_mutex_unlock(&state_lock);
++    if (old) gl.delete_sync(old);
++}
++
++static GLboolean is_fence(GLuint name) {
++    void *key = dirt3_wmgl_context_key();
++    pthread_mutex_lock(&state_lock);
++    Fence *fence = find_fence(key, name);
++    bool set = fence && fence->sync;
++    pthread_mutex_unlock(&state_lock);
++    return set ? GL_TRUE : GL_FALSE;
++}
++
++static GLsync get_fence(GLuint name) {
++    void *key = dirt3_wmgl_context_key();
++    pthread_mutex_lock(&state_lock);
++    Fence *fence = find_fence(key, name);
++    GLsync sync = fence ? fence->sync : NULL;
++    pthread_mutex_unlock(&state_lock);
++    if (!fence) set_error(GL_INVALID_OPERATION);
++    return sync;
++}
++
++static GLboolean test_sync(GLsync sync) {
++    GLenum result = gl.client_wait(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
++    return result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED
++        ? GL_TRUE : GL_FALSE;
++}
++
++static GLboolean test_fence(GLuint name) {
++    GLsync sync = get_fence(name);
++    return sync ? test_sync(sync) : GL_TRUE;
++}
++
++static void finish_fence(GLuint name) {
++    GLsync sync = get_fence(name);
++    if (sync) gl.client_wait(sync, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
++}
++
++static bool check_fence_object(GLenum type, GLuint name) {
++    switch (type) {
++        case GL_TEXTURE:
++            if (!name || gl.is_texture(name)) return true;
++            break;
++        case GL_VERTEX_ARRAY:
++            if (!name || gl.is_vertex_array(name)) return true;
++            break;
++        case GL_DRAW_PIXELS_APPLE:
++            return true;
++    }
++    set_error(GL_INVALID_OPERATION);
++    return false;
++}
++
++static void finish_object(GLenum type, GLint name) {
++    if (type == GL_FENCE_APPLE) {
++        finish_fence((GLuint)name);
++    } else if (check_fence_object(type, (GLuint)name)) {
++        // The core GL API has no per-object completion query.
++        gl.finish();
++    }
++}
++
++static GLboolean test_object(GLenum type, GLuint name) {
++    if (type == GL_FENCE_APPLE) return test_fence(name);
++    if (!check_fence_object(type, name)) return GL_TRUE;
++
++    GLsync sync = gl.fence_sync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
++    if (!sync) return GL_FALSE;
++    GLboolean complete = test_sync(sync);
++    gl.delete_sync(sync);
++    return complete;
++}
++
++static GLenum buffer_binding(GLenum target) {
++    switch (target) {
++        case GL_ARRAY_BUFFER: return GL_ARRAY_BUFFER_BINDING;
++        case GL_ELEMENT_ARRAY_BUFFER: return GL_ELEMENT_ARRAY_BUFFER_BINDING;
++        case GL_PIXEL_PACK_BUFFER: return GL_PIXEL_PACK_BUFFER_BINDING;
++        case GL_PIXEL_UNPACK_BUFFER: return GL_PIXEL_UNPACK_BUFFER_BINDING;
++        default: return 0;
++    }
++}
++
++static GLuint bound_buffer(GLenum binding) {
++    GLint name = 0;
++    gl.get_integer(binding, &name);
++    return (GLuint)name;
++}
++
++static GLuint checked_bound_buffer(GLenum target) {
++    GLenum binding = buffer_binding(target);
++    if (!binding) {
++        set_error(GL_INVALID_ENUM);
++        return 0;
++    }
++    GLuint name = bound_buffer(binding);
++    if (!name) set_error(GL_INVALID_OPERATION);
++    return name;
++}
++
++static void buffer_parameter(GLenum target, GLenum pname, GLint value) {
++    if (pname != GL_BUFFER_SERIALIZED_MODIFY_APPLE &&
++        pname != GL_BUFFER_FLUSHING_UNMAP_APPLE) {
++        set_error(GL_INVALID_ENUM);
++        return;
++    }
++    if (value != GL_TRUE && value != GL_FALSE) {
++        set_error(GL_INVALID_VALUE);
++        return;
++    }
++    GLuint name = checked_bound_buffer(target);
++    if (!name) return;
++
++    void *key = dirt3_wmgl_share_key();
++    pthread_mutex_lock(&state_lock);
++    ShareState *share = share_state(key, value == GL_FALSE);
++    ObjectState **slot = share ? object_slot(share, GL_BUFFER_OBJECT_APPLE, name) : NULL;
++    ObjectState *object = slot
++        ? object_state(slot, GL_BUFFER_OBJECT_APPLE, name, value == GL_FALSE)
++        : NULL;
++    if (object) {
++        if (pname == GL_BUFFER_SERIALIZED_MODIFY_APPLE) {
++            object->map_unsynchronized = value == GL_FALSE;
++        } else {
++            object->unmap_explicitly = value == GL_FALSE;
++        }
++        if (!object->map_unsynchronized && !object->unmap_explicitly && !object->purgeable) {
++            remove_object(slot);
++        }
++    }
++    pthread_mutex_unlock(&state_lock);
++    if (!object && value == GL_FALSE) set_error(GL_OUT_OF_MEMORY);
++}
++
++static void get_buffer_parameter(GLenum target, GLenum pname, GLint *value) {
++    if (pname != GL_BUFFER_SERIALIZED_MODIFY_APPLE &&
++        pname != GL_BUFFER_FLUSHING_UNMAP_APPLE) {
++        gl.get_buffer_parameter(target, pname, value);
++        return;
++    }
++    GLuint name = checked_bound_buffer(target);
++    if (!name || !value) return;
++
++    void *key = dirt3_wmgl_share_key();
++    pthread_mutex_lock(&state_lock);
++    ShareState *share = share_state(key, false);
++    ObjectState *object = share ? *object_slot(share, GL_BUFFER_OBJECT_APPLE, name) : NULL;
++    bool disabled = object && (pname == GL_BUFFER_SERIALIZED_MODIFY_APPLE
++        ? object->map_unsynchronized
++        : object->unmap_explicitly);
++    pthread_mutex_unlock(&state_lock);
++    *value = disabled ? GL_FALSE : GL_TRUE;
++}
++
++static void *map_buffer(GLenum target, GLenum access) {
++    GLenum binding = buffer_binding(target);
++    if (!binding || (access != GL_WRITE_ONLY && access != GL_READ_WRITE)) {
++        return gl.map_buffer(target, access);
++    }
++    void *key = dirt3_wmgl_share_key();
++    pthread_mutex_lock(&state_lock);
++    ShareState *share = share_state(key, false);
++    bool has_options = share && share->objects;
++    pthread_mutex_unlock(&state_lock);
++    if (!has_options) return gl.map_buffer(target, access);
++
++    GLuint name = bound_buffer(binding);
++    GLbitfield bits = GL_MAP_WRITE_BIT;
++    pthread_mutex_lock(&state_lock);
++    share = share_state(key, false);
++    ObjectState *object = name && share ? *object_slot(share, GL_BUFFER_OBJECT_APPLE, name) : NULL;
++    if (object && object->unmap_explicitly) bits |= GL_MAP_FLUSH_EXPLICIT_BIT;
++    if (object && object->map_unsynchronized && access == GL_WRITE_ONLY) {
++        bits |= GL_MAP_UNSYNCHRONIZED_BIT;
++    }
++    pthread_mutex_unlock(&state_lock);
++    if (bits == GL_MAP_WRITE_BIT) return gl.map_buffer(target, access);
++
++    GLint64 length = 0;
++    gl.get_buffer_parameter64(target, GL_BUFFER_SIZE, &length);
++    if (!length) return gl.map_buffer(target, access);
++    if (access == GL_READ_WRITE) bits |= GL_MAP_READ_BIT;
++    return gl.map_buffer_range(target, 0, (GLsizeiptr)length, bits);
++}
++
++static void flush_mapped_buffer_range(GLenum target, GLintptr offset, GLsizeiptr length) {
++    if (!checked_bound_buffer(target)) return;
++
++    GLint mapped = GL_FALSE;
++    gl.get_buffer_parameter(target, GL_BUFFER_MAPPED, &mapped);
++    if (!mapped) {
++        set_error(GL_INVALID_OPERATION);
++        return;
++    }
++
++    GLint flags = 0;
++    GLint64 buffer_size = 0;
++    gl.get_buffer_parameter(target, GL_BUFFER_ACCESS_FLAGS, &flags);
++    gl.get_buffer_parameter64(target, GL_BUFFER_SIZE, &buffer_size);
++    if (offset < 0 || length < 0 || offset > buffer_size || length > buffer_size - offset) {
++        set_error(GL_INVALID_VALUE);
++        return;
++    }
++    // With automatic flush enabled, WineMetalGL's shared storage already
++    // makes CPU writes visible and its UnmapBuffer publishes the version.
++    if (flags & GL_MAP_FLUSH_EXPLICIT_BIT) {
++        gl.flush_buffer_range(target, offset, length);
++    }
++}
++
++static bool check_purgeable_object(GLenum type, GLuint name) {
++    bool exists;
++    switch (type) {
++        case GL_BUFFER_OBJECT_APPLE: exists = gl.is_buffer(name); break;
++        case GL_TEXTURE: exists = gl.is_texture(name); break;
++        case GL_RENDERBUFFER_EXT: exists = gl.is_renderbuffer(name); break;
++        default:
++            set_error(GL_INVALID_ENUM);
++            return false;
++    }
++    if (!exists) set_error(GL_INVALID_VALUE);
++    return exists;
++}
++
++static GLenum object_purgeable(GLenum type, GLuint name, GLenum option) {
++    if (option != GL_VOLATILE_APPLE && option != GL_RELEASED_APPLE) {
++        set_error(GL_INVALID_ENUM);
++        return 0;
++    }
++    if (!check_purgeable_object(type, name)) return 0;
++    void *key = dirt3_wmgl_share_key();
++    pthread_mutex_lock(&state_lock);
++    ShareState *share = share_state(key, true);
++    ObjectState *object = share ? object_state(object_slot(share, type, name), type, name, true) : NULL;
++    GLenum error = !object ? GL_OUT_OF_MEMORY
++        : object->purgeable ? GL_INVALID_OPERATION
++        : GL_NO_ERROR;
++    if (error == GL_NO_ERROR) object->purgeable = true;
++    pthread_mutex_unlock(&state_lock);
++    if (error != GL_NO_ERROR) {
++        set_error(error);
++        return 0;
++    }
++    // The extension allows releasing storage at the driver's discretion.
++    // WineMetalGL keeps these objects resident.
++    return GL_VOLATILE_APPLE;
++}
++
++static GLenum object_unpurgeable(GLenum type, GLuint name, GLenum option) {
++    if (option != GL_RETAINED_APPLE && option != GL_UNDEFINED_APPLE) {
++        set_error(GL_INVALID_ENUM);
++        return 0;
++    }
++    if (!check_purgeable_object(type, name)) return 0;
++    void *key = dirt3_wmgl_share_key();
++    pthread_mutex_lock(&state_lock);
++    ShareState *share = share_state(key, false);
++    ObjectState **slot = share ? object_slot(share, type, name) : NULL;
++    bool was_purgeable = slot && *slot && (*slot)->purgeable;
++    if (was_purgeable) {
++        ObjectState *object = *slot;
++        object->purgeable = false;
++        if (!object->map_unsynchronized && !object->unmap_explicitly) remove_object(slot);
++    }
++    pthread_mutex_unlock(&state_lock);
++    if (!was_purgeable) {
++        set_error(GL_INVALID_OPERATION);
++        return 0;
++    }
++    return option;
++}
++
++static void get_object_parameter(GLenum type, GLuint name, GLenum pname, GLint *value) {
++    if (pname != GL_PURGEABLE_APPLE) {
++        set_error(GL_INVALID_ENUM);
++        return;
++    }
++    if (!check_purgeable_object(type, name) || !value) return;
++    void *key = dirt3_wmgl_share_key();
++    pthread_mutex_lock(&state_lock);
++    ShareState *share = share_state(key, false);
++    ObjectState *object = share ? *object_slot(share, type, name) : NULL;
++    *value = object && object->purgeable ? GL_TRUE : GL_FALSE;
++    pthread_mutex_unlock(&state_lock);
++}
++
++static void forget_objects(GLenum type, GLsizei count, const GLuint *names) {
++    if (count <= 0 || !names) return;
++    void *key = dirt3_wmgl_share_key();
++    pthread_mutex_lock(&state_lock);
++    ShareState *share = share_state(key, false);
++    if (share) {
++        for (GLsizei i = 0; i < count; ++i) {
++            remove_object(object_slot(share, type, names[i]));
++        }
++    }
++    pthread_mutex_unlock(&state_lock);
++}
++
++static void delete_buffers(GLsizei count, const GLuint *names) {
++    gl.delete_buffers(count, names);
++    forget_objects(GL_BUFFER_OBJECT_APPLE, count, names);
++}
++
++static void delete_textures(GLsizei count, const GLuint *names) {
++    gl.delete_textures(count, names);
++    forget_objects(GL_TEXTURE, count, names);
++}
++
++static void delete_renderbuffers(GLsizei count, const GLuint *names) {
++    gl.delete_renderbuffers(count, names);
++    forget_objects(GL_RENDERBUFFER_EXT, count, names);
++}
++
++void *dirt3_wmgl_apple_proc(const char *name) {
++    if (!name) return NULL;
++    pthread_once(&init, load_gl);
++#define PROC(symbol, function) if (strcmp(name, #symbol) == 0) return (void *)(function)
++    PROC(glGetError, get_error);
++    PROC(glGenFencesAPPLE, gen_fences);
++    PROC(glDeleteFencesAPPLE, delete_fences);
++    PROC(glSetFenceAPPLE, set_fence);
++    PROC(glIsFenceAPPLE, is_fence);
++    PROC(glTestFenceAPPLE, test_fence);
++    PROC(glFinishFenceAPPLE, finish_fence);
++    PROC(glFinishObjectAPPLE, finish_object);
++    PROC(glTestObjectAPPLE, test_object);
++    PROC(glBufferParameteriAPPLE, buffer_parameter);
++    PROC(glGetBufferParameteriv, get_buffer_parameter);
++    PROC(glGetBufferParameterivARB, get_buffer_parameter);
++    PROC(glMapBuffer, map_buffer);
++    PROC(glMapBufferARB, map_buffer);
++    PROC(glFlushMappedBufferRangeAPPLE, flush_mapped_buffer_range);
++    PROC(glObjectPurgeableAPPLE, object_purgeable);
++    PROC(glObjectUnpurgeableAPPLE, object_unpurgeable);
++    PROC(glGetObjectParameterivAPPLE, get_object_parameter);
++    PROC(glDeleteBuffers, delete_buffers);
++    PROC(glDeleteBuffersARB, delete_buffers);
++    PROC(glDeleteTextures, delete_textures);
++    PROC(glDeleteRenderbuffers, delete_renderbuffers);
++    PROC(glDeleteRenderbuffersEXT, delete_renderbuffers);
++#undef PROC
++    return NULL;
++}
+diff --git a/src/gl_special.c b/src/gl_special.c
+index a9bbc34..0cd28a0 100644
+--- a/src/gl_special.c
++++ b/src/gl_special.c
+@@ -9,6 +9,7 @@
+ #include <pthread.h>
+ #include <stdatomic.h>
+ #include "thunks.h"
++#include "dirt3_wmgl.h"
+ 
+ // array of 32-bit guest pointers -> host array
+ static const void **ptrs(g32 arr, int n)
+@@ -24,14 +25,14 @@ static void t_glShaderSource(uint32_t *args, struct hres *r)
+ {
+ 	(void)r;
+ 	const void **s = ptrs(A(2), (int)A(1));
+-	glShaderSource(A(0), (GLsizei)A(1), (const GLchar *const *)s, A(3) ? G2H(A(3)) : NULL);
++	DIRT3_GL(glShaderSource)(A(0), (GLsizei)A(1), (const GLchar *const *)s, A(3) ? G2H(A(3)) : NULL);
+ 	free(s);
+ }
+ static void t_glShaderSourceARB(uint32_t *args, struct hres *r)
+ {
+ 	(void)r;
+ 	const void **s = ptrs(A(2), (int)A(1));
+-	glShaderSourceARB((GLhandleARB)(uintptr_t)A(0), (GLsizei)A(1), (const GLcharARB **)s, A(3) ? G2H(A(3)) : NULL);
++	DIRT3_GL(glShaderSourceARB)((GLhandleARB)(uintptr_t)A(0), (GLsizei)A(1), (const GLcharARB **)s, A(3) ? G2H(A(3)) : NULL);
+ 	free(s);
+ }
+ static void t_glMultiDrawElements(uint32_t *args, struct hres *r)
+@@ -41,14 +42,14 @@ static void t_glMultiDrawElements(uint32_t *args, struct hres *r)
+ 	int n = (int)A(4);
+ 	const void **h = malloc(sizeof *h * (size_t)(n > 0 ? n : 1));
+ 	for (int i = 0; i < n; i++) h[i] = (const void *)(uintptr_t)((g32 *)G2H(A(3)))[i];
+-	glMultiDrawElements(A(0), G2H(A(1)), A(2), (const GLvoid *const *)h, n);
++	DIRT3_GL(glMultiDrawElements)(A(0), G2H(A(1)), A(2), (const GLvoid *const *)h, n);
+ 	free(h);
+ }
+ static void t_glTransformFeedbackVaryingsEXT(uint32_t *args, struct hres *r)
+ {
+ 	(void)r;
+ 	const void **s = ptrs(A(2), (int)A(1));
+-	glTransformFeedbackVaryingsEXT(A(0), (GLsizei)A(1), (const GLchar *const *)s, A(3));
++	DIRT3_GL(glTransformFeedbackVaryingsEXT)(A(0), (GLsizei)A(1), (const GLchar *const *)s, A(3));
+ 	free(s);
+ }
+ extern void glTransformFeedbackVaryings(GLuint, GLsizei, const GLchar *const *, GLenum);
+@@ -56,7 +57,7 @@ static void t_glTransformFeedbackVaryings(uint32_t *args, struct hres *r)
+ {
+ 	(void)r;
+ 	const void **varyings = ptrs(A(2), (GLsizei)A(1));
+-	glTransformFeedbackVaryings(A(0), (GLsizei)A(1), (const GLchar *const *)varyings, A(3));
++	DIRT3_GL(glTransformFeedbackVaryings)(A(0), (GLsizei)A(1), (const GLchar *const *)varyings, A(3));
+ 	free(varyings);
+ }
+ static void t_glGetAttachedObjectsARB(uint32_t *args, struct hres *r)
+@@ -65,14 +66,14 @@ static void t_glGetAttachedObjectsARB(uint32_t *args, struct hres *r)
+ 	int max = (int)A(1);
+ 	GLhandleARB h[256];
+ 	GLsizei n = 0;
+-	glGetAttachedObjectsARB((GLhandleARB)(uintptr_t)A(0), max < 256 ? max : 256, &n, h);
++	DIRT3_GL(glGetAttachedObjectsARB)((GLhandleARB)(uintptr_t)A(0), max < 256 ? max : 256, &n, h);
+ 	if (A(2)) *(int32_t *)G2H(A(2)) = n;
+ 	for (int i = 0; i < n; i++) ((uint32_t *)G2H(A(3)))[i] = (uint32_t)(uintptr_t)h[i];
+ }
+ // pointer queries: the values were set by the guest, so they fit in 32 bits
+ static void put_ptr(g32 dst, void *p) { *(g32 *)G2H(dst) = (g32)(uintptr_t)p; }
+-static void t_glGetPointerv(uint32_t *args, struct hres *r) { (void)r; void *p = NULL; glGetPointerv(A(0), &p); put_ptr(A(1), p); }
+-static void t_glGetVertexAttribPointerv(uint32_t *args, struct hres *r) { (void)r; void *p = NULL; glGetVertexAttribPointerv(A(0), A(1), &p); put_ptr(A(2), p); }
++static void t_glGetPointerv(uint32_t *args, struct hres *r) { (void)r; void *p = NULL; DIRT3_GL(glGetPointerv)(A(0), &p); put_ptr(A(1), p); }
++static void t_glGetVertexAttribPointerv(uint32_t *args, struct hres *r) { (void)r; void *p = NULL; DIRT3_GL(glGetVertexAttribPointerv)(A(0), A(1), &p); put_ptr(A(2), p); }
+ 
+ // glGetString results are kept for good: programs hold on to them. The
+ // version and extension strings can differ between contexts in one process.
+@@ -101,8 +102,8 @@ static g32 keep_string(const GLubyte *value)
+ 	return address;
+ }
+ 
+-static void t_glGetString(uint32_t *args, struct hres *r) { RET(keep_string(glGetString(A(0)))); }
+-static void t_glGetStringi(uint32_t *args, struct hres *r) { RET(keep_string(glGetStringi(A(0), A(1)))); }
++static void t_glGetString(uint32_t *args, struct hres *r) { RET(keep_string(DIRT3_GL(glGetString)(A(0)))); }
++static void t_glGetStringi(uint32_t *args, struct hres *r) { RET(keep_string(DIRT3_GL(glGetStringi)(A(0), A(1)))); }
+ 
+ // ---- mapped buffers ---------------------------------------------------------
+ // One shadow per buffer object name, kept between maps and freed when the
+@@ -129,19 +130,19 @@ void dirt3_gl_invalidate_buffer_metadata(void)
+ 
+ static void w_glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage)
+ {
+-    glBufferData(target, size, data, usage);
++    DIRT3_GL(glBufferData)(target, size, data, usage);
+     dirt3_gl_invalidate_buffer_metadata();
+ }
+ 
+ static void w_glBufferDataARB(GLenum target, GLsizeiptr size, const void *data, GLenum usage)
+ {
+-    glBufferDataARB(target, size, data, usage);
++    DIRT3_GL(glBufferDataARB)(target, size, data, usage);
+     dirt3_gl_invalidate_buffer_metadata();
+ }
+ 
+ static void w_glBufferParameteriAPPLE(GLenum target, GLenum name, GLint value)
+ {
+-    glBufferParameteriAPPLE(target, name, value);
++    DIRT3_GL(glBufferParameteriAPPLE)(target, name, value);
+     dirt3_gl_invalidate_buffer_metadata();
+ }
+ 
+@@ -163,7 +164,7 @@ static struct mapping *find_buf(GLuint b)
+ static struct mapping *mapping_for(GLenum target, int create)
+ {
+ 	GLint b = 0;
+-	glGetIntegerv(binding_of(target), &b);
++	DIRT3_GL(glGetIntegerv)(binding_of(target), &b);
+ 	struct mapping *m = find_buf((GLuint)b);
+ 	if (m || !create) return m;
+ 	if (nmaps == capmaps) {
+@@ -188,13 +189,13 @@ static void t_glDeleteBuffers(uint32_t *args, struct hres *r)
+ {
+ 	(void)r;
+ 	forget_buffers((GLsizei)A(0), G2H(A(1)));
+-	glDeleteBuffers((GLsizei)A(0), G2H(A(1)));
++	DIRT3_GL(glDeleteBuffers)((GLsizei)A(0), G2H(A(1)));
+ }
+ static void t_glDeleteBuffersARB(uint32_t *args, struct hres *r)
+ {
+ 	(void)r;
+ 	forget_buffers((GLsizei)A(0), G2H(A(1)));
+-	glDeleteBuffersARB((GLsizei)A(0), G2H(A(1)));
++	DIRT3_GL(glDeleteBuffersARB)((GLsizei)A(0), G2H(A(1)));
+ }
+ static g32 shadow_map(struct mapping *m, void *host, uint32_t off, uint32_t size, int read, int write, int explicit_flush)
+ {
+@@ -214,7 +215,7 @@ static g32 shadow_map(struct mapping *m, void *host, uint32_t off, uint32_t size
+ }
+ static void t_glMapBuffer(uint32_t *args, struct hres *r)
+ {
+-	void *h = glMapBuffer(A(0), A(1));
++	void *h = DIRT3_GL(glMapBuffer)(A(0), A(1));
+ 	if (!h) {
+ 		RET(0);
+ 		return;
+@@ -235,8 +236,8 @@ static void t_glMapBuffer(uint32_t *args, struct hres *r)
+         m->metadata_context = context;
+         m->metadata_generation = generation;
+     }
+-    glGetBufferParameteriv(A(0), GL_BUFFER_SIZE, &size);
+-    glGetBufferParameteriv(A(0), GL_BUFFER_FLUSHING_UNMAP_APPLE, &flushable);
++    DIRT3_GL(glGetBufferParameteriv)(A(0), GL_BUFFER_SIZE, &size);
++    DIRT3_GL(glGetBufferParameteriv)(A(0), GL_BUFFER_FLUSHING_UNMAP_APPLE, &flushable);
+     if (!m) m = mapping_for(A(0), 1);
+     RET(shadow_map(m, h, 0, (uint32_t)size, A(1) != GL_WRITE_ONLY, A(1) != GL_READ_ONLY, !flushable));
+ }
+@@ -247,7 +248,7 @@ static void t_glFlushMappedBufferRangeAPPLE(uint32_t *args, struct hres *r)
+ 	if (!m) return;
+ 	memcpy((char *)m->host + A(1), (char *)G2H(m->shadow) + A(1), A(2));
+ 	m->flushed = 1;
+-	glFlushMappedBufferRangeAPPLE(A(0), (GLintptr)A(1), (GLsizeiptr)A(2));
++	DIRT3_GL(glFlushMappedBufferRangeAPPLE)(A(0), (GLintptr)A(1), (GLsizeiptr)A(2));
+ }
+ static void t_glUnmapBuffer(uint32_t *args, struct hres *r)
+ {
+@@ -255,7 +256,7 @@ static void t_glUnmapBuffer(uint32_t *args, struct hres *r)
+ 	if (m && m->write && !(m->explicit_flush && m->flushed))
+ 		memcpy(m->host, G2H(m->shadow), m->size);
+ 	if (m) m->host = NULL;
+-	RET(glUnmapBuffer(A(0)));
++	RET(DIRT3_GL(glUnmapBuffer)(A(0)));
+ }
+ static void t_glGetBufferPointerv(uint32_t *args, struct hres *r)
+ {
+@@ -269,13 +270,13 @@ extern void dirt3_cancel_gpu_query(void);
+ static void w_glBeginQuery(GLenum target, GLuint name)
+ {
+ 	if (target == GL_TIME_ELAPSED_EXT) dirt3_cancel_gpu_query();
+-	glBeginQuery(target, name);
++	DIRT3_GL(glBeginQuery)(target, name);
+ }
+ 
+ static void w_glBeginQueryARB(GLenum target, GLuint name)
+ {
+ 	if (target == GL_TIME_ELAPSED_EXT) dirt3_cancel_gpu_query();
+-	glBeginQueryARB(target, name);
++	DIRT3_GL(glBeginQueryARB)(target, name);
+ }
+ 
+ static struct hfn gls[] = {
+diff --git a/src/main.c b/src/main.c
+index 91fe9b1..aea6547 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -190,6 +190,8 @@ int main(int argc, char **argv)
+ 	low_init();
+ 	cpu_init();
+ 	thunks_init();
++	extern void dirt3_wmgl_install(void);
++	dirt3_wmgl_install();
+ 	load_runtime();
+ 	if (t0) return tier0_test(t0);
+ 	if (selftest) {
+diff --git a/src/objc.m b/src/objc.m
+index 0f9f535..c176a7c 100644
+--- a/src/objc.m
++++ b/src/objc.m
+@@ -21,6 +21,7 @@
+ #include <sys/mman.h>
+ #include <ctype.h>
+ #include "thunks.h"
++#include "dirt3_wmgl.h"
+ 
+ @interface NSInvocation (Private)
+ - (void)invokeUsingIMP:(IMP)imp;
+@@ -579,6 +580,7 @@ static void call_host(id target, Class super_cls, SEL hsel, const char *selname,
+ 	if (!strcmp(selname, "makeCurrentContext") && [target isKindOfClass:[NSOpenGLContext class]]) {
+ 		[(NSOpenGLContext *)target makeCurrentContext];
+ 		gl_last_context = CGLGetCurrentContext();
++		if (dirt3_wmgl_enabled()) dirt3_wmgl_set_current(gl_last_context);
+ 		return;
+ 	}
+ 	// +[ProgramApp sharedApplication] after mac32 made a plain NSApp (see
+@@ -603,9 +605,9 @@ static void call_host(id target, Class super_cls, SEL hsel, const char *selname,
+ 		CGLContextObj gl = CGLGetCurrentContext();
+ 		dispatch_sync(dispatch_get_main_queue(), ^{
+ 			CGLContextObj was = CGLGetCurrentContext();
+-			if (gl) CGLSetCurrentContext(gl);
++			if (gl) dirt3_wmgl_set_current(gl);
+ 			call_host(target, super_cls, hsel, selname, ga, r, sret);
+-			if (gl) CGLSetCurrentContext(was);
++			if (gl) dirt3_wmgl_set_current(was);
+ 		});
+ 		return;
+ 	}
+diff --git a/src/thunks.c b/src/thunks.c
+index 5b0de7d..ff40483 100644
+--- a/src/thunks.c
++++ b/src/thunks.c
+@@ -10,11 +10,18 @@
+ // Return codes: v, i, u, p, l, d, f (d and f come back in st(0)).
+ #include "mac32.h"
+ #include "thunks.h"
++#include "dirt3_gl_trace.h"
++#include "dirt3_wmgl.h"
+ #include <OpenGL/OpenGL.h>
+ #include <string.h>
+ #include <stdarg.h>
+ #include <pthread.h>
+ #include <os/lock.h>
++#include <fcntl.h>
++#include <stdatomic.h>
++#include <sys/mman.h>
++#include <time.h>
++#include <unistd.h>
+ 
+ uint64_t host_invoke(void *fn, const uint64_t ints[6], const double fps[8],
+ 		     const uint64_t *stk, long nstk, double *xmm0_out);
+@@ -24,6 +31,66 @@ static struct hfn *table[MAX_HFN];
+ static uint32_t nhfn;
+ static os_unfair_lock tlock = OS_UNFAIR_LOCK_INIT;
+ 
++// Optional benchmark recording. The sparse mapped file avoids per-call I/O.
++enum { gl_trace_capacity = 1048576, gl_trace_names = MAX_HFN + 8 };
++struct gl_event {
++    uint64_t end, duration, thread, detail;
++    uint32_t operation, site, arg0, arg1;
++};
++static struct gl_trace_file {
++    uint64_t version;
++    _Atomic uint64_t count;
++    char names[gl_trace_names][64];
++    struct gl_event events[gl_trace_capacity];
++} *gl_trace;
++static int gl_trace_calls;
++
++static void init_gl_trace(void)
++{
++    const char *path = getenv("MAC32_GL_TRACE_PATH");
++    if (!path || !*path) return;
++    int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
++    if (fd < 0) { perror("OpenGL trace"); return; }
++    if (!ftruncate(fd, sizeof(*gl_trace))) {
++        void *mem = mmap(NULL, sizeof(*gl_trace), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++        if (mem != MAP_FAILED) gl_trace = mem;
++    }
++    close(fd);
++    if (!gl_trace) { perror("OpenGL trace"); return; }
++    gl_trace->version = 1;
++    gl_trace_calls = getenv("MAC32_GL_TRACE_FRAMES_ONLY") == NULL;
++    static const char *names[] = {
++        "present", "native glMapBuffer", "map GL_BUFFER_SIZE", "map GL_BUFFER_FLUSHING_UNMAP_APPLE",
++        "map glGetIntegerv binding", "guest shadow copy", "native glUnmapBuffer",
++    };
++    for (unsigned i = 0; i < sizeof names / sizeof names[0]; ++i)
++        snprintf(gl_trace->names[gl_trace_present + i], 64, "%s", names[i]);
++}
++
++uint64_t dirt3_gl_trace_begin(void)
++{
++    return gl_trace_calls ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++}
++
++uint64_t dirt3_gl_trace_present_begin(void)
++{
++    return gl_trace ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++}
++
++void dirt3_gl_trace_end(uint32_t operation, uint64_t begin, uint32_t site,
++                        uint32_t arg0, uint32_t arg1, uint64_t detail)
++{
++    if (!begin) return;
++    uint64_t end = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++    if (operation != gl_trace_present && end - begin < 25000) return;
++    uint64_t slot = atomic_fetch_add_explicit(&gl_trace->count, 1, memory_order_relaxed);
++    if (slot >= gl_trace_capacity) return;
++    static _Thread_local uint64_t thread_id;
++    if (!thread_id) pthread_threadid_np(NULL, &thread_id);
++    gl_trace->events[slot] = (struct gl_event){end, end - begin, thread_id, detail,
++                                             operation, site, arg0, arg1};
++}
++
+ // name -> entry hash
+ #define HBITS 14
+ static struct hfn *hash[1 << HBITS];
+@@ -68,6 +135,7 @@ static g32 bind_entry(struct hfn *f)
+ 	if (!f->addr) {
+ 		f->idx = nhfn;
+ 		table[nhfn++] = f;
++		if (gl_trace && f->gl) snprintf(gl_trace->names[f->idx], 64, "%s", f->name);
+ 		f->addr = make_stub(f->idx);
+ 	}
+ 	return f->addr;
+@@ -123,7 +191,18 @@ static void call_missing(uint32_t *args, struct hres *r)
+ }
+ 
+ void call_sig(void *fn, const char *sig, const char *name, uint32_t *a, struct hres *r);
+-static void call_generic(struct hfn *h, uint32_t *a, struct hres *r) { call_sig(h->fn, h->sig, h->name, a, r); }
++static void call_generic(struct hfn *h, uint32_t *a, struct hres *r)
++{
++    void *fn = h->fn;
++    if (h->gl && dirt3_wmgl_enabled() && strncmp(h->name, "_glu", 4)) {
++        fn = __atomic_load_n(&h->metal_fn, __ATOMIC_RELAXED);
++        if (!fn) {
++            fn = dirt3_wmgl_proc(h->name + 1);
++            __atomic_store_n(&h->metal_fn, fn, __ATOMIC_RELAXED);
++        }
++    }
++    call_sig(fn, h->sig, h->name, a, r);
++}
+ 
+ // a dynamically made entry (e.g. one Steam interface method); returns its stub
+ g32 hfn_stub(struct hfn *f)
+@@ -298,13 +377,17 @@ static void gl_adopt_context(const char *name)
+ {
+ 	static int said;
+ 	if (!said++) LOG("%s with no current OpenGL context: using the last one made current\n", name);
+-	CGLSetCurrentContext(gl_last_context);
++	dirt3_wmgl_set_current(gl_last_context);
+ }
+ 
+ void hostcall_dispatch(uint32_t idx, uint32_t *args, struct hres *r)
+ {
+ 	struct hfn *h = table[idx];
+-	if (h->gl && gl_last_context && !CGLGetCurrentContext()) gl_adopt_context(h->name);
++	uint64_t gl_begin = h->gl && gl_trace_calls ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++	if (h->gl) {
++        if (gl_last_context && !CGLGetCurrentContext()) gl_adopt_context(h->name);
++        if (dirt3_wmgl_enabled()) dirt3_wmgl_adopt_current();
++    }
+ 	ring[ring_n++ % RING] = idx;
+ 	if (trace_calls && trace_match(h->name)) fprintf(stderr, "[call] %s\n", h->name);
+ 	switch (h->kind) {
+@@ -313,11 +396,25 @@ void hostcall_dispatch(uint32_t idx, uint32_t *args, struct hres *r)
+ 	case 'M': cur_idx = idx; call_missing(args, r); break;
+ 	case 'C': ((void (*)(struct hfn *, uint32_t *, struct hres *))h->fn)(h, args, r); break;
+ 	default: die("bad host entry %s", h->name);
+-	}
++    }
++    if (gl_begin) {
++        uint32_t arg0 = 0, arg1 = 0;
++        uint64_t detail = 0;
++        if (!strcmp(h->name, "_glReadPixels")) {
++            arg0 = args[2];
++            arg1 = args[3];
++            detail = (uint64_t)args[4] << 32 | args[5];
++        } else if (!strncmp(h->name, "_glMapBuffer", 12)) {
++            arg0 = args[0];
++            arg1 = args[1];
++        }
++        dirt3_gl_trace_end(idx, gl_begin, args[-1], arg0, arg1, detail);
++    }
+ }
+ 
+ void thunks_init(void)
+ {
++	init_gl_trace();
+ 	thunks_libc_init();
+ 	thunks_malloc_zones_init();
+ 	thunks_pthread_init();
+diff --git a/src/thunks.h b/src/thunks.h
+index 8d3fe71..e3c8eb1 100644
+--- a/src/thunks.h
++++ b/src/thunks.h
+@@ -13,6 +13,7 @@ struct hfn {
+ 	const void *ctx;	// C: closure data for fn(h, args, r)
+ 	g32 addr;		// stub or data address once bound
+ 	uint32_t idx;
++	void *metal_fn;
+ 	uint8_t gl;		// an OpenGL/GLU call: needs a current context
+ };
+ 

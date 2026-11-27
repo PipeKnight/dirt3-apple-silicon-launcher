@@ -1,0 +1,570 @@
+diff --git a/src/core/compat/arb_program.cpp b/src/core/compat/arb_program.cpp
+index 905d79b..e6dfa55 100644
+--- a/src/core/compat/arb_program.cpp
++++ b/src/core/compat/arb_program.cpp
+@@ -21,7 +21,7 @@ enum class Input : uint8_t {
+     // vertex: a conventional attribute (index = ConventionalAttrib - kConvVertex) or vertex.attrib[index]
+     Conventional, Generic,
+     // fragment
+-    Color, SecondaryColor, TexCoord, FogCoord, Position,
++    Color, SecondaryColor, TexCoord, FogCoord, Position, Facing,
+ };
+ 
+ struct Operand {
+@@ -33,7 +33,7 @@ struct Operand {
+     // `relative` (component x) when relative >= 0.
+     int offset = 0, relative = -1;
+     uint8_t swizzle[4] = {0, 1, 2, 3};
+-    bool negate = false;
++    bool negate = false, absolute = false;
+     // SWZ: per component 0-3 a source component, 4 zero, 5 one; negated per component.
+     bool extended = false;
+     uint8_t extSelect[4] = {0, 1, 2, 3};
+@@ -48,6 +48,12 @@ enum class Output : uint8_t {
+     Color, Depth,
+ };
+ 
++struct Condition {
++    enum Rule : uint8_t { True, False, EQ, NE, LT, LE, GT, GE } rule = True;
++    int reg = 0;
++    uint8_t swizzle[4] = {0, 1, 2, 3};
++};
++
+ struct Dest {
+     enum Base : uint8_t { Temp, Address, Out, None } base = None;
+     int index = 0;  // Temp/Address register; Out: texcoord unit or colour output
+@@ -56,13 +62,16 @@ struct Dest {
+ };
+ 
+ enum class Op : uint8_t {
+-    ABS, ADD, ARL, CMP, COS, DP3, DP4, DPH, DST, EX2, EXP, FLR, FRC, KIL, LG2, LIT, LOG, LRP, MAD, MAX, MIN, MOV, MUL,
+-    POW, RCP, RSQ, SCS, SGE, SIN, SLT, SUB, SWZ, TEX, TXB, TXP, XPD,
++    ABS, ADD, ARL, CMP, COS, DDX, DDY, DP3, DP4, DPH, DST, EX2, EXP, FLR, FRC, KIL, LG2, LIT, LOG, LRP, MAD, MAX, MIN, MOV, MUL,
++    POW, RCP, RSQ, SCS, SGE, SIN, SLT, SUB, SWZ, TEX, TXB, TXL, TXP, XPD, REP, ENDREP, IF, ELSE, ENDIF, BRK,
+ };
+ 
+ struct Instruction {
+     Op op = Op::MOV;
+     bool saturate = false;
++    bool conditionalKill = false;
++    int updateCondition = -1;
++    Condition condition;
+     Dest dst;
+     Operand src[3];
+     int unit = 0;  // TEX/TXB/TXP
+@@ -79,6 +88,7 @@ struct ArrayDecl {
+ 
+ struct Body {
+     int temps = 0, addresses = 0;
++    unsigned conditionRegisters = 0;
+     std::vector<ArrayDecl> arrays;
+     std::vector<Instruction> code;
+ };
+@@ -222,6 +232,7 @@ public:
+             statement();
+         }
+         // Anything after END is ignored.
++        if (!flowBlocks_.empty()) fail("unterminated flow block");
+         if (out_.instructions > Limits::kInstructions) failAt(0, "too many instructions");
+         if (body_->temps > Limits::kTemporaries) failAt(0, "too many temporaries");
+         if (out_.parameters > Limits::kParameters) failAt(0, "too many parameters");
+@@ -325,6 +336,11 @@ private:
+         else if (word == "ATTRIB") attribStatement();
+         else if (word == "PARAM") paramStatement();
+         else if (word == "TEMP") registers(Symbol::Temp);
++        else if (!vertex() && nvProgram_ && (word == "SHORT" || word == "LONG")) {
++            // Both requested minimum storage precisions fit the existing vec4 registers.
++            if (isIdent("OUTPUT")) { advance(); outputStatement(); }
++            else { expectIdent("TEMP"); registers(Symbol::Temp); }
++        }
+         else if (word == "ADDRESS" && vertex()) registers(Symbol::Address);
+         else if (word == "OUTPUT") outputStatement();
+         else if (word == "ALIAS") aliasStatement();
+@@ -348,6 +364,9 @@ private:
+             out_.drawBuffers = true;
+         } else if (!vertex() && name == "ARB_fragment_program_shadow") {
+             shadow_ = true;
++        } else if ((vertex() && name == "NV_vertex_program3") || (!vertex() && name == "NV_fragment_program2")) {
++            // Accept the implemented NVIDIA syntax without advertising the full extensions.
++            nvProgram_ = true;
+         } else {
+             failAt(at, "unsupported option: " + name);
+         }
+@@ -770,6 +789,8 @@ private:
+             } else if (what == "position") {
+                 input = Input::Position;
+                 out_.positionRead = true;
++            } else if (nvProgram_ && what == "facing") {
++                input = Input::Facing;
+             } else {
+                 failAt(at, "fragment attribute expected");
+             }
+@@ -870,6 +891,38 @@ private:
+         return mask;
+     }
+ 
++    Condition conditionTest() {
++        const int pos = tok_.pos;
++        std::string name = ident();
++        Condition c;
++        if (vertex() && name.size() == 3 && (name[2] == '0' || name[2] == '1')) {
++            c.reg = name[2] - '0';
++            name.resize(2);
++        }
++        if (name == "TR") c.rule = Condition::True;
++        else if (name == "FL") c.rule = Condition::False;
++        else if (name == "EQ") c.rule = Condition::EQ;
++        else if (name == "NE") c.rule = Condition::NE;
++        else if (name == "LT") c.rule = Condition::LT;
++        else if (name == "LE") c.rule = Condition::LE;
++        else if (name == "GT") c.rule = Condition::GT;
++        else if (name == "GE") c.rule = Condition::GE;
++        else failAt(pos, "condition code test expected");
++        if (c.rule != Condition::True && c.rule != Condition::False) body_->conditionRegisters |= 1u << c.reg;
++        if (is(".")) {
++            advance();
++            swizzle(c.swizzle);
++        }
++        return c;
++    }
++
++    Condition conditionMask() {
++        expect("(");
++        Condition c = conditionTest();
++        expect(")");
++        return c;
++    }
++
+     // A source operand; `scalar`: a scalar suffix is required.
+     Operand source(bool scalar) {
+         Operand o;
+@@ -885,6 +938,10 @@ private:
+                 return finishSource(o, scalar);
+             }
+         }
++        if (nvProgram_ && is("|")) {
++            o.absolute = true;
++            advance();
++        }
+         const int pos = tok_.pos;
+         if (is("{")) {
+             o.base = Operand::Static;
+@@ -959,6 +1016,7 @@ private:
+         } else if (scalar) {
+             fail("scalar suffix expected");
+         }
++        if (o.absolute) expect("|");
+         return o;
+     }
+ 
+@@ -989,7 +1047,7 @@ private:
+         }
+     }
+ 
+-    Dest dest(bool address) {
++    Dest dest(bool address, Condition& condition) {
+         Dest d;
+         const int pos = tok_.pos;
+         if (isIdent("result")) {
+@@ -1021,6 +1079,7 @@ private:
+             d.mask = writeMask();
+         }
+         if (address && d.mask != 1) failAt(pos, "ARL writes the x component");
++        if (nvProgram_ && is("(")) condition = conditionMask();
+         if (d.base == Dest::Out) noteOutput(d);
+         return d;
+     }
+@@ -1051,44 +1110,69 @@ private:
+         };
+         static const Info kOps[] = {
+             {"ABS", Op::ABS, 'v', 1, 3}, {"ADD", Op::ADD, 'v', 2, 3}, {"ARL", Op::ARL, 'a', 1, 1}, {"CMP", Op::CMP, 'v', 3, 2},
+-            {"COS", Op::COS, 's', 1, 2}, {"DP3", Op::DP3, 'v', 2, 3}, {"DP4", Op::DP4, 'v', 2, 3}, {"DPH", Op::DPH, 'v', 2, 3},
++            {"COS", Op::COS, 's', 1, 3}, {"DDX", Op::DDX, 'v', 1, 2}, {"DDY", Op::DDY, 'v', 1, 2},
++            {"DP3", Op::DP3, 'v', 2, 3}, {"DP4", Op::DP4, 'v', 2, 3}, {"DPH", Op::DPH, 'v', 2, 3},
+             {"DST", Op::DST, 'v', 2, 3}, {"EX2", Op::EX2, 's', 1, 3}, {"EXP", Op::EXP, 's', 1, 1}, {"FLR", Op::FLR, 'v', 1, 3},
+             {"FRC", Op::FRC, 'v', 1, 3}, {"KIL", Op::KIL, 'k', 1, 2}, {"LG2", Op::LG2, 's', 1, 3}, {"LIT", Op::LIT, 'v', 1, 3},
+             {"LOG", Op::LOG, 's', 1, 1}, {"LRP", Op::LRP, 'v', 3, 2}, {"MAD", Op::MAD, 'v', 3, 3}, {"MAX", Op::MAX, 'v', 2, 3},
+             {"MIN", Op::MIN, 'v', 2, 3}, {"MOV", Op::MOV, 'v', 1, 3}, {"MUL", Op::MUL, 'v', 2, 3}, {"POW", Op::POW, 's', 2, 3},
+             {"RCP", Op::RCP, 's', 1, 3}, {"RSQ", Op::RSQ, 's', 1, 3}, {"SCS", Op::SCS, 's', 1, 2}, {"SGE", Op::SGE, 'v', 2, 3},
+-            {"SIN", Op::SIN, 's', 1, 2}, {"SLT", Op::SLT, 'v', 2, 3}, {"SUB", Op::SUB, 'v', 2, 3}, {"SWZ", Op::SWZ, 'w', 1, 3},
+-            {"TEX", Op::TEX, 't', 1, 2}, {"TXB", Op::TXB, 't', 1, 2}, {"TXP", Op::TXP, 't', 1, 2}, {"XPD", Op::XPD, 'v', 2, 3},
++            {"SIN", Op::SIN, 's', 1, 3}, {"SLT", Op::SLT, 'v', 2, 3}, {"SUB", Op::SUB, 'v', 2, 3}, {"SWZ", Op::SWZ, 'w', 1, 3},
++            {"TEX", Op::TEX, 't', 1, 2}, {"TXB", Op::TXB, 't', 1, 2}, {"TXL", Op::TXL, 't', 1, 3},
++            {"TXP", Op::TXP, 't', 1, 2}, {"XPD", Op::XPD, 'v', 2, 3}, {"REP", Op::REP, 'f', 1, 2},
++            {"ENDREP", Op::ENDREP, 'f', 0, 2}, {"IF", Op::IF, 'f', 0, 2}, {"ELSE", Op::ELSE, 'f', 0, 2},
++            {"ENDIF", Op::ENDIF, 'f', 0, 2}, {"BRK", Op::BRK, 'f', 0, 2},
+         };
+         std::string name = word;
+         bool saturate = false;
+-        if (!vertex() && name.size() > 4 && name.compare(name.size() - 4, 4, "_SAT") == 0) {
++        if ((!vertex() || nvProgram_) && name.size() > 4 && name.compare(name.size() - 4, 4, "_SAT") == 0) {
+             saturate = true;
+             name.resize(name.size() - 4);
+         }
++        int updateCondition = -1;
++        if (nvProgram_ && vertex() && name.size() > 4 && name[name.size() - 2] == 'C' &&
++            (name.back() == '0' || name.back() == '1')) {
++            updateCondition = name.back() - '0';
++            name.resize(name.size() - 2);
++        } else if (nvProgram_ && name.size() > 3 && name.back() == 'C') {
++            updateCondition = 0;
++            name.pop_back();
++        }
++        if (!vertex() && nvProgram_ && name.size() > 3 && (name.back() == 'H' || name.back() == 'R')) {
++            // These suffixes give minimum operation precision. Both use our float path.
++            name.pop_back();
++        }
+         const Info* info = nullptr;
+         for (const Info& i : kOps)
+             if (name == i.name && (i.stages & (vertex() ? 1 : 2))) info = &i;
+         if (!info) failAt(pos, "instruction expected: " + word);
+-        if (saturate && info->op == Op::KIL) failAt(pos, "KIL takes no _SAT");
++        if (!nvProgram_ && (info->shape == 'f' || info->op == Op::DDX || info->op == Op::DDY || info->op == Op::TXL ||
++                           (vertex() && (info->op == Op::COS || info->op == Op::SIN))))
++            failAt(pos, "NVIDIA program option required: " + word);
++        if ((saturate && (info->op == Op::ARL || info->shape == 'k' || info->shape == 'f')) ||
++            (updateCondition >= 0 && (info->shape == 'k' || info->shape == 'f')))
++            failAt(pos, "invalid instruction modifier: " + word);
+         Instruction in;
+         in.op = info->op;
+         in.saturate = saturate;
++        in.updateCondition = updateCondition;
++        if (updateCondition >= 0) body_->conditionRegisters |= 1u << updateCondition;
+         ++out_.instructions;
+         switch (info->shape) {
+         case 'k':
+-            in.src[0] = source(false);
++            if (nvProgram_ && is("(")) { in.condition = conditionMask(); in.conditionalKill = true; }
++            else in.src[0] = source(false);
+             out_.kills = true;
+             ++out_.texInstructions;
+             break;
+         case 'a':
+-            in.dst = dest(true);
++            in.dst = dest(true, in.condition);
+             expect(",");
+             in.src[0] = source(true);
+             ++out_.aluInstructions;
+             break;
+         case 'w':
+-            in.dst = dest(false);
++            in.dst = dest(false, in.condition);
+             expect(",");
+             in.src[0] = source(false);
+             if (in.src[0].swizzle[0] != 0 || in.src[0].swizzle[1] != 1 || in.src[0].swizzle[2] != 2 || in.src[0].swizzle[3] != 3)
+@@ -1097,7 +1181,7 @@ private:
+             ++out_.aluInstructions;
+             break;
+         case 't': {
+-            in.dst = dest(false);
++            in.dst = dest(false, in.condition);
+             expect(",");
+             in.src[0] = source(false);
+             expect(",");
+@@ -1125,14 +1209,19 @@ private:
+             else if (shadow_ && target == "SHADOW2D") in.target = TexTarget::Shadow2D;
+             else if (shadow_ && target == "SHADOWRECT") in.target = TexTarget::ShadowRect;
+             else failAt(tpos, "texture target expected");
++            if (in.op == Op::TXL && (in.target == TexTarget::Rect || in.target == TexTarget::ShadowRect))
++                failAt(tpos, "rectangle textures do not have an explicit mip level");
+             TexTarget& used = out_.textures[in.unit];
+             if (used != TexTarget::None && used != in.target) failAt(upos, "texture image unit used with two targets");
+             used = in.target;
+             ++out_.texInstructions;
+             break;
+         }
++        case 'f':
++            flowInstruction(in, pos);
++            break;
+         default:
+-            in.dst = dest(false);
++            in.dst = dest(false, in.condition);
+             for (int i = 0; i < info->sources; ++i) {
+                 expect(",");
+                 in.src[i] = source(info->shape == 's');
+@@ -1143,6 +1232,31 @@ private:
+         body_->code.push_back(std::move(in));
+     }
+ 
++    void flowInstruction(Instruction& in, int pos) {
++        if (in.op == Op::IF || in.op == Op::REP) {
++            if (flowBlocks_.size() >= 32) failAt(pos, "too many nested flow blocks");
++            if (in.op == Op::IF) in.condition = conditionTest();
++            else {
++                in.src[0] = source(false);
++                if (in.src[0].base != Operand::Array && in.src[0].base != Operand::Static)
++                    failAt(pos, "REP count must be a program parameter");
++            }
++            flowBlocks_.push_back(in.op);
++        } else if (in.op == Op::BRK) {
++            if (std::find(flowBlocks_.begin(), flowBlocks_.end(), Op::REP) == flowBlocks_.end())
++                failAt(pos, "BRK outside a loop");
++            if (is("(")) in.condition = conditionMask();
++        } else if (in.op == Op::ELSE) {
++            if (flowBlocks_.empty() || flowBlocks_.back() != Op::IF) failAt(pos, "ELSE without matching IF");
++            flowBlocks_.back() = Op::ELSE;
++        } else {
++            if (flowBlocks_.empty() || (in.op == Op::ENDREP ? flowBlocks_.back() != Op::REP
++                                                           : flowBlocks_.back() == Op::REP))
++                failAt(pos, "mismatched flow block terminator");
++            flowBlocks_.pop_back();
++        }
++    }
++
+     Kind kind_;
+     Lexer lex_;
+     Token tok_;
+@@ -1150,7 +1264,8 @@ private:
+     std::shared_ptr<Body> body_;
+     std::map<std::string, Symbol> symbols_;
+     std::set<std::string> options_;
+-    bool shadow_ = false;
++    std::vector<Op> flowBlocks_;
++    bool shadow_ = false, nvProgram_ = false;
+ };
+ 
+ // ------------------------------------------------------------ GLSL
+@@ -1194,10 +1309,10 @@ public:
+             for (int i = 0; i < Limits::kTexCoords; ++i)
+                 if ((p_.texCoordRead >> i & 1u) && !(o_.pointCoordReplace >> i & 1u)) s += "in vec4 ff_tc" + std::to_string(i) + ";\n";
+             if (p_.fogCoordRead || p_.fog) s += "in float ff_fogCoord;\n";
+-            for (int u = 0; u < Limits::kTextureUnits; ++u)
+-                if (p_.textures[u] != TexTarget::None)
+-                    s += std::string("uniform ") + samplerType(p_.textures[u]) + " ff_tex" + std::to_string(u) + ";\n";
+         }
++        for (int u = 0; u < Limits::kTextureUnits; ++u)
++            if (p_.textures[u] != TexTarget::None)
++                s += std::string("uniform ") + samplerType(p_.textures[u]) + " ff_tex" + std::to_string(u) + ";\n";
+         s += "float arb_pow(float x, float y) { return y == 0.0 ? 1.0 : pow(abs(x), y); }\n"
+              "vec4 arb_lit(vec4 s) {\n"
+              "    float e = clamp(s.w, -128.0, 128.0);\n"
+@@ -1212,6 +1327,8 @@ public:
+         s += "void main() {\n";
+         for (int i = 0; i < b_.temps; ++i) s += "    vec4 t" + std::to_string(i) + " = vec4(0.0);\n";
+         for (int i = 0; i < b_.addresses; ++i) s += "    ivec4 a" + std::to_string(i) + " = ivec4(0);\n";
++        for (int i = 0; i < 2; ++i)
++            if (b_.conditionRegisters & (1u << i)) s += "    vec4 cc" + std::to_string(i) + " = vec4(0.0);\n";
+         for (size_t i = 0; i < b_.arrays.size(); ++i) {
+             const ArrayDecl& a = b_.arrays[i];
+             if (a.range != ArrayDecl::None) continue;
+@@ -1290,6 +1407,7 @@ private:
+             return "ff_tc" + std::to_string(o.index);
+         case Input::FogCoord: return "vec4(ff_fogCoord, 0.0, 0.0, 1.0)";
+         case Input::Position: return "gl_FragCoord";
++        case Input::Facing: return "vec4(gl_FrontFacing ? 1.0 : -1.0, 0.0, 0.0, 1.0)";
+         case Input::None: break;
+         }
+         return "vec4(0.0)";
+@@ -1322,7 +1440,7 @@ private:
+         return "vec4(0.0)";
+     }
+ 
+-    // The operand as a vec4 (swizzled and negated).
++    // The operand as a vec4, applying swizzle, absolute value and sign in that order.
+     std::string vec(const Operand& o) const {
+         const std::string b = base(o);
+         std::string v;
+@@ -1341,12 +1459,14 @@ private:
+             v = "(" + b + ").";
+             for (int i = 0; i < 4; ++i) v += kComp[o.swizzle[i]];
+         }
++        if (o.absolute) v = "abs(" + v + ")";
+         return o.negate ? "(-" + v + ")" : v;
+     }
+ 
+     // The operand's scalar (its replicated component).
+     std::string scalar(const Operand& o) const {
+-        const std::string s = "(" + base(o) + ")." + kComp[o.swizzle[0]];
++        std::string s = "(" + base(o) + ")." + kComp[o.swizzle[0]];
++        if (o.absolute) s = "abs(" + s + ")";
+         return o.negate ? "(-" + s + ")" : s;
+     }
+ 
+@@ -1365,8 +1485,11 @@ private:
+             case TexTarget::Shadow1D: coord = "vec3((" + c + ").x, 0.0, (" + c + ").z)"; break;
+             default: coord = "(" + c + ").xyz"; break;
+             }
+-            const bool bias = in.op == Op::TXB && t != TexTarget::Rect && t != TexTarget::ShadowRect;
+-            r = "texture(" + s + ", " + coord + (bias ? ", (" + c + ").w" : std::string()) + ")";
++            if (in.op == Op::TXL) r = "textureLod(" + s + ", " + coord + ", (" + c + ").w)";
++            else {
++                const bool bias = in.op == Op::TXB && t != TexTarget::Rect && t != TexTarget::ShadowRect;
++                r = "texture(" + s + ", " + coord + (bias ? ", (" + c + ").w" : std::string()) + ")";
++            }
+         }
+         return shadow ? "vec4(vec3(" + r + "), 1.0)" : r;
+     }
+@@ -1379,6 +1502,8 @@ private:
+         case Op::ADD: return vec(s[0]) + " + " + vec(s[1]);
+         case Op::CMP: return "mix(" + vec(s[2]) + ", " + vec(s[1]) + ", lessThan(" + vec(s[0]) + ", vec4(0.0)))";
+         case Op::COS: return rep("cos(" + scalar(s[0]) + ")");
++        case Op::DDX: return "dFdx(" + vec(s[0]) + ")";
++        case Op::DDY: return "dFdy(" + vec(s[0]) + ")";  // Metal row 0 is GL row 0 in this pipeline.
+         case Op::DP3: return rep("dot((" + vec(s[0]) + ").xyz, (" + vec(s[1]) + ").xyz)");
+         case Op::DP4: return rep("dot(" + vec(s[0]) + ", " + vec(s[1]) + ")");
+         case Op::DPH: return rep("dot((" + vec(s[0]) + ").xyz, (" + vec(s[1]) + ").xyz) + (" + vec(s[1]) + ").w");
+@@ -1414,22 +1539,68 @@ private:
+         case Op::SLT: return "vec4(lessThan(" + vec(s[0]) + ", " + vec(s[1]) + "))";
+         case Op::SUB: return "(" + vec(s[0]) + ") - (" + vec(s[1]) + ")";
+         case Op::XPD: return "vec4(cross((" + vec(s[0]) + ").xyz, (" + vec(s[1]) + ").xyz), 0.0)";
+-        case Op::TEX: case Op::TXB: case Op::TXP: return texture(in);
+-        case Op::ARL: case Op::KIL: break;
++        case Op::TEX: case Op::TXB: case Op::TXL: case Op::TXP: return texture(in);
++        case Op::ARL: case Op::KIL: case Op::REP: case Op::ENDREP: case Op::IF: case Op::ELSE: case Op::ENDIF: case Op::BRK:
++            break;
+         }
+         return "vec4(0.0)";
+     }
+ 
++    static std::string condition(const Condition& c) {
++        const char* comparison;
++        switch (c.rule) {
++        case Condition::True: return "bvec4(true)";
++        case Condition::False: return "bvec4(false)";
++        case Condition::EQ: comparison = "equal"; break;
++        case Condition::NE: comparison = "notEqual"; break;
++        case Condition::LT: comparison = "lessThan"; break;
++        case Condition::LE: comparison = "lessThanEqual"; break;
++        case Condition::GT: comparison = "greaterThan"; break;
++        case Condition::GE: comparison = "greaterThanEqual"; break;
++        }
++        std::string tested = "cc" + std::to_string(c.reg) + ".";
++        for (uint8_t component : c.swizzle) tested += kComp[component];
++        return std::string(comparison) + "(" + tested + ", vec4(0.0))";
++    }
++
+     std::string instruction(const Instruction& in) const {
+-        if (in.op == Op::KIL) return "    if (any(lessThan(" + vec(in.src[0]) + ", vec4(0.0)))) discard;\n";
+-        if (in.op == Op::ARL) return "    a" + std::to_string(in.dst.index) + ".x = int(floor(" + scalar(in.src[0]) + "));\n";
++        switch (in.op) {
++        case Op::REP:
++            return "    for (int rep = int(clamp(floor((" + vec(in.src[0]) + ").x), 0.0, 255.0)); rep > 0; --rep) {\n";
++        case Op::ENDREP: case Op::ENDIF: return "    }\n";
++        case Op::ELSE: return "    } else {\n";
++        case Op::IF: return "    if (any(" + condition(in.condition) + ")) {\n";
++        case Op::BRK: return "    if (any(" + condition(in.condition) + ")) break;\n";
++        case Op::KIL: {
++            const std::string test = in.conditionalKill ? condition(in.condition) : "lessThan(" + vec(in.src[0]) + ", vec4(0.0))";
++            return "    if (any(" + test + ")) discard;\n";
++        }
++        case Op::ARL: {
++            std::string body = "int r = int(floor(" + scalar(in.src[0]) + ")); a" + std::to_string(in.dst.index) + ".x = r;";
++            if (in.updateCondition >= 0) body += " cc" + std::to_string(in.updateCondition) + ".x = float(r);";
++            return "    if ((" + condition(in.condition) + ").x) { " + body + " }\n";
++        }
++        default: break;
++        }
++        if (in.condition.rule == Condition::False) return {};
+         std::string v = value(in);
+         if (in.saturate) v = "clamp(" + v + ", 0.0, 1.0)";
+         const Dest& d = in.dst;
+         const std::string m = maskSuffix(d.mask);
+         // Through a temporary: the destination may also be a source.
+         std::string s = "    {\n        vec4 r = " + v + ";\n";
+-        auto masked = [&](const std::string& target) { return "        " + target + "." + m + " = r." + m + ";\n"; };
++        const bool conditional = in.condition.rule != Condition::True;
++        if (conditional) s += "        bvec4 writes = " + condition(in.condition) + ";\n";
++        auto component = [&](const std::string& target, char chan) {
++            const std::string guard = conditional ? std::string("if (writes.") + chan + ") " : "";
++            return "        " + guard + target + " = r." + chan + ";\n";
++        };
++        auto masked = [&](const std::string& target) {
++            if (!conditional) return "        " + target + "." + m + " = r." + m + ";\n";
++            std::string lines;
++            for (char chan : m) lines += component(target + "." + chan, chan);
++            return lines;
++        };
+         switch (d.base) {
+         case Dest::Temp: s += masked("t" + std::to_string(d.index)); break;
+         case Dest::Out:
+@@ -1441,23 +1612,24 @@ private:
+             case Output::BackSecondary: s += masked("ff_backSecondary"); break;
+             case Output::TexCoord: s += masked("ff_tc" + std::to_string(d.index)); break;
+             case Output::FogCoord:
+-                if (d.mask & 1u) s += "        ff_fogCoord = r.x;\n";
++                if (d.mask & 1u) s += component("ff_fogCoord", 'x');
+                 break;
+             case Output::PointSize:
+-                if (d.mask & 1u) s += "        gl_PointSize = r.x;\n";
++                if (d.mask & 1u) s += component("gl_PointSize", 'x');
+                 break;
+             case Output::Color:
+                 if (p_.drawBuffers && (p_.colorOutputs & ~1u)) s += masked("gl_FragData[" + std::to_string(d.index) + "]");
+                 else s += masked("gl_FragColor");
+                 break;
+             case Output::Depth:
+-                if (d.mask & 4u) s += "        gl_FragDepth = r.z;\n";
++                if (d.mask & 4u) s += component("gl_FragDepth", 'z');
+                 break;
+             case Output::None: break;
+             }
+             break;
+         default: break;
+         }
++        if (in.updateCondition >= 0) s += masked("cc" + std::to_string(in.updateCondition));
+         return s + "    }\n";
+     }
+ 
+diff --git a/tests/host/arb_program_tests.cpp b/tests/host/arb_program_tests.cpp
+index 641b093..46c9157 100644
+--- a/tests/host/arb_program_tests.cpp
++++ b/tests/host/arb_program_tests.cpp
+@@ -284,6 +284,58 @@ TEST(arb_shadow_and_draw_buffers_options) {
+     CHECK(!parseString(Kind::Fragment, "!!ARBfp1.0\nTEMP s;\nTEX s, fragment.texcoord, texture, SHADOW2D;\nEND\n")->ok);
+ }
+ 
++TEST(arb_nv_assembly_syntax) {
++    const auto vp = parseString(Kind::Vertex,
++        "!!ARBvp1.0\nOPTION NV_vertex_program3;\n"
++        "MOV result.position, vertex.position;\n"
++        "MUL_SAT result.texcoord[0], vertex.color, vertex.color;\nEND\n");
++    const auto fp = parseString(Kind::Fragment,
++        "!!ARBfp1.0\nOPTION NV_fragment_program2;\nOPTION ARB_draw_buffers;\n"
++        "TEMP value;\nMOVH value, -|fragment.texcoord[0].yyyy|;\n"
++        "RCPH value.x, |value.y|;\n"
++        "MOVR_SAT result.color[1], value;\nEND\n");
++    CHECK(vp->ok);
++    CHECK(fp->ok);
++    if (!vp->ok || !fp->ok) return;
++    CHECK_EQ(fp->colorOutputs, 2u);
++    CHECK(emit(*vp, {}).find("clamp(") != std::string::npos);
++    CHECK(emit(*fp, {}).find("(-abs((ff_tc0).yyyy))") != std::string::npos);
++    CHECK(emit(*fp, {}).find("abs((t0).y)") != std::string::npos);
++    CHECK(links(*vp, *fp));
++    CHECK(!parseString(Kind::Vertex, "!!ARBvp1.0\nOPTION NV_fragment_program2;\nEND\n")->ok);
++    CHECK(!parseString(Kind::Fragment, "!!ARBfp1.0\nMOVH result.color, fragment.color;\nEND\n")->ok);
++}
++
++TEST(arb_nv_derivatives_texture_lod_and_flow) {
++    const auto vp = parseString(Kind::Vertex,
++        "!!ARBvp1.0\nOPTION NV_vertex_program3;\nTEMP sampleColor;\n"
++        "MOV result.position, vertex.position;\n"
++        "TXL sampleColor, vertex.texcoord[0], texture[2], 2D;\n"
++        "COS result.texcoord[0].x, |sampleColor.x|;\n"
++        "SIN result.texcoord[0].y, sampleColor.y;\nEND\n");
++    const auto fp = parseString(Kind::Fragment,
++        "!!ARBfp1.0\nOPTION NV_fragment_program2;\nSHORT TEMP amount;\nLONG TEMP color;\n"
++        "PARAM count = { 3, 0, 0, 0 };\n"
++        "DDXH amount, fragment.position;\nDDY amount.y, fragment.position;\n"
++        "SUBC amount.x, amount, fragment.facing;\n"
++        "IF GT.x;\nTXL color, fragment.texcoord[0], texture[2], 2D;\n"
++        "ELSE;\nREP count;\nADD color, color, amount;\nBRK (LT.x);\nENDREP;\nENDIF;\n"
++        "MOV result.color (GE.x), color;\nMOV result.color (LT.x), amount;\nEND\n");
++    CHECK(vp->ok);
++    CHECK(fp->ok);
++    if (!vp->ok || !fp->ok) return;
++    CHECK(vp->textures[2] == TexTarget::T2D);
++    CHECK(fp->textures[2] == TexTarget::T2D);
++    CHECK(emit(*vp, {}).find("textureLod(") != std::string::npos);
++    const std::string glsl = emit(*fp, {});
++    CHECK(glsl.find("dFdy(gl_FragCoord)") != std::string::npos);
++    CHECK(glsl.find("cc0.x = r.x;") != std::string::npos);
++    CHECK(glsl.find("if (any(greaterThan(cc0.xxxx, vec4(0.0)))) {") != std::string::npos);
++    CHECK(links(*vp, *fp));
++    CHECK(!parseString(Kind::Fragment, "!!ARBfp1.0\nOPTION NV_fragment_program2;\nENDREP;\nEND\n")->ok);
++    CHECK(!parseString(Kind::Fragment, "!!ARBfp1.0\nOPTION NV_fragment_program2;\nBRK;\nEND\n")->ok);
++}
++
+ TEST(arb_vertex_inputs) {
+     // vertex.attrib[0] is the position; other generic attributes are inputs
+     // bound to their index (DrawState::attribFor aliases the arrays).
