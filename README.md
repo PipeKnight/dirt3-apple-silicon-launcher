@@ -139,6 +139,10 @@ Run the tests from a logged-in macOS session so the OpenGL fixture can create a 
 
 </details>
 
+## What's next
+
+I’ll soon be looking at more classic Codemasters games that Feral Interactive brought to the Mac. Stay tuned!
+
 ## License
 
 The launcher and compatibility changes are available under GPL-3.0-or-later. The release includes license notices for mac32 and its bundled dependencies. [Project license](LICENSE)
