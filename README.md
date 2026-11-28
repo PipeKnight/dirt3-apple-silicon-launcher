@@ -85,6 +85,10 @@ The command uses the standalone copy in `/Applications` if present, then checks 
 
 See the [performance plan](PERFORMANCE.md) for the Apple M4 results and the tests planned for frame pacing, thread scheduling and alternate renderers.
 
+## Build a launcher for another game
+
+Follow the [porting guide](PORTING-GUIDE.md) from the first mac32 launch through ABI debugging, a complete play test and packaging.
+
 ## Build from source
 
 Run these commands from the repository root on an Apple silicon Mac with Xcode's command-line tools installed. The release was built with the macOS 26.2 SDK and a macOS 15 deployment target. The temporary build path keeps spaces out of the paths passed to the guest compiler.
