@@ -150,6 +150,10 @@ Colin McRae Rally redirected its output to Unity's Player log when the configura
 
 The same player used a conservative garbage collector that asks Mach for the register state and guest stack of suspended i386 threads. The host returned only the x86-64 state. The bridge reconstructed the guest state for threads executing i386 code and preserved access to the guest frame when a thread was inside a native call. Test both paths with an i386 fixture before trying the game. Once the menu worked, loading a stage exposed a separate C++ calling-convention bug. The game expected `std::string::substr` to pop the hidden result pointer, as the old Darwin i386 ABI did. Comparing the caller's stack adjustment with the replacement's return instruction located the mismatch. A C++ fixture returning the string by value exercised the same convention.
 
+### Trace network callbacks after the title screen
+
+Borderlands: The Pre-Sequel rendered its title screen and finished enumerating DLC, then stopped at **Downloading updates**. The game used a separate Gearbox HTTP request at that point. Trace the engine's title-screen callbacks to identify the request, then capture the URL-loading error and verify the corresponding completion handler. Here the native connection reported `NSURLErrorDomain/-1022` because the old request used HTTP and the new host enforced App Transport Security. The publisher's endpoint supported HTTPS. Upgrading the request for that exact host and delegate allowed the original completion callback to return the game to its main menu. [Apple on App Transport Security](https://developer.apple.com/documentation/security/preventing-insecure-network-connections)
+
 ## 4. Support multiple editions and builds
 
 Identify the storefront edition and the executable build independently. In DiRT 3, both copies use the same bundle identifier, but their data layout, startup routines and store dependencies differ.
