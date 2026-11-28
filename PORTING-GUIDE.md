@@ -99,7 +99,7 @@ For a suspected allocator or graphics problem, trace just those symbol fragments
 
 For a guest return address, find the loaded image whose range contains it, then subtract that image's reported slide. For example, `0x2040bb01 - 0x20400000 = 0xbb01`. This gives the Mach-O virtual address. Inspect the instructions immediately before it in the image's i386 slice with Ghidra, REA or `xcrun llvm-objdump --macho --arch=i386 --disassemble "$executable"` when the caller belongs to the main executable.
 
-Compare what the instructions pass and consume with the legacy declaration and the host signature. Start in mac32's `src/` bridge tables. The upstream contributor guide shows when to generate a binding, use a generic signature, or write an explicit conversion for things like by-value structs and callbacks. Keep broadly applicable bridge fixes separate from game-specific changes. Edit a separate checkout of the same revision, and repeat both `make` invocations with the same SDK after each change. For in-memory game fixes, verify every required instruction sequence before writing and stop with a clear message if it does not match. Keep the original bundle intact and record its hash to identify the copy you tested. [mac32 contributor guide](https://github.com/Shagulka/mac32/blob/dcfed5b9ad1ca1356bddd39ac6a26e564d536c28/CONTRIBUTING.md)
+Compare what the instructions pass and consume with the legacy declaration and the host signature. Start in mac32's `src/` bridge tables. The upstream contributor guide shows when to generate a binding, use a generic signature, or write an explicit conversion for things like by-value structs and callbacks. Keep broadly applicable bridge fixes separate from game-specific changes. Edit a separate checkout of the same revision, and repeat both `make` invocations with the same SDK after each change. [mac32 contributor guide](https://github.com/Shagulka/mac32/blob/dcfed5b9ad1ca1356bddd39ac6a26e564d536c28/CONTRIBUTING.md)
 
 ### Worked example: turn a crash into an i386 test
 
@@ -118,7 +118,34 @@ The log records each call to `_snprintf`. The pinned upstream build exits with s
 
 Other DiRT 3 failures required different fixes. An early Objective-C method passed a C++ object by value and could stay entirely on the guest side. An OpenGL query had to use the active context profile. A repeated Steam restart prompt came from reading the wrong language preferences. Each case has a different failing boundary even though all three could prevent startup. [Objective-C failure](findings.md#runtime-results) · [OpenGL fixture](tests/gl_profiles_i386.c) · [Steam language diagnosis](findings.md#repeated-steam-language-restart-prompt)
 
-## 4. Prove the game is playable from the command line
+## 4. Support multiple editions and builds
+
+Identify the storefront edition and the executable build independently. In DiRT 3, both copies use the same bundle identifier, but their data layout, startup routines and store dependencies differ.
+
+| DiRT 3 Mac edition | Version and build | Installation and launch |
+| --- | --- | --- |
+| Standalone | `1.0 (85186.17625.4091)` | Game data is inside the bundle under `Contents/Resources/Data`. This copy has no bundled Steam API library. |
+| Steam | `1.0.3 (92701.18470.3)` | `Dirt3Data` sits beside the app. The bundled `libsteam_api.dylib` talks to the running Steam client. Select the Mac `.app` even though the install also contains a Windows executable. |
+
+### When someone reports a new build
+
+1. **Identify the copy and reproduce its launch.** Ask for the store, version and build number, architecture, and a relevant excerpt from the session log. Record a SHA-256 for each executable sample you investigate so you can reproduce the comparison. Check the bundle ID, binary architecture and game-specific resources before choosing the launch path. Test with the original directory layout, store client and arguments. Existing bundle IDs and version strings can be shared across different binaries. [DiRT 3 inspection command](README.md#troubleshooting) · [Launcher validation](launcher/Launcher.swift)
+2. **Check what the existing runtime actually supports.** Start with a dependency report and inspect the relevant i386 code and bundled libraries. DiRT 3 briefly required an exact executable hash. It now validates the expected instructions and nearby context at the locations it needs to patch. A changed full-file hash can still match an existing profile. Changing only the Steam executable's Mach-O UUID kept the profile match in a controlled test. Changing an instruction at a required site caused the runtime to stop before guest initializers. [Steam build investigation](findings.md#steam-103-mac-build)
+3. **Add a profile when the code or layout changes.** Find the same behavior in the new disassembly, inspect its callers and any referenced data, and confirm the ABI and control flow again. Store the offsets relative to the relevant Mach-O section and check the new expected instructions inside the loaded section's bounds. A profile should match every required site before applying its startup edits. Check optional hooks independently and leave that feature off if its own checks fail. Keep the installed binaries untouched and make any edits in memory. [DiRT 3 profile table and matching code](patches/mac32-startup-memory.patch) · [Optional motion and rumble checks](patches/mac32-display-and-dualsense.patch)
+4. **Test acceptance and rejection.** Launch each known build and confirm the selected profile in the log. Test an unknown or deliberately non-matching disposable copy and confirm that the launcher gives a clear error when a required patch is unavailable. DiRT 3 reports exit status `78` as an unmatched compatibility profile. An import report alone cannot verify this launch behavior. Repeat the play and save checkpoints below before adding a build to the supported list. [Launcher status handling](launcher/Launcher.swift)
+
+The Steam build needed a second version-packing fix and its own addresses. It also needed the original Steamworks method order to list existing saves. A match at the game's patch sites still leaves store integration, localization and persistence to verify. [Steam build investigation](findings.md#steam-103-mac-build) · [Steam save diagnosis](findings.md#steam-profile-loading)
+
+For a DiRT 3 sample, run these commands from this repository with the bundle path in `app` and the patched runtime in `engine`. The check prints the selected profile when it matches and reports imports without starting guest code.
+
+```sh
+engine="/absolute/path/to/patched/Mac32.app/Contents/MacOS/mac32"
+python3 probe.py inspect --app "$app"
+python3 probe.py check --app "$app" --engine "$engine" > "$build_dir/profile-check.log" 2>&1
+grep -F 'DiRT 3 compatibility profile:' "$build_dir/profile-check.log"
+```
+
+## 5. Prove the game is playable from the command line
 
 Work through checkpoints in order. Each checkpoint only counts after observing the original game perform it.
 
@@ -130,9 +157,20 @@ Work through checkpoints in order. Each checkpoint only counts after observing t
 | Save and restart | Save with a disposable profile, quit, launch a fresh process, load the save and verify the previous progress. |
 | Editions | Repeat with every distribution you plan to support. Check Steam account, save storage, language and library path independently. Test with the defaults and after restarting with changed settings. |
 
-With DiRT 3, we completed a Finland rally and reloaded its saved profile before packaging the first Mac app. Steam support came later and had a separate save-loading fix. The issue was traced to the order of methods in the older Steamworks interface. Keep the game's store client and ownership checks on their original path. [First completed rally](findings.md#game-engine-startup) · [First command-line launcher commit](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/commit/7161784f5d2aa9f8dc8d185b4c47a3d69d4c7105) · [Steam saves](findings.md#steam-profile-loading)
+With DiRT 3, we completed a Finland rally and reloaded its saved profile before packaging the first Mac app. Keep the game's store client and ownership checks on their original path. [First completed rally](findings.md#game-engine-startup) · [First command-line launcher commit](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/commit/7161784f5d2aa9f8dc8d185b4c47a3d69d4c7105)
 
-## 5. Add the native launcher around the working command
+### Regression checks from DiRT 3
+
+| What broke | What to check on another game or build |
+| --- | --- |
+| False installation errors and empty launcher labels | Try repeated launches with existing preferences and a clean test profile. Check the game's actual resource path and the mapped image addresses before concluding that a file is missing. DiRT 3 sometimes corrupted the localization path even when the files were present. [Resource lookup](findings.md#intermittent-resource-lookup-at-startup) · [Legacy options window](findings.md#webkit-launcher) |
+| Slow or stalled startup | Time **Play** to the first interactive screen over multiple runs. Separate initialization, videos and thread waits. Skipping DiRT 3's videos saved time, while a separate stall was observed before video playback. [Startup measurements](findings.md#time-to-the-title-screen) |
+| Saves disappeared and a language prompt repeated | Load an existing save and a newly written one in fresh processes. Change the storefront language, finish any normal restart and verify that the following run uses the saved language. Test a storefront library outside the default directory if you intend to support it. [Steam saves](findings.md#steam-profile-loading) · [Steam language](findings.md#repeated-steam-language-restart-prompt) |
+| Resolution list was empty and the benchmark sometimes stalled | Test windowed and full-screen modes, resolution changes, refresh-rate reporting and confirmation or rollback on a HiDPI display. Verify driver context and display mode enumeration. For performance, require a completed run and compare the settings the game actually used. [Display modes](findings.md#retina-display-modes-and-fps-overlay) · [Aspen measurements](findings.md#frame-pacing-in-the-aspen-benchmark) |
+| Controllers were ignored, or input worked while rumble and trigger effects failed | Test USB and Bluetooth separately. Check title-screen input, driving, physical feedback, pause and reconnect. Check that effects clear when leaving a race or quitting. DiRT 3 uses a common macOS Game Controller input profile for modern controllers and needed distinct fixes for some devices and transports. [Gamepad support](README.md#gamepads) · [DualSense investigation](findings.md#dualsense-output) · [Stadia vibration](README.md#google-stadia-controller) |
+| The pointer was unavailable and the overlay covered the quit dialog | With the gamepad active, move the pointer and switch windows. Verify the overlay around focus changes and quit confirmation. Relaunch the launcher and check that the last session log is still reachable. [Pointer fix](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/commit/b79f6186495010c55634f02bae36924c1a123aac) · [Quit-dialog fix](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/commit/2107f5d35adfe6517f8f2bfd146a6a15e2af4686) · [Session logs](README.md#troubleshooting) |
+
+## 6. Add the native launcher around the working command
 
 For a local Finder shortcut, try `"$runtime/bin/mac32" wrap "$app"`. It creates an app in `~/Applications/mac32` that points to your existing runtime and installation. For distribution, bundle the helper and carry over the working command's full launch contract.
 
@@ -141,7 +179,7 @@ For a local Finder shortcut, try `"$runtime/bin/mac32" wrap "$app"`. It creates 
 - **Reuse the game's existing startup path.** DiRT 3's original WebKit options window was unreliable. The native launcher selects Feral's existing direct-start path, using a build-checked override in memory. If the target already launches cleanly, a basic mac32 wrapper may be enough. [DiRT 3 direct launch](findings.md#direct-launch) · [mac32 wrap](https://github.com/Shagulka/mac32#use-it)
 - **Add options after gameplay works.** For DiRT 3, window mode, startup video skipping, controller feedback and the performance overlay were separate changes. Measure launch time or frame pacing against a repeatable baseline before making optimization claims. [Startup timings](findings.md#time-to-the-title-screen) · [Performance plan](PERFORMANCE.md)
 
-## 6. Package and test the download
+## 7. Package and test the download
 
 Bundle the launcher, runtime, required guest libraries and license notices. Keep the runtime's expected directory layout, including the `guest` libraries beside the runtime executable. The player supplies the original game and store libraries. Publish the matching launcher and patched runtime sources under their applicable licenses, along with build instructions and checksums. Sign the nested components before the outer macOS app. [Build instructions](README.md#build-from-source) · [DiRT 3 packaging script](launcher/package.sh)
 

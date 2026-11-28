@@ -87,7 +87,7 @@ See the [performance plan](PERFORMANCE.md) for the Apple M4 results and the test
 
 ## Build a launcher for another game
 
-Follow the [porting guide](PORTING-GUIDE.md) from the first mac32 launch through ABI debugging, a complete play test and packaging.
+Follow the [porting guide](PORTING-GUIDE.md) from the first mac32 launch through ABI debugging, support for multiple game builds, play testing and packaging.
 
 ## Build from source
 
