@@ -357,6 +357,21 @@ and when closing an active controller on process exit.
 
 Audible audio, controller input and frame pacing still need verification.
 
+### Repeated Steam language restart prompt
+
+The Steam Mac build `92701.18470.3` compares the current localization
+against its Steam language during startup. If they differ, it saves the
+selected language as `AppleLanguages` in the mac32 application's preferences
+and shows Feral's manual relaunch dialog. In a local reproduction with
+Steam reporting French and macOS preferring English, the old runtime showed
+the same prompt twice even though its preferences already contained `fr`.
+
+The language bridge passes the application's saved preference explicitly
+when DiRT 3 asks Core Foundation to choose a localization. The game's
+normal restart applies a newly selected Steam language on the next run.
+The default Core Foundation lookup still handles missing or invalid
+application preferences.
+
 ### Intermittent resource lookup at startup
 
 The failing run selected the same language as the successful run. The game

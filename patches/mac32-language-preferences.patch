@@ -1,0 +1,55 @@
+--- a/src/apple.m
++++ b/src/apple.m
+@@ -459,6 +459,33 @@
+ static int w_CFDictionaryContainsKey(CFDictionaryRef d, const void *k) { return CFDictionaryContainsKey(d, k) ? 1 : 0; }
+ static int w_CFURLGetFileSystemRepresentation(CFURLRef u, uint32_t res, UInt8 *b, int32_t n) { return CFURLGetFileSystemRepresentation(u, res & 0xff, b, n) ? 1 : 0; }
+ static int w_CFPreferencesAppSynchronize(CFStringRef a) { return CFPreferencesAppSynchronize(a) ? 1 : 0; }
++
++CFArrayRef w_CFBundleCopyPreferredLocalizationsFromArray(CFArrayRef localizations)
++{
++	// Feral saves the Steam language as AppleLanguages in the runtime app's
++	// preferences. Core Foundation can still resolve against the host's
++	// language list, so give it the saved preference explicitly for DiRT 3.
++	if (dirt3_version_patch_active() && localizations) {
++		CFPropertyListRef languages = CFPreferencesCopyValue(
++		    CFSTR("AppleLanguages"), kCFPreferencesCurrentApplication,
++		    kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
++		if (languages) {
++			CFArrayRef preference = CFGetTypeID(languages) == CFArrayGetTypeID()
++			    ? (CFArrayRef)languages : NULL;
++			CFIndex count = preference ? CFArrayGetCount(preference) : 0;
++			CFIndex index = 0;
++			while (index < count &&
++			       CFGetTypeID(CFArrayGetValueAtIndex(preference, index)) == CFStringGetTypeID())
++				index++;
++			CFArrayRef result = count && index == count
++			    ? CFBundleCopyLocalizationsForPreferences(localizations, preference) : NULL;
++			CFRelease(languages);
++			if (result) return result;
++		}
++	}
++	return CFBundleCopyPreferredLocalizationsFromArray(localizations);
++}
++
+ static int32_t w_CFRunLoopRunInMode(CFStringRef m, double s, uint32_t once) { return CFRunLoopRunInMode(m, s, once & 0xff); }
+ static CFStringRef w_CFStringCreateWithBytes(CFAllocatorRef a, const UInt8 *b, int32_t n, uint32_t e, uint32_t ext)
+ { return CFStringCreateWithBytes(a, b, n, e, ext & 0xff); }
+--- a/src/cf_thunks.c
++++ b/src/cf_thunks.c
+@@ -5,6 +5,7 @@
+ #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+ 
+ extern CFURLRef w_CFBundleCopyResourceURL(CFBundleRef, CFStringRef, CFStringRef, CFStringRef);
++extern CFArrayRef w_CFBundleCopyPreferredLocalizationsFromArray(CFArrayRef);
+ 
+ 
+ static struct hfn cf[] = {
+@@ -69,7 +70,7 @@
+ 	G("_CFBundleCopyLocalizationsForURL", CFBundleCopyLocalizationsForURL, "o:o"),
+ 	G("_CFBundleCopyLocalizedString", CFBundleCopyLocalizedString, "o:oooo"),
+ 	G("_CFBundleCopyLocalizedStringForLocalizations", CFBundleCopyLocalizedStringForLocalizations, "o:ooooo"),
+-	G("_CFBundleCopyPreferredLocalizationsFromArray", CFBundleCopyPreferredLocalizationsFromArray, "o:o"),
++	G("_CFBundleCopyPreferredLocalizationsFromArray", w_CFBundleCopyPreferredLocalizationsFromArray, "o:o"),
+ 	G("_CFBundleCopyPrivateFrameworksURL", CFBundleCopyPrivateFrameworksURL, "o:o"),
+ 	G("_CFBundleCopyResourceURL", w_CFBundleCopyResourceURL, "o:oooo"),
+ 	G("_CFBundleCopyResourceURLForLocalization", CFBundleCopyResourceURLForLocalization, "o:ooooo"),

@@ -60,6 +60,8 @@ During a terminal-damage slow-motion sequence, the handle actuators sustain a vi
 
 ## Troubleshooting
 
+After a Steam game-language change, DiRT 3 may ask you to quit and relaunch once. Click **Quit**, then press **Play** in DiRT 3 Launcher again to use the saved language.
+
 If the launcher reports that no compatibility profile matched, check the build of your Mac copy. Profile selection checks the instructions the runtime needs to patch. Executables with different SHA-256 hashes can use the same profile when those instructions match.
 
 **Show Logs** reveals the latest launcher session log in Finder, even after reopening the launcher. When [reporting an issue](https://github.com/PipeKnight/dirt3-apple-silicon-launcher/issues), include your Mac model, macOS version, game edition and build number. Share relevant log lines after removing account identifiers and personal paths.
@@ -101,6 +103,7 @@ git -C "$runtime" apply "$PWD/patches/mac32-feral-entrypoint.patch" \
 git -C "$runtime" apply "$PWD/patches/mac32-modern-gamepads.patch"
 git -C "$runtime" apply "$PWD/patches/mac32-gpu-frame-time.patch"
 git -C "$runtime" apply "$PWD/patches/mac32-stadia-rumble.patch"
+git -C "$runtime" apply "$PWD/patches/mac32-language-preferences.patch"
 LLVM="$llvm" "$runtime/tools/get-llvm.sh"
 
 sdk="$(xcrun --sdk macosx --show-sdk-path)"
