@@ -45,7 +45,7 @@ Games from one studio can ship very different Mac ports. Inventory the bundle en
 | Feral bundle with an adjacent data directory | Keep the bundle beside the data. GRID 2 has its Steam library under `Contents/Resources`, whereas DiRT 3 uses `Contents/Frameworks`. A shared engine fix may apply across games, but locate and verify any game-specific patch again. |
 | A Mac wrapper around another engine | Start with the wrapper's Mach-O and keep its relative data paths. DiRT Showdown ships an eON executable and sibling `dirt.vpfs` and `win/` data. Inspect the wrapper's own initialization before deciding if you need a separate path for what it loads. |
 | A Unity player with embedded Mono | Treat the player, bundled Mono library, managed assemblies and native plug-ins as different parts of the same launch. Check each native plug-in's slice. Diagnose Mono startup and managed-to-native calls separately. Colin McRae Rally reached the bundled Mono runtime before its game code could be tested. |
-| A bundle with an additional executable | Verify which executable the bundle opens and follow any child launch into its real working directory. Borderlands: The Pre-Sequel contains a second executable beside its bundle entry point. The first observed failure was still in the main app's WebKit-backed NIB. |
+| A bundle with an additional executable | Verify which executable the bundle opens and trace how it hands off. The Borderlands: The Pre-Sequel launcher calls `execv` to replace itself with a second i386 executable in the same bundle. Re-entering mac32 for that exact executable let its initializers run, while keeping the bundle, arguments and original Steam startup. |
 
 ## 2. Build and run mac32 before writing an interface
 
@@ -103,8 +103,11 @@ For a Steam bundle that needs its App ID in the environment, take the ID from th
 | Native exception or crash inside a bridge | Check pointer width, struct layout, out parameters, return values, callbacks and object lifetimes at the i386 to x86-64 boundary. |
 | Cocoa reports an unknown class while loading a NIB | Check whether that class is registered in the host process as well as listed in the guest's dependencies. Borderlands loaded its NIB further after reusing the native WebKit linkage added for DiRT 3. |
 | Window opens, then stalls | Take a process sample, for example `sample <pid> 5 -file hang.txt` with the runtime's numeric PID. Look for the blocked thread, its expected wake-up and any AppKit work running off the main thread. |
+| CPU stays busy before any game window opens | Look for the repeated guest caller, then walk back to the code waiting for progress. GRID 2 repeatedly waited in Feral's startup file updater because mac32 returned an immediate timeout from its event-queue stub. Routing `ReceiveNextEvent` to native Carbon let it advance to menu initialization. |
 | Repeated tests appear stuck after an earlier crash | Inspect the helper's actual window and the game's own logs as well as runtime stderr. A shared helper bundle identifier can carry macOS window recovery across games. Use a disposable helper identity for clean-start diagnostics and a stable per-title identity when testing persistent settings. |
 | Store dialog or existing save fails to load | Check the original store client's state, the guest's interface version, and where preferences and saves are read and written. Reproduce again in a fresh process. |
+
+If the program needs a CPU feature absent from your runtime, reproduce that requirement in a small standalone test. DiRT Showdown's eON wrapper allocates a non-flat x86 data segment and loads it into `FS`. Rosetta on the test Mac rejected both automatic LDT allocation and an explicit descriptor of that kind. Supporting that path requires segment emulation or another runtime that implements it.
 
 For a suspected allocator or graphics problem, trace just those symbol fragments. Keep the verbose log with image load ranges and slides.
 
