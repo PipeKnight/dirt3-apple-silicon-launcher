@@ -137,6 +137,14 @@ The log records each call to `_snprintf`. The pinned upstream build exits with s
 
 Other DiRT 3 failures required different fixes. An early Objective-C method passed a C++ object by value and could stay entirely on the guest side. An OpenGL query had to use the active context profile. A repeated Steam restart prompt came from reading the wrong language preferences. Each case has a different failing boundary even though all three could prevent startup. [Objective-C failure](findings.md#runtime-results) · [OpenGL fixture](tests/gl_profiles_i386.c) · [Steam language diagnosis](findings.md#repeated-steam-language-restart-prompt)
 
+### Follow the runtime past the first window
+
+- Separate the storefront bootstrap, manufacturer dialogs, rendering, and the game loop. In GRID 2, the original Steam copy reached a Feral information dialog that constructed a custom Carbon window. Rendering the same title, body and choices through a compatible standard alert let testing continue. Its pre-game options window and OpenGL game window still needed independent handling. Apple's Carbon guide maps the 32-bit Window Manager and HIView APIs to Cocoa equivalents. [Apple's HIToolbox migration guide](https://developer.apple.com/library/archive/documentation/Carbon/Conceptual/Carbon64BitGuide/HIToolboxChanges/HIToolboxChanges.html)
+- Correlate the last call, thread stack and video output when a launch stays alive. GRID 2's startup waited in `CUpdatingFile::GetFile` while the compatibility runtime returned a timeout for every Carbon event poll. Sampling the busy thread exposed the wait. Forwarding the event queue for that title let startup proceed to menu initialization.
+- Check weak imports when a guest jumps to address zero. A dependency report can mark a missing weak import without a loader error. Follow the return address back to the import stub. GRID 2 called `glMapBufferRange` while updating its front end, so the bridge needed to mirror the native mapping in guest-addressable memory. For explicit flushes, copy the specified range before calling the driver.
+
+- Test 3D gameplay even after a menu renders. GRID 2 could draw its garage and show the track introduction while Apple's OpenGL driver repeatedly lost its connection to the Metal compiler. The compiler service crash report identified tessellation shader input. Changing Cloth and Water to Low in the game's advanced graphics options disabled their tessellation and let the same track reach live gameplay. In a similar case, sample the render thread and check crash reports for helper processes as well as the game itself.
+
 ## 4. Support multiple editions and builds
 
 Identify the storefront edition and the executable build independently. In DiRT 3, both copies use the same bundle identifier, but their data layout, startup routines and store dependencies differ.
