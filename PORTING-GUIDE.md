@@ -36,6 +36,17 @@ For a universal binary, try `arm64` first, then `x86_64`, then `i386` among the 
 
 The Steam installation of DiRT 3 contains both Feral's Mac executable and a Windows executable named `dirt3_game.exe`. Its Mac bundle needs the adjacent `Dirt3Data` directory. [DiRT 3 Steam layout](findings.md#steam-103-mac-build) · [Apple on 32-bit apps](https://support.apple.com/en-us/103076)
 
+### Identify the Mac port's startup code
+
+Games from one studio can ship very different Mac ports. Inventory the bundle entry point, search paths, adjacent game data and any second executable or bundled runtime. This determines how far a direct launch of the main Mach-O will take you.
+
+| What the installation contains | Start here |
+| --- | --- |
+| Feral bundle with an adjacent data directory | Keep the bundle beside the data. GRID 2 has its Steam library under `Contents/Resources`, whereas DiRT 3 uses `Contents/Frameworks`. A shared engine fix may apply across games, but locate and verify any game-specific patch again. |
+| A Mac wrapper around another engine | Start with the wrapper's Mach-O and keep its relative data paths. DiRT Showdown ships an eON executable and sibling `dirt.vpfs` and `win/` data. Inspect the wrapper's own initialization before deciding if you need a separate path for what it loads. |
+| A Unity player with embedded Mono | Treat the player, bundled Mono library, managed assemblies and native plug-ins as different parts of the same launch. Check each native plug-in's slice. Diagnose Mono startup and managed-to-native calls separately. Colin McRae Rally reached the bundled Mono runtime before its game code could be tested. |
+| A bundle with an additional executable | Verify which executable the bundle opens and follow any child launch into its real working directory. Borderlands: The Pre-Sequel contains a second executable beside its bundle entry point. The first observed failure was still in the main app's WebKit-backed NIB. |
+
 ## 2. Build and run mac32 before writing an interface
 
 Use a logged-in macOS desktop session. Install the Xcode Command Line Tools with `xcode-select --install` if `xcrun --sdk macosx --show-sdk-path` fails. Run `/usr/bin/arch -x86_64 /usr/bin/true` to check that Rosetta can start an Intel process. If macOS reports a missing executable architecture, install Rosetta with `softwareupdate --install-rosetta` on a supported macOS version and repeat the check. The runtime's self-test below verifies that this particular build can also run i386 code. [Apple's Rosetta instructions](https://support.apple.com/en-us/102527)
@@ -79,15 +90,20 @@ tail -n 60 "$build_dir/startup.log"
 
 The launch command stays attached until the game quits. You can follow the log from another Terminal. Record the Mac model, OS version, SDK version, runtime revision, game build and last milestone. Weak imports, unused code and plug-ins loaded later can make the import inventory differ from what you see at launch. Use the runtime log to identify the first failure that blocks the next milestone. [Pinned mac32 usage and troubleshooting](https://github.com/Shagulka/mac32/blob/dcfed5b9ad1ca1356bddd39ac6a26e564d536c28/README.md#use-it)
 
+For a Steam bundle that needs its App ID in the environment, take the ID from the installed game's Steam manifest or its official store entry. Pass `SteamAppId` and `SteamGameId` only to that launch process while Steam is signed in. Keep startup options and extra library directories per title. Test the original runtime and a patched build separately to see which shared fixes carry over.
+
 ## 3. Fix the first observed failure and retest
 
 | First symptom | Where to look |
 | --- | --- |
 | The self-test fails | Check Rosetta, host and guest architectures, build output and the selected SDK. Fix the runtime setup before changing any game code. |
+| The loader fails to map the executable | Inspect segment protections, file sizes and preferred virtual addresses using `otool -l`. DiRT Showdown has an inaccessible zero-fill region from address zero called `EON_RESERVE`. Recognizing it as a reservation let mac32 map the executable while leaving the region inaccessible. |
 | A library or resource is missing | Check the path named in the log, the working directory, sibling data, Mach-O search paths and the missing library's architecture. An error during a dependency check can interrupt the inventory before it is complete. |
 | `unimplemented function _Name` | Locate the calling image and inspect the guest's use of that API. Implement the part of its contract the caller relies on and cover it with a fixture. |
 | Native exception or crash inside a bridge | Check pointer width, struct layout, out parameters, return values, callbacks and object lifetimes at the i386 to x86-64 boundary. |
+| Cocoa reports an unknown class while loading a NIB | Check whether that class is registered in the host process as well as listed in the guest's dependencies. Borderlands loaded its NIB further after reusing the native WebKit linkage added for DiRT 3. |
 | Window opens, then stalls | Take a process sample, for example `sample <pid> 5 -file hang.txt` with the runtime's numeric PID. Look for the blocked thread, its expected wake-up and any AppKit work running off the main thread. |
+| Repeated tests appear stuck after an earlier crash | Inspect the helper's actual window and the game's own logs as well as runtime stderr. A shared helper bundle identifier can carry macOS window recovery across games. Use a disposable helper identity for clean-start diagnostics and a stable per-title identity when testing persistent settings. |
 | Store dialog or existing save fails to load | Check the original store client's state, the guest's interface version, and where preferences and saves are read and written. Reproduce again in a fresh process. |
 
 For a suspected allocator or graphics problem, trace just those symbol fragments. Keep the verbose log with image load ranges and slides.
@@ -173,6 +189,8 @@ With DiRT 3, we completed a Finland rally and reloaded its saved profile before 
 ## 6. Add the native launcher around the working command
 
 For a local Finder shortcut, try `"$runtime/bin/mac32" wrap "$app"`. It creates an app in `~/Applications/mac32` that points to your existing runtime and installation. For distribution, bundle the helper and carry over the working command's full launch contract.
+
+When supporting several games, keep discovery, launch status and logging in shared code. Keep the original bundle ID, store App ID, working directory, extra library paths, entry point and tested builds with each title. Give each title's helper a distinct bundle identifier so macOS application preferences and saved window state are isolated. Since changing the helper's Info.plist invalidates its signature, sign the assembled helper and its nested libraries after setting that identity. Share runtime bridges where the API contract is the same. Keep game-specific in-memory edits and optional features on their verified profiles. A shared launcher still needs independent play and save tests for each title.
 
 - **Find and validate the game.** Start with one location and a **Choose Game…** button. Read the bundle metadata, validate the executable and let the runtime check the compatibility profile. Pass paths and arguments directly so games in Steam libraries with spaces work.
 - **Launch the runtime as a child process.** In Swift, set `Process.executableURL` to the helper binary and populate `arguments`, `currentDirectoryURL` and any required environment variables from the tested CLI launch. The GUI can be arm64 and mac32 can be x86-64 because each runs in its own process. Keep the helper in a proper app bundle for the game window and macOS app identity. Capture stdout, stderr and exit status to a per-session log, and keep **Show Logs** available afterward. [Launcher source](launcher/Launcher.swift)
